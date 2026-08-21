@@ -103,12 +103,25 @@ export type ClickOffset = {
   y: number;
 };
 
+export type TemplateFolder = {
+  id: string;
+  name: string;
+  parentId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type TemplateDefinition = {
   id: string;
   name: string;
   notes?: string;
   app?: string;
   appZoom?: string;
+  folderId?: string | null;
+  tags?: string[];
+  windowTitle?: string;
+  matchHotspot?: TemplateRect;
+  enabled?: boolean;
   resolution: { width: number; height: number };
   scaleFactor: number;
   clickOffset: ClickOffset;
@@ -124,6 +137,10 @@ export type TemplateCreatePayload = {
   notes?: string;
   app?: string;
   appZoom?: string;
+  folderId?: string | null;
+  tags?: string[];
+  windowTitle?: string;
+  matchHotspot?: TemplateRect;
   resolution: { width: number; height: number };
   scaleFactor: number;
   clickOffset: ClickOffset;
@@ -134,6 +151,7 @@ export type TemplateCreatePayload = {
 
 export type TemplateUpdatePatch = Partial<Omit<TemplateCreatePayload, 'imageDataUrl'>> & {
   imageDataUrl?: string;
+  enabled?: boolean;
 };
 
 export const defaultWorkflowDocument = (): WorkflowDocument => ({
@@ -185,6 +203,160 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
       return [];
   }
 };
+
+// ===== YOLO 训练模块 =====
+
+export type YoloClassDefinition = {
+  id: string;
+  name: string;
+  color: string;
+};
+
+export type YoloBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type YoloAnnotation = {
+  id: string;
+  classId: string | null;
+  box: YoloBox;
+};
+
+export type YoloImage = {
+  id: string;
+  fileName: string;
+  file: string;
+  width: number;
+  height: number;
+  createdAt: number;
+};
+
+export type YoloDataset = {
+  id: string;
+  name: string;
+  notes?: string;
+  imageCount: number;
+  annotatedCount: number;
+  classCount: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type YoloModelMetrics = {
+  precision: number;
+  recall: number;
+  mAP50: number;
+  mAP50_95: number;
+};
+
+export type YoloModelArtifacts = {
+  confusionMatrix?: string;
+  prCurve?: string;
+};
+
+export type YoloModel = {
+  id: string;
+  name: string;
+  baseModel: string;
+  datasetId: string;
+  datasetName: string;
+  epochs: number;
+  imageSize: number;
+  batch: number;
+  file: string;
+  sizeBytes: number;
+  metrics: YoloModelMetrics | null;
+  createdAt: number;
+  isActive: boolean;
+  /** 绝对路径（仅 list 时填充，供识别节点使用） */
+  path?: string;
+  /** 训练产物文件（相对 models/<id>/ 目录） */
+  artifacts?: YoloModelArtifacts | null;
+  /** 产物绝对路径（仅 list 时填充） */
+  artifactPaths?: YoloModelArtifacts | null;
+};
+
+export type YoloAugmentConfig = {
+  hsvH: number;
+  hsvS: number;
+  hsvV: number;
+  degrees: number;
+  translate: number;
+  scale: number;
+  shear: number;
+  perspective: number;
+  flipud: number;
+  fliplr: number;
+  mosaic: number;
+  mixup: number;
+  copyPaste: number;
+  erasing: number;
+  cropFraction: number;
+};
+
+export type YoloTrainConfig = {
+  model: string;
+  epochs: number;
+  batch: number;
+  imageSize: number;
+  lr0: number;
+  lrf: number;
+  momentum: number;
+  weightDecay: number;
+  warmupEpochs: number;
+  patience: number;
+  device: string;
+  workers: number;
+  seed: number;
+  deterministic: boolean;
+  splitTrain: number;
+  splitVal: number;
+  augment: YoloAugmentConfig;
+};
+
+export type YoloEpochMetrics = {
+  boxLoss: number;
+  clsLoss: number;
+  dflLoss: number;
+  precision: number;
+  recall: number;
+  mAP50: number;
+  mAP50_95: number;
+};
+
+export type YoloTrainingEvent =
+  | { t: 'start'; jobId: string; totalEpochs: number; message?: string }
+  | { t: 'epoch'; epoch: number; totalEpochs: number; lr: number; metrics: YoloEpochMetrics }
+  | { t: 'progress'; epoch: number; percent: number; message: string }
+  | { t: 'log'; level: 'info' | 'warn' | 'error' | 'debug'; message: string }
+  | { t: 'done'; modelPath: string; sizeBytes: number; metrics: YoloModelMetrics | null; artifacts?: YoloModelArtifacts }
+  | { t: 'error'; message: string };
+
+export type YoloEnvInfo = {
+  pythonAvailable: boolean;
+  pythonPath: string | null;
+  pythonVersion: string | null;
+  ultralytics: string | null;
+  torch: string | null;
+  cuda: boolean;
+  mps: boolean;
+  device: string;
+};
+
+export type YoloTrainingState = {
+  running: boolean;
+  jobId: string | null;
+};
+
+export const YOLO_CLASS_COLORS = [
+  '#78a9ff', '#6ae3a1', '#f7c948', '#ff8f8f', '#c585ff',
+  '#5ad5ff', '#ffb86b', '#ff6b9d', '#9fe870', '#8b9dc9',
+  '#f0a0a0', '#a0d0f0', '#d0a0f0', '#f0d0a0', '#a0f0d0',
+  '#f0a0d0', '#d0f0a0', '#a0d0d0', '#d0a0a0', '#a0a0f0',
+];
 
 export const createDefaultNode = (type: WorkflowNode['type'], index = 1): WorkflowNode => {
   const base = {

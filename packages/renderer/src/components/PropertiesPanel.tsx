@@ -8,6 +8,7 @@ type Props = {
   onChangeNode: (node: WorkflowNode) => void;
   templateVersion: number;
   onOpenTemplateManager: () => void;
+  yoloVersion?: number;
 };
 
 type StrategyKey = 'coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi';
@@ -23,6 +24,7 @@ type LooseStrategy = {
   url?: string;
   apiKey?: string;
   prompt?: string;
+  modelPath?: string;
 };
 
 function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data']>): T {
@@ -48,7 +50,7 @@ export function PropertiesPanel({ node, onChangeNode, templateVersion, onOpenTem
     }
     window.templateAPI
       .list()
-      .then(setTemplates)
+      .then(({ templates }) => setTemplates(templates))
       .catch(() => setTemplates([]));
   }, [templateVersion]);
 
@@ -392,16 +394,30 @@ export function PropertiesPanel({ node, onChangeNode, templateVersion, onOpenTem
                     {strategyKey === 'yolo' && (
                       <>
                         <label>
-                          标签
+                          模型路径
                           <input
-                            value={strategy.label ?? ''}
+                            value={strategy.modelPath ?? ''}
+                            placeholder="在 YOLO 训练中心选择模型"
                             onChange={(e) => {
                               const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], label: e.target.value };
+                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], modelPath: e.target.value };
                               onChangeNode(updateNodeData(node, { strategies: newStrategies }));
                             }}
                           />
                         </label>
+                        <button
+                          type="button"
+                          className="properties-panel__ghost-button"
+                          onClick={async () => {
+                            const model = await window.yoloAPI?.getActiveModel?.();
+                            if (!model) return;
+                            const newStrategies = { ...node.data.strategies };
+                            newStrategies.yolo = { ...newStrategies.yolo, modelPath: model.path, label: newStrategies.yolo.label || '' };
+                            onChangeNode(updateNodeData(node, { strategies: newStrategies }));
+                          }}
+                        >
+                          使用当前 YOLO 模型
+                        </button>
                         <label>
                           阈值
                           <input

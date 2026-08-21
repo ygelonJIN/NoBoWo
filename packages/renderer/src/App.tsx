@@ -8,6 +8,7 @@ import {
 } from '@nobowo/core';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { TemplateManagerModal } from './components/TemplateManagerModal';
+import { YoloManagerModal } from './components/YoloManagerModal';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -137,6 +138,8 @@ export function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [templateVersion, setTemplateVersion] = useState(0);
+  const [yoloManagerOpen, setYoloManagerOpen] = useState(false);
+  const [yoloVersion, setYoloVersion] = useState(0);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [dragging, setDragging] = useState<{ id: string; offset: Point } | null>(null);
@@ -455,7 +458,7 @@ export function App() {
           <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
           <div className="toolbar-tools__title">工具</div>
           <div className="toolbar-tools__actions">
-            <button onClick={() => {}}>YOLO 训练</button>
+            <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
             <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
           </div>
         </div>
@@ -545,6 +548,12 @@ export function App() {
         <TemplateManagerModal
           onClose={() => setTemplateManagerOpen(false)}
           onChanged={() => setTemplateVersion((version) => version + 1)}
+        />
+      )}
+      {yoloManagerOpen && (
+        <YoloManagerModal
+          onClose={() => setYoloManagerOpen(false)}
+          onChanged={() => setYoloVersion((version) => version + 1)}
         />
       )}
     </div>
