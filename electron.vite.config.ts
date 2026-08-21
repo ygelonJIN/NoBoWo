@@ -9,11 +9,21 @@ export default defineConfig({
         input: resolve(__dirname, 'packages/main/src/main.ts'),
       },
     },
+    resolve: {
+      alias: {
+        '@nobowo/core': resolve(__dirname, 'packages/core/src/index.ts'),
+      },
+    },
   },
   preload: {
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'packages/main/src/preload.ts'),
+      },
+    },
+    resolve: {
+      alias: {
+        '@nobowo/core': resolve(__dirname, 'packages/core/src/index.ts'),
       },
     },
   },

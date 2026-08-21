@@ -7,6 +7,7 @@ import {
   type WorkflowNode,
 } from '@nobowo/core';
 import { PropertiesPanel } from './components/PropertiesPanel';
+import { TemplateManagerModal } from './components/TemplateManagerModal';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -134,6 +135,8 @@ export function App() {
   const [clipboardNode, setClipboardNode] = useState<WorkflowNode | null>(null);
   const [isAutosaved, setIsAutosaved] = useState(true);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const [templateVersion, setTemplateVersion] = useState(0);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [dragging, setDragging] = useState<{ id: string; offset: Point } | null>(null);
@@ -449,11 +452,11 @@ export function App() {
           </div>
         </div>
 
-        <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
           <div className="toolbar-tools__title">工具</div>
           <div className="toolbar-tools__actions">
             <button onClick={() => {}}>YOLO 训练</button>
-            <button onClick={() => {}}>模板管理</button>
+            <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
           </div>
         </div>
 
@@ -504,9 +507,8 @@ export function App() {
                 <div className={`workflow-node__strategies workflow-node__strategies--${node.data.executionMode}`}>
                   {(node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi'])
                     .filter((key: string) => (node.data.strategies as any)[key].enabled)
-                    .map((key: string) => {
-                      const num = ({ coords: 1, template: 2, yolo: 3, ocr: 4, cloudApi: 5 } as any)[key];
-                      return <span key={key} className="workflow-node__strategy-badge">{num}</span>;
+                    .map((key: string, index: number) => {
+                      return <span key={key} className="workflow-node__strategy-badge">{index + 1}</span>;
                     })}
                 </div>
               ) : (
@@ -531,7 +533,20 @@ export function App() {
           </div>
         )}
       </div>
-      {selectedNode && <PropertiesPanel node={selectedNode} onChangeNode={updateNode} />}
+      {selectedNode && (
+        <PropertiesPanel
+          node={selectedNode}
+          onChangeNode={updateNode}
+          templateVersion={templateVersion}
+          onOpenTemplateManager={() => setTemplateManagerOpen(true)}
+        />
+      )}
+      {templateManagerOpen && (
+        <TemplateManagerModal
+          onClose={() => setTemplateManagerOpen(false)}
+          onChanged={() => setTemplateVersion((version) => version + 1)}
+        />
+      )}
     </div>
   );
 }

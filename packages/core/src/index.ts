@@ -64,7 +64,7 @@ export type LoopNode = WorkflowNodeBase<'loop', {
 export type RecognizeNode = WorkflowNodeBase<'recognize', {
   strategies: {
     coords: { enabled: boolean; x: number; y: number };
-    template: { enabled: boolean; templatePath?: string; threshold: number };
+    template: { enabled: boolean; templateId?: string; templatePath?: string; threshold: number };
     yolo: { enabled: boolean; modelPath?: string; label?: string; threshold: number };
     ocr: { enabled: boolean; text: string; threshold: number };
     cloudApi: { enabled: boolean; url: string; apiKey: string; prompt: string; threshold: number };
@@ -87,6 +87,53 @@ export type WorkflowDocument = {
   version: 1;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+};
+
+// ===== 模板库 =====
+
+export type TemplateRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type ClickOffset = {
+  x: number;
+  y: number;
+};
+
+export type TemplateDefinition = {
+  id: string;
+  name: string;
+  notes?: string;
+  app?: string;
+  appZoom?: string;
+  resolution: { width: number; height: number };
+  scaleFactor: number;
+  clickOffset: ClickOffset;
+  sourceRect: TemplateRect;
+  imageFile: string;
+  sourceFile?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TemplateCreatePayload = {
+  name: string;
+  notes?: string;
+  app?: string;
+  appZoom?: string;
+  resolution: { width: number; height: number };
+  scaleFactor: number;
+  clickOffset: ClickOffset;
+  sourceRect: TemplateRect;
+  imageDataUrl: string;
+  sourceDataUrl?: string;
+};
+
+export type TemplateUpdatePatch = Partial<Omit<TemplateCreatePayload, 'imageDataUrl'>> & {
+  imageDataUrl?: string;
 };
 
 export const defaultWorkflowDocument = (): WorkflowDocument => ({

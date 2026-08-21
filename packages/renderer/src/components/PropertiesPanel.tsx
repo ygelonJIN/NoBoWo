@@ -1,13 +1,29 @@
-import type { WorkflowNode } from '@nobowo/core';
-import { useState, useCallback, useRef } from 'react';
+import type { RecognizeNode, TemplateDefinition, WorkflowNode } from '@nobowo/core';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CustomSelect } from './CustomSelect';
+import { TemplatePicker } from './TemplatePicker';
 
 type Props = {
   node: WorkflowNode | null;
   onChangeNode: (node: WorkflowNode) => void;
+  templateVersion: number;
+  onOpenTemplateManager: () => void;
 };
 
 type StrategyKey = 'coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi';
+
+type LooseStrategy = {
+  enabled: boolean;
+  x?: number;
+  y?: number;
+  templateId?: string;
+  threshold?: number;
+  label?: string;
+  text?: string;
+  url?: string;
+  apiKey?: string;
+  prompt?: string;
+};
 
 function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data']>): T {
   return {
@@ -19,10 +35,22 @@ function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data'
   };
 }
 
-export function PropertiesPanel({ node, onChangeNode }: Props) {
+export function PropertiesPanel({ node, onChangeNode, templateVersion, onOpenTemplateManager }: Props) {
   const [draggedStrategy, setDraggedStrategy] = useState<StrategyKey | null>(null);
   const [dragOverStrategy, setDragOverStrategy] = useState<StrategyKey | null>(null);
+  const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const dragCounterRef = useRef(0);
+
+  useEffect(() => {
+    if (!window.templateAPI) {
+      setTemplates([]);
+      return;
+    }
+    window.templateAPI
+      .list()
+      .then(setTemplates)
+      .catch(() => setTemplates([]));
+  }, [templateVersion]);
 
   const handleDragStart = useCallback((e: React.DragEvent, strategy: StrategyKey) => {
     setDraggedStrategy(strategy);
@@ -148,7 +176,7 @@ export function PropertiesPanel({ node, onChangeNode }: Props) {
             <CustomSelect
               value={node.data.mode}
               options={[{ value: 'delay', label: '延时' }, { value: 'condition', label: '条件' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as WorkflowNode['data']['mode'] }))}
+              onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'delay' | 'condition' }))}
             />
           </label>
           {node.data.mode === 'delay' ? (
@@ -180,7 +208,7 @@ export function PropertiesPanel({ node, onChangeNode }: Props) {
             <CustomSelect
               value={node.data.regionMode}
               options={[{ value: 'full', label: '全屏' }, { value: 'selected', label: '选区' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { regionMode: v as WorkflowNode['data']['regionMode'] }))}
+              onChange={(v) => onChangeNode(updateNodeData(node, { regionMode: v as 'full' | 'selected' }))}
             />
           </label>
         </section>
@@ -204,7 +232,7 @@ export function PropertiesPanel({ node, onChangeNode }: Props) {
             <CustomSelect
               value={node.data.mode}
               options={[{ value: 'count', label: '次数' }, { value: 'condition', label: '条件' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as WorkflowNode['data']['mode'] }))}
+              onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' }))}
             />
           </label>
           {node.data.mode === 'count' ? (
@@ -243,7 +271,7 @@ export function PropertiesPanel({ node, onChangeNode }: Props) {
 
           
           {(node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi']).map((strategyKey: StrategyKey) => {
-            const strategy = node.data.strategies[strategyKey];
+            const strategy = node.data.strategies[strategyKey] as LooseStrategy;
             const strategyNames: Record<StrategyKey, string> = {
               coords: '坐标回放',
               template: '模板匹配',
@@ -276,8 +304,25 @@ export function PropertiesPanel({ node, onChangeNode }: Props) {
                   type="checkbox"
                   checked={strategy.enabled}
                   onChange={(e) => {
+                    const enabled = e.target.checked;
                     const newStrategies = { ...node.data.strategies };
-                    newStrategies[strategyKey] = { ...newStrategies[strategyKey], enabled: e.target.checked };
+                    switch (strategyKey) {
+                      case 'coords':
+                        newStrategies.coords = { ...newStrategies.coords, enabled };
+                        break;
+                      case 'template':
+                        newStrategies.template = { ...newStrategies.template, enabled };
+                        break;
+                      case 'yolo':
+                        newStrategies.yolo = { ...newStrategies.yolo, enabled };
+                        break;
+                      case 'ocr':
+                        newStrategies.ocr = { ...newStrategies.ocr, enabled };
+                        break;
+                      case 'cloudApi':
+                        newStrategies.cloudApi = { ...newStrategies.cloudApi, enabled };
+                        break;
+                    }
                     onChangeNode(updateNodeData(node, { strategies: newStrategies }));
                   }}
                 />
@@ -312,20 +357,37 @@ export function PropertiesPanel({ node, onChangeNode }: Props) {
                       </div>
                     )}
                     {strategyKey === 'template' && (
-                      <label>
-                        阈值
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          value={strategy.threshold}
-                          onChange={(e) => {
-                            const newStrategies = { ...node.data.strategies };
-                            newStrategies[strategyKey] = { ...newStrategies[strategyKey], threshold: Number(e.target.value) };
-                            onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                          }}
-                        />
-                      </label>
+                      <>
+                        <label>
+                          匹配模板
+                          <TemplatePicker
+                            templates={templates}
+                            value={strategy.templateId}
+                            onChange={(templateId) => {
+                              const newStrategies = { ...node.data.strategies };
+                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], templateId };
+                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
+                            }}
+                          />
+                        </label>
+                        <button className="properties-panel__ghost-button" onClick={onOpenTemplateManager}>
+                          管理模板…
+                        </button>
+                        <label>
+                          阈值
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={strategy.threshold}
+                            onChange={(e) => {
+                              const newStrategies = { ...node.data.strategies };
+                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], threshold: Number(e.target.value) };
+                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
+                            }}
+                          />
+                        </label>
+                      </>
                     )}
                     {strategyKey === 'yolo' && (
                       <>
