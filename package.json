@@ -1,0 +1,33 @@
+{
+  "name": "nobowo-desktop-automation",
+  "private": true,
+  "version": "0.0.0",
+  "main": "out/main/main.js",
+  "workspaces": [
+    "packages/*"
+  ],
+  "packageManager": "npm@10.8.2",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.config.ts",
+    "build": "electron-vite build",
+    "build:web": "vite build --config vite.config.ts",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -b packages/core packages/main packages/renderer",
+    "electron": "electron-vite dev"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.8.5",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^37.2.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.8.3"
+  }
+}

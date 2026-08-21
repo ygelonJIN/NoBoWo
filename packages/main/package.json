@@ -1,0 +1,14 @@
+{
+  "name": "@nobowo/main",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "electron": "^37.2.3"
+  },
+  "main": "dist/main.js"
+}
