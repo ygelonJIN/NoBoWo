@@ -61,13 +61,15 @@ export type LoopNode = WorkflowNodeBase<'loop', {
   conditionText?: string;
 }>;
 
+export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
+
 export type RecognizeNode = WorkflowNodeBase<'recognize', {
   strategies: {
     coords: { enabled: boolean; x: number; y: number };
     template: { enabled: boolean; templateId?: string; templatePath?: string; threshold: number };
-    yolo: { enabled: boolean; modelPath?: string; label?: string; threshold: number };
-    ocr: { enabled: boolean; text: string; threshold: number };
-    cloudApi: { enabled: boolean; url: string; apiKey: string; prompt: string; threshold: number };
+    yolo: { enabled: boolean; modelId?: string; modelPath?: string; classId?: string; label?: string; threshold: number };
+    ocr: { enabled: boolean; text: string; engine?: OcrEngine; threshold: number };
+    cloudApi: { enabled: boolean; profileId?: string; url?: string; apiKey?: string; prompt: string; threshold: number };
   };
   executionMode: 'cascade' | 'parallel';
   strategyOrder: ('coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi')[];
@@ -420,8 +422,8 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
             coords: { enabled: true, x: 0, y: 0 },
             template: { enabled: false, threshold: 60 },
             yolo: { enabled: false, threshold: 60 },
-            ocr: { enabled: false, text: '', threshold: 60 },
-            cloudApi: { enabled: false, url: '', apiKey: '', prompt: '', threshold: 60 },
+            ocr: { enabled: false, text: '', engine: 'auto', threshold: 60 },
+            cloudApi: { enabled: false, prompt: '', threshold: 60 },
           },
           executionMode: 'cascade',
           strategyOrder: ['coords', 'template', 'yolo', 'ocr', 'cloudApi'],

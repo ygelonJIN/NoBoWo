@@ -36,7 +36,10 @@ export function CustomSelect({ value, options, onChange }: Props) {
       <button
         type="button"
         className={`custom-select__trigger ${open ? 'custom-select__trigger--open' : ''}`}
-        onClick={() => setOpen((o) => !o)}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
       >
         <span>{current?.label ?? value}</span>
         <svg className="custom-select__arrow" width="12" height="12" viewBox="0 0 12 12">
@@ -50,7 +53,10 @@ export function CustomSelect({ value, options, onChange }: Props) {
               type="button"
               key={opt.value}
               className={`custom-select__option ${opt.value === value ? 'custom-select__option--active' : ''}`}
-              onClick={() => handleSelect(opt.value)}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleSelect(opt.value);
+              }}
             >
               {opt.label}
             </button>

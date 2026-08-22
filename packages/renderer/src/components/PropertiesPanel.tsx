@@ -1,6 +1,7 @@
-import type { RecognizeNode, TemplateDefinition, WorkflowNode } from '@nobowo/core';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import type { OcrEngine, RecognizeNode, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { CustomSelect } from './CustomSelect';
+import { ModelPicker } from './ModelPicker';
 import { TemplatePicker } from './TemplatePicker';
 
 type Props = {
@@ -9,9 +10,36 @@ type Props = {
   templateVersion: number;
   onOpenTemplateManager: () => void;
   yoloVersion?: number;
+  onOpenYoloManager?: () => void;
 };
 
 type StrategyKey = 'coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi';
+
+const STRATEGY_ORDER: StrategyKey[] = ['coords', 'template', 'yolo', 'ocr', 'cloudApi'];
+
+const STRATEGY_NUMBERS: Record<StrategyKey, number> = {
+  coords: 1,
+  template: 2,
+  yolo: 3,
+  ocr: 4,
+  cloudApi: 5,
+};
+
+const STRATEGY_NAMES: Record<StrategyKey, string> = {
+  coords: '坐标回放',
+  template: '模板匹配',
+  yolo: 'YOLO',
+  ocr: 'OCR',
+  cloudApi: '云端 API',
+};
+
+const OCR_ENGINE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'auto', label: '系统 OCR（自动）' },
+  { value: 'macosVision', label: 'macOS Vision' },
+  { value: 'windowsOcr', label: 'Windows OCR' },
+  { value: 'tesseract', label: 'Tesseract' },
+  { value: 'paddleOcr', label: 'PaddleOCR' },
+];
 
 type LooseStrategy = {
   enabled: boolean;
@@ -21,10 +49,13 @@ type LooseStrategy = {
   threshold?: number;
   label?: string;
   text?: string;
+  engine?: OcrEngine;
   url?: string;
   apiKey?: string;
   prompt?: string;
+  modelId?: string;
   modelPath?: string;
+  profileId?: string;
 };
 
 function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data']>): T {
@@ -37,493 +68,526 @@ function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data'
   };
 }
 
-export function PropertiesPanel({ node, onChangeNode, templateVersion, onOpenTemplateManager }: Props) {
-  const [draggedStrategy, setDraggedStrategy] = useState<StrategyKey | null>(null);
-  const [dragOverStrategy, setDragOverStrategy] = useState<StrategyKey | null>(null);
+export function PropertiesPanel({
+  node,
+  onChangeNode,
+  templateVersion,
+  onOpenTemplateManager,
+  yoloVersion,
+  onOpenYoloManager,
+}: Props) {
+  const [expandedStrategy, setExpandedStrategy] = useState<StrategyKey | null>(null);
+  const [dragUI, setDragUI] = useState<{
+    strategy: StrategyKey;
+    top: number;
+    left: number;
+    width: number;
+    targetIndex: number | null;
+  } | null>(null);
+  const dragRef = useRef<{
+    strategy: StrategyKey;
+    startY: number;
+    startTop: number;
+    startLeft: number;
+    width: number;
+    active: boolean;
+  } | null>(null);
+  const strategiesRef = useRef<HTMLDivElement>(null);
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
-  const dragCounterRef = useRef(0);
+  const [folders, setFolders] = useState<TemplateFolder[]>([]);
 
   useEffect(() => {
     if (!window.templateAPI) {
       setTemplates([]);
+      setFolders([]);
       return;
     }
     window.templateAPI
       .list()
-      .then(({ templates }) => setTemplates(templates))
-      .catch(() => setTemplates([]));
+      .then((data) => {
+        setTemplates(data.templates);
+        setFolders(data.folders);
+      })
+      .catch(() => {
+        setTemplates([]);
+        setFolders([]);
+      });
   }, [templateVersion]);
 
-  const handleDragStart = useCallback((e: React.DragEvent, strategy: StrategyKey) => {
-    setDraggedStrategy(strategy);
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', strategy);
+  const updateStrategy = useCallback(
+    (strategyKey: StrategyKey, patch: Partial<LooseStrategy>) => {
+      if (!node || node.type !== 'recognize') return;
+      const strategies = node.data.strategies as unknown as Record<StrategyKey, LooseStrategy>;
+      const next = {
+        ...strategies,
+        [strategyKey]: { ...strategies[strategyKey], ...patch },
+      };
+      onChangeNode(updateNodeData(node, { strategies: next as unknown as RecognizeNode['data']['strategies'] }));
+    },
+    [node, onChangeNode],
+  );
+
+  const DRAG_THRESHOLD = 6;
+
+  const resolveDropIndex = useCallback((pointerY: number, draggingKey: StrategyKey): number | null => {
+    const container = strategiesRef.current;
+    if (!container || !node || node.type !== 'recognize') return null;
+    const order = node.data.strategyOrder || STRATEGY_ORDER;
+    const cards = Array.from(container.querySelectorAll<HTMLElement>('.strategy-card'))
+      .filter((card) => card.dataset.strategy !== draggingKey);
+    if (cards.length === 0) return 0;
+    for (let index = 0; index < cards.length; index += 1) {
+      const rect = cards[index].getBoundingClientRect();
+      if (pointerY < rect.top + rect.height / 2) {
+        const targetKey = cards[index].dataset.strategy as StrategyKey;
+        return order.filter((key) => key !== draggingKey).indexOf(targetKey);
+      }
+    }
+    return cards.length;
+  }, [node]);
+
+  const handleHeaderPointerDown = useCallback((e: React.PointerEvent, strategyKey: StrategyKey) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('input, button, select, textarea')) return;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Pointer capture may be unavailable in browser-based previews.
+    }
+    const list = strategiesRef.current;
+    const card = e.currentTarget.closest('.strategy-card');
+    if (!list || !card) return;
+    const cardRect = card.getBoundingClientRect();
+    const listRect = list.getBoundingClientRect();
+    dragRef.current = {
+      strategy: strategyKey,
+      startY: e.clientY,
+      startTop: cardRect.top - listRect.top,
+      startLeft: cardRect.left - listRect.left,
+      width: cardRect.width,
+      active: false,
+    };
   }, []);
 
-  const handleDragOver = useCallback((e: React.DragEvent, strategy: StrategyKey) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    if (strategy !== draggedStrategy) {
-      setDragOverStrategy(strategy);
+  const handleHeaderPointerMove = useCallback((e: React.PointerEvent) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (!drag.active) {
+      if (Math.abs(e.clientY - drag.startY) < DRAG_THRESHOLD) return;
+      drag.active = true;
     }
-  }, [draggedStrategy]);
+    const targetIndex = resolveDropIndex(e.clientY, drag.strategy);
+    setDragUI({
+      strategy: drag.strategy,
+      top: drag.startTop + (e.clientY - drag.startY),
+      left: drag.startLeft,
+      width: drag.width,
+      targetIndex,
+    });
+  }, [resolveDropIndex]);
 
-  const handleDragEnter = useCallback((e: React.DragEvent, strategy: StrategyKey) => {
-    e.preventDefault();
-    dragCounterRef.current++;
-    if (strategy !== draggedStrategy) {
-      setDragOverStrategy(strategy);
-    }
-  }, [draggedStrategy]);
-
-  const handleDragLeave = useCallback((e: React.DragEvent, strategy: StrategyKey) => {
-    e.preventDefault();
-    dragCounterRef.current--;
-    if (dragCounterRef.current === 0) {
-      setDragOverStrategy(null);
-    }
-  }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent, targetStrategy: StrategyKey) => {
-    e.preventDefault();
-    setDragOverStrategy(null);
-    dragCounterRef.current = 0;
-
-    if (!node || node.type !== 'recognize' || !draggedStrategy || draggedStrategy === targetStrategy) {
-      setDraggedStrategy(null);
+  const handleHeaderPointerUp = useCallback((e: React.PointerEvent) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag) return;
+    if (drag.active) {
+      const dropIndex = resolveDropIndex(e.clientY, drag.strategy);
+      if (dropIndex !== null && node && node.type === 'recognize') {
+        const order = [...(node.data.strategyOrder || STRATEGY_ORDER)];
+        const filtered = order.filter((key) => key !== drag.strategy);
+        const insertAt = Math.min(Math.max(dropIndex, 0), filtered.length);
+        filtered.splice(insertAt, 0, drag.strategy);
+        onChangeNode(updateNodeData(node, { strategyOrder: filtered }));
+      }
+      setDragUI(null);
       return;
     }
+    setExpandedStrategy((current) => (current === drag.strategy ? null : drag.strategy));
+    setDragUI(null);
+  }, [node, onChangeNode, resolveDropIndex]);
 
-    const currentOrder = node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi'];
-    const newOrder = [...currentOrder];
-    const draggedIndex = newOrder.indexOf(draggedStrategy);
-    const targetIndex = newOrder.indexOf(targetStrategy);
-
-    if (draggedIndex === -1 || targetIndex === -1) {
-      setDraggedStrategy(null);
-      return;
-    }
-
-    // Remove dragged item and insert at target position
-    newOrder.splice(draggedIndex, 1);
-    newOrder.splice(targetIndex, 0, draggedStrategy);
-
-    onChangeNode(updateNodeData(node, { strategyOrder: newOrder }));
-    setDraggedStrategy(null);
-  }, [node, draggedStrategy, onChangeNode]);
-
-  const handleDragEnd = useCallback(() => {
-    setDraggedStrategy(null);
-    setDragOverStrategy(null);
-    dragCounterRef.current = 0;
+  const handleHeaderPointerCancel = useCallback(() => {
+    dragRef.current = null;
+    setDragUI(null);
   }, []);
-
-  const moveStrategy = useCallback((strategy: StrategyKey, direction: -1 | 1) => {
-    if (!node || node.type !== 'recognize') return;
-    const order = [...(node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi'])];
-    const idx = order.indexOf(strategy);
-    const targetIdx = idx + direction;
-    if (targetIdx < 0 || targetIdx >= order.length) return;
-    [order[idx], order[targetIdx]] = [order[targetIdx], order[idx]];
-    onChangeNode(updateNodeData(node, { strategyOrder: order }));
-  }, [node, onChangeNode]);
 
   if (!node) {
-    return <aside className="properties-panel"><div className="properties-panel__scroll">请选择一个节点</div></aside>;
+    return (
+      <aside className="properties-panel">
+        <div className="properties-panel__scroll">请选择一个节点</div>
+      </aside>
+    );
   }
 
   return (
     <aside className="properties-panel">
       <div className="properties-panel__scroll">
-      <div className="properties-panel__header">节点属性</div>
-      <label>
-        标题
-        <input value={node.title} onChange={(e) => onChangeNode({ ...node, title: e.target.value })} />
-      </label>
-      <label>
-        描述
-        <textarea value={node.description ?? ''} onChange={(e) => onChangeNode({ ...node, description: e.target.value })} />
-      </label>
+        <div className="properties-panel__header">节点属性</div>
 
-      {node.type === 'click' && (
-        <section className="properties-panel__group">
-          <h3>点击配置</h3>
-          <p className="properties-panel__hint">点击节点依赖识别节点的输出坐标</p>
-        </section>
-      )}
+        <label>
+          标题
+          <input value={node.title} onChange={(e) => onChangeNode({ ...node, title: e.target.value })} />
+        </label>
+        <label>
+          描述
+          <textarea
+            value={node.description ?? ''}
+            onChange={(e) => onChangeNode({ ...node, description: e.target.value })}
+          />
+        </label>
 
-      {node.type === 'input' && (
-        <section className="properties-panel__group">
-          <h3>输入配置</h3>
-          <label>
-            值
-            <textarea value={node.data.value} onChange={(e) => onChangeNode(updateNodeData(node, { value: e.target.value }))} />
-          </label>
-          <label className="checkbox-row">
-            <span>回车提交</span>
-            <input
-              type="checkbox"
-              checked={node.data.submit ?? false}
-              onChange={(e) => onChangeNode(updateNodeData(node, { submit: e.target.checked }))}
-            />
-          </label>
-        </section>
-      )}
+        {node.type === 'click' && (
+          <section className="properties-panel__group">
+            <h3>点击配置</h3>
+            <p className="properties-panel__hint">点击节点依赖识别节点的输出坐标</p>
+          </section>
+        )}
 
-      {node.type === 'wait' && (
-        <section className="properties-panel__group">
-          <h3>等待配置</h3>
-          <label>
-            模式
-            <CustomSelect
-              value={node.data.mode}
-              options={[{ value: 'delay', label: '延时' }, { value: 'condition', label: '条件' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'delay' | 'condition' }))}
-            />
-          </label>
-          {node.data.mode === 'delay' ? (
+        {node.type === 'input' && (
+          <section className="properties-panel__group">
+            <h3>输入配置</h3>
             <label>
-              延时毫秒
-              <input
-                type="number"
-                value={node.data.delayMs ?? 1000}
-                onChange={(e) => onChangeNode(updateNodeData(node, { delayMs: Number(e.target.value) }))}
+              值
+              <textarea
+                value={node.data.value}
+                onChange={(e) => onChangeNode(updateNodeData(node, { value: e.target.value }))}
               />
             </label>
-          ) : (
-            <label>
-              条件文本
+            <label className="checkbox-row">
+              <span>回车提交</span>
               <input
-                value={node.data.conditionText ?? ''}
-                onChange={(e) => onChangeNode(updateNodeData(node, { conditionText: e.target.value }))}
+                type="checkbox"
+                checked={node.data.submit ?? false}
+                onChange={(e) => onChangeNode(updateNodeData(node, { submit: e.target.checked }))}
               />
             </label>
-          )}
-        </section>
-      )}
+          </section>
+        )}
 
-      {node.type === 'screenshot' && (
-        <section className="properties-panel__group">
-          <h3>截图配置</h3>
-          <label>
-            区域
-            <CustomSelect
-              value={node.data.regionMode}
-              options={[{ value: 'full', label: '全屏' }, { value: 'selected', label: '选区' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { regionMode: v as 'full' | 'selected' }))}
-            />
-          </label>
-        </section>
-      )}
-
-      {node.type === 'if' && (
-        <section className="properties-panel__group">
-          <h3>判断配置</h3>
-          <label>
-            表达式
-            <input value={node.data.expression} onChange={(e) => onChangeNode(updateNodeData(node, { expression: e.target.value }))} />
-          </label>
-        </section>
-      )}
-
-      {node.type === 'loop' && (
-        <section className="properties-panel__group">
-          <h3>循环配置</h3>
-          <label>
-            模式
-            <CustomSelect
-              value={node.data.mode}
-              options={[{ value: 'count', label: '次数' }, { value: 'condition', label: '条件' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' }))}
-            />
-          </label>
-          {node.data.mode === 'count' ? (
+        {node.type === 'wait' && (
+          <section className="properties-panel__group">
+            <h3>等待配置</h3>
             <label>
-              次数
-              <input
-                type="number"
-                value={node.data.count ?? 3}
-                onChange={(e) => onChangeNode(updateNodeData(node, { count: Number(e.target.value) }))}
+              模式
+              <CustomSelect
+                value={node.data.mode}
+                options={[
+                  { value: 'delay', label: '延时' },
+                  { value: 'condition', label: '条件' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'delay' | 'condition' }))}
               />
             </label>
-          ) : (
-            <label>
-              条件文本
-              <input
-                value={node.data.conditionText ?? ''}
-                onChange={(e) => onChangeNode(updateNodeData(node, { conditionText: e.target.value }))}
-              />
-            </label>
-          )}
-        </section>
-      )}
-
-      {node.type === 'recognize' && (
-        <section className="properties-panel__group">
-          <h3>识别配置</h3>
-          <label>
-            执行模式
-            <CustomSelect
-              value={node.data.executionMode}
-              options={[{ value: 'cascade', label: '级联' }, { value: 'parallel', label: '并行' }]}
-              onChange={(v) => onChangeNode(updateNodeData(node, { executionMode: v as 'cascade' | 'parallel' }))}
-            />
-          </label>
-
-
-          
-          {(node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi']).map((strategyKey: StrategyKey) => {
-            const strategy = node.data.strategies[strategyKey] as LooseStrategy;
-            const strategyNames: Record<StrategyKey, string> = {
-              coords: '坐标回放',
-              template: '模板匹配',
-              yolo: 'YOLO',
-              ocr: 'OCR',
-              cloudApi: '云端API'
-            };
-            const strategyIndex = (node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi']).indexOf(strategyKey) + 1;
-
-            return (
-              <div
-                key={strategyKey}
-                className={`strategy-section ${draggedStrategy === strategyKey ? 'dragging' : ''} ${dragOverStrategy === strategyKey ? 'drag-over' : ''}`}
-                draggable
-                onDragStart={(e) => handleDragStart(e, strategyKey)}
-                onDragOver={(e) => handleDragOver(e, strategyKey)}
-                onDragEnter={(e) => handleDragEnter(e, strategyKey)}
-                onDragLeave={(e) => handleDragLeave(e, strategyKey)}
-                onDrop={(e) => handleDrop(e, strategyKey)}
-                onDragEnd={handleDragEnd}
-              >
-                <div className="strategy-section__header">
-                  <h4>策略{strategyIndex}: {strategyNames[strategyKey]}</h4>
-                  <div className="strategy-section__arrows">
-                    <button onClick={() => moveStrategy(strategyKey, -1)} disabled={strategyIndex <= 1}>↑</button>
-                    <button onClick={() => moveStrategy(strategyKey, 1)} disabled={strategyIndex >= (node.data.strategyOrder || []).length}>↓</button>
-                  </div>
-                </div>
+            {node.data.mode === 'delay' ? (
+              <label>
+                延时毫秒
                 <input
-                  type="checkbox"
-                  checked={strategy.enabled}
-                  onChange={(e) => {
-                    const enabled = e.target.checked;
-                    const newStrategies = { ...node.data.strategies };
-                    switch (strategyKey) {
-                      case 'coords':
-                        newStrategies.coords = { ...newStrategies.coords, enabled };
-                        break;
-                      case 'template':
-                        newStrategies.template = { ...newStrategies.template, enabled };
-                        break;
-                      case 'yolo':
-                        newStrategies.yolo = { ...newStrategies.yolo, enabled };
-                        break;
-                      case 'ocr':
-                        newStrategies.ocr = { ...newStrategies.ocr, enabled };
-                        break;
-                      case 'cloudApi':
-                        newStrategies.cloudApi = { ...newStrategies.cloudApi, enabled };
-                        break;
-                    }
-                    onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                  }}
+                  type="number"
+                  value={node.data.delayMs ?? 1000}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { delayMs: Number(e.target.value) }))}
                 />
-                {strategy.enabled && (
-                  <>
-                    {strategyKey === 'coords' && (
-                      <div className="grid-two">
-                        <label>
-                          X
-                          <input
-                            type="number"
-                            value={strategy.x}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], x: Number(e.target.value) };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <label>
-                          Y
-                          <input
-                            type="number"
-                            value={strategy.y}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], y: Number(e.target.value) };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                      </div>
-                    )}
-                    {strategyKey === 'template' && (
-                      <>
-                        <label>
-                          匹配模板
-                          <TemplatePicker
-                            templates={templates}
-                            value={strategy.templateId}
-                            onChange={(templateId) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], templateId };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <button className="properties-panel__ghost-button" onClick={onOpenTemplateManager}>
-                          管理模板…
-                        </button>
-                        <label>
-                          阈值
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={strategy.threshold}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], threshold: Number(e.target.value) };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                      </>
-                    )}
-                    {strategyKey === 'yolo' && (
-                      <>
-                        <label>
-                          模型路径
-                          <input
-                            value={strategy.modelPath ?? ''}
-                            placeholder="在 YOLO 训练中心选择模型"
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], modelPath: e.target.value };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          className="properties-panel__ghost-button"
-                          onClick={async () => {
-                            const model = await window.yoloAPI?.getActiveModel?.();
-                            if (!model) return;
-                            const newStrategies = { ...node.data.strategies };
-                            newStrategies.yolo = { ...newStrategies.yolo, modelPath: model.path, label: newStrategies.yolo.label || '' };
-                            onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                          }}
-                        >
-                          使用当前 YOLO 模型
-                        </button>
-                        <label>
-                          阈值
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={strategy.threshold}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], threshold: Number(e.target.value) };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                      </>
-                    )}
-                    {strategyKey === 'ocr' && (
-                      <>
-                        <label>
-                          查找文字
-                          <input
-                            value={strategy.text}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], text: e.target.value };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <label>
-                          阈值
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={strategy.threshold}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], threshold: Number(e.target.value) };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                      </>
-                    )}
-                    {strategyKey === 'cloudApi' && (
-                      <>
-                        <label>
-                          URL
-                          <input
-                            value={strategy.url}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], url: e.target.value };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <label>
-                          API Key
-                          <input
-                            type="password"
-                            value={strategy.apiKey}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], apiKey: e.target.value };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <label>
-                          提示词
-                          <textarea
-                            value={strategy.prompt}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], prompt: e.target.value };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                        <label>
-                          阈值
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={strategy.threshold}
-                            onChange={(e) => {
-                              const newStrategies = { ...node.data.strategies };
-                              newStrategies[strategyKey] = { ...newStrategies[strategyKey], threshold: Number(e.target.value) };
-                              onChangeNode(updateNodeData(node, { strategies: newStrategies }));
-                            }}
-                          />
-                        </label>
-                      </>
-                    )}
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </section>
-      )}
+              </label>
+            ) : (
+              <label>
+                条件文本
+                <input
+                  value={node.data.conditionText ?? ''}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { conditionText: e.target.value }))}
+                />
+              </label>
+            )}
+          </section>
+        )}
 
-      <pre>{JSON.stringify(node.data, null, 2)}</pre>
+        {node.type === 'screenshot' && (
+          <section className="properties-panel__group">
+            <h3>截图配置</h3>
+            <label>
+              区域
+              <CustomSelect
+                value={node.data.regionMode}
+                options={[
+                  { value: 'full', label: '全屏' },
+                  { value: 'selected', label: '选区' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { regionMode: v as 'full' | 'selected' }))}
+              />
+            </label>
+          </section>
+        )}
+
+        {node.type === 'if' && (
+          <section className="properties-panel__group">
+            <h3>判断配置</h3>
+            <label>
+              表达式
+              <input
+                value={node.data.expression}
+                onChange={(e) => onChangeNode(updateNodeData(node, { expression: e.target.value }))}
+              />
+            </label>
+          </section>
+        )}
+
+        {node.type === 'loop' && (
+          <section className="properties-panel__group">
+            <h3>循环配置</h3>
+            <label>
+              模式
+              <CustomSelect
+                value={node.data.mode}
+                options={[
+                  { value: 'count', label: '次数' },
+                  { value: 'condition', label: '条件' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' }))}
+              />
+            </label>
+            {node.data.mode === 'count' ? (
+              <label>
+                次数
+                <input
+                  type="number"
+                  value={node.data.count ?? 3}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { count: Number(e.target.value) }))}
+                />
+              </label>
+            ) : (
+              <label>
+                条件文本
+                <input
+                  value={node.data.conditionText ?? ''}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { conditionText: e.target.value }))}
+                />
+              </label>
+            )}
+          </section>
+        )}
+
+        {node.type === 'recognize' && (
+          <section className="properties-panel__group">
+            <h3>识别配置</h3>
+            <label>
+              执行模式
+              <CustomSelect
+                value={node.data.executionMode}
+                options={[
+                  { value: 'cascade', label: '级联' },
+                  { value: 'parallel', label: '并行' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { executionMode: v as 'cascade' | 'parallel' }))}
+              />
+            </label>
+
+            <div className="strategy-list" ref={strategiesRef}>
+              {(node.data.strategyOrder || STRATEGY_ORDER).map((strategyKey: StrategyKey) => {
+              const strategy = (node.data.strategies as unknown as Record<StrategyKey, LooseStrategy>)[strategyKey];
+              const order = node.data.strategyOrder || STRATEGY_ORDER;
+              const strategyIndex = STRATEGY_NUMBERS[strategyKey];
+              const expanded = expandedStrategy === strategyKey;
+              const isDraggingThis = dragUI?.strategy === strategyKey;
+              const visibleOrder = order.filter((key) => key !== dragUI?.strategy);
+              const visibleIndex = visibleOrder.indexOf(strategyKey);
+              const showGapBefore = dragUI !== null && dragUI.targetIndex === visibleIndex;
+              const showGapAfter =
+                dragUI !== null &&
+                visibleIndex === visibleOrder.length - 1 &&
+                dragUI.targetIndex === visibleOrder.length;
+
+              return (
+                <Fragment key={`${strategyKey}-item`}>
+                  {showGapBefore && <div className="strategy-card__gap" aria-hidden="true" />}
+                <div
+                  data-strategy={strategyKey}
+                  className={`strategy-card ${isDraggingThis ? 'strategy-card--ghost' : ''} ${expanded ? 'strategy-card--expanded' : ''}`}
+                  style={
+                    isDraggingThis && dragUI
+                      ? {
+                          position: 'absolute',
+                          top: `${dragUI.top}px`,
+                          left: `${dragUI.left}px`,
+                          width: `${dragUI.width}px`,
+                          zIndex: 50,
+                          margin: 0,
+                        }
+                      : undefined
+                  }
+                >
+                  <div
+                    className="strategy-card__header"
+                    onPointerDown={(e) => handleHeaderPointerDown(e, strategyKey)}
+                    onPointerMove={handleHeaderPointerMove}
+                    onPointerUp={handleHeaderPointerUp}
+                    onPointerCancel={handleHeaderPointerCancel}
+                  >
+                    <span className="strategy-card__grip" aria-hidden="true">
+                      ⋮⋮
+                    </span>
+                    <span className="strategy-card__index">{strategyIndex}</span>
+                    <span className="strategy-card__name">{STRATEGY_NAMES[strategyKey]}</span>
+                    <input
+                      type="checkbox"
+                      checked={strategy.enabled}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => updateStrategy(strategyKey, { enabled: e.target.checked })}
+                      title={strategy.enabled ? '停用该策略' : '启用该策略'}
+                    />
+                    <span className={`strategy-card__chevron ${expanded ? 'open' : ''}`}>▾</span>
+                  </div>
+
+                  {expanded && (
+                    <div className="strategy-card__body">
+                      {strategyKey === 'coords' && (
+                        <div className="grid-two">
+                          <label>
+                            X
+                            <input
+                              type="number"
+                              value={strategy.x ?? 0}
+                              onChange={(e) => updateStrategy('coords', { x: Number(e.target.value) })}
+                            />
+                          </label>
+                          <label>
+                            Y
+                            <input
+                              type="number"
+                              value={strategy.y ?? 0}
+                              onChange={(e) => updateStrategy('coords', { y: Number(e.target.value) })}
+                            />
+                          </label>
+                        </div>
+                      )}
+
+                      {strategyKey === 'template' && (
+                        <>
+                          <label>
+                            匹配模板
+                            <TemplatePicker
+                              templates={templates}
+                              folders={folders}
+                              value={strategy.templateId}
+                              onChange={(templateId) => updateStrategy('template', { templateId })}
+                            />
+                          </label>
+                          <button className="properties-panel__ghost-button" onClick={onOpenTemplateManager}>
+                            管理模板…
+                          </button>
+                          <label>
+                            阈值
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={strategy.threshold ?? 60}
+                              onChange={(e) => updateStrategy('template', { threshold: Number(e.target.value) })}
+                            />
+                          </label>
+                        </>
+                      )}
+
+                      {strategyKey === 'yolo' && (
+                        <>
+                          <label>
+                            模型
+                            <ModelPicker
+                              value={strategy.modelId}
+                              onChange={(model) => updateStrategy('yolo', { modelId: model.id, modelPath: model.path })}
+                              refreshKey={yoloVersion ?? 0}
+                            />
+                          </label>
+                          {onOpenYoloManager && (
+                            <button className="properties-panel__ghost-button" onClick={onOpenYoloManager}>
+                              管理模型…
+                            </button>
+                          )}
+                          <label>
+                            阈值
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={strategy.threshold ?? 60}
+                              onChange={(e) => updateStrategy('yolo', { threshold: Number(e.target.value) })}
+                            />
+                          </label>
+                        </>
+                      )}
+
+                      {strategyKey === 'ocr' && (
+                        <>
+                          <label>
+                            查找文字
+                            <input
+                              value={strategy.text ?? ''}
+                              onChange={(e) => updateStrategy('ocr', { text: e.target.value })}
+                            />
+                          </label>
+                          <label>
+                            OCR 引擎
+                            <CustomSelect
+                              value={strategy.engine ?? 'auto'}
+                              options={OCR_ENGINE_OPTIONS}
+                              onChange={(v) => updateStrategy('ocr', { engine: v as OcrEngine })}
+                            />
+                          </label>
+                          <label>
+                            阈值
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={strategy.threshold ?? 60}
+                              onChange={(e) => updateStrategy('ocr', { threshold: Number(e.target.value) })}
+                            />
+                          </label>
+                          <button className="properties-panel__ghost-button" disabled title="OCR 测试台开发中">
+                            测试台验证 · 开发中
+                          </button>
+                        </>
+                      )}
+
+                      {strategyKey === 'cloudApi' && (
+                        <>
+                          <label>
+                            API 配置
+                            {strategy.profileId ? (
+                              <input value={strategy.profileId} disabled title="API 密钥管理工具开发中" />
+                            ) : (
+                              <div className="strategy-card__placeholder">未配置（API 密钥管理工具开发中）</div>
+                            )}
+                          </label>
+                          <button className="properties-panel__ghost-button" disabled>
+                            管理 API… · 开发中
+                          </button>
+                          <label>
+                            提示词
+                            <textarea
+                              value={strategy.prompt ?? ''}
+                              onChange={(e) => updateStrategy('cloudApi', { prompt: e.target.value })}
+                            />
+                          </label>
+                          <label>
+                            阈值
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={strategy.threshold ?? 60}
+                              onChange={(e) => updateStrategy('cloudApi', { threshold: Number(e.target.value) })}
+                            />
+                          </label>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+                  {showGapAfter && <div className="strategy-card__gap" aria-hidden="true" />}
+                </Fragment>
+              );
+            })}
+            </div>
+          </section>
+        )}
       </div>
     </aside>
   );

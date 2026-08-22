@@ -510,8 +510,19 @@ export function App() {
                 <div className={`workflow-node__strategies workflow-node__strategies--${node.data.executionMode}`}>
                   {(node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi'])
                     .filter((key: string) => (node.data.strategies as any)[key].enabled)
-                    .map((key: string, index: number) => {
-                      return <span key={key} className="workflow-node__strategy-badge">{index + 1}</span>;
+                    .map((key: string) => {
+                      const labelMap: Record<string, string> = {
+                        coords: '1',
+                        template: '2',
+                        yolo: '3',
+                        ocr: '4',
+                        cloudApi: '5',
+                      };
+                      return (
+                        <span key={key} className="workflow-node__strategy-badge" title={key}>
+                          {labelMap[key]}
+                        </span>
+                      );
                     })}
                 </div>
               ) : (
@@ -542,6 +553,8 @@ export function App() {
           onChangeNode={updateNode}
           templateVersion={templateVersion}
           onOpenTemplateManager={() => setTemplateManagerOpen(true)}
+          yoloVersion={yoloVersion}
+          onOpenYoloManager={() => setYoloManagerOpen(true)}
         />
       )}
       {templateManagerOpen && (
