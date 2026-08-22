@@ -21,7 +21,6 @@ export type WorkflowNodeBase<TType extends NodeType, TData extends Record<string
   id: string;
   type: TType;
   title: string;
-  description?: string;
   position: {
     x: number;
     y: number;
@@ -62,6 +61,42 @@ export type LoopNode = WorkflowNodeBase<'loop', {
 }>;
 
 export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
+
+export type CloudApiProfile = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  defaultPrompt: string;
+  createdAt: number;
+  updatedAt: number;
+  lastTestAt?: number | null;
+  lastTestStatus?: 'ok' | 'error' | null;
+  lastTestMessage?: string | null;
+};
+
+export type OcrTextBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type OcrMatch = {
+  id: string;
+  text: string;
+  box: OcrTextBox;
+  confidence?: number;
+};
+
+export type OcrResult = {
+  engine: OcrEngine;
+  width: number;
+  height: number;
+  text: string;
+  matches: OcrMatch[];
+  message?: string;
+};
 
 export type RecognizeNode = WorkflowNodeBase<'recognize', {
   strategies: {

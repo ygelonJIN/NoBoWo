@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type WheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type WheelEvent } from 'react';
 import {
   createDefaultNode,
   defaultWorkflowDocument,
+  type OcrEngine,
   type WorkflowDocument,
   type WorkflowEdge,
   type WorkflowNode,
@@ -9,6 +10,8 @@ import {
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { TemplateManagerModal } from './components/TemplateManagerModal';
 import { YoloManagerModal } from './components/YoloManagerModal';
+import { CloudApiManagerModal } from './components/CloudApiManagerModal';
+import { OcrTestModal } from './components/OcrTestModal';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -17,6 +20,8 @@ const HANDLE_SIZE = 22;
 const SNAP_RADIUS = 54;
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 2;
+const PANEL_WIDTH = 320;
+const PANEL_GAP = 14;
 
 type Point = { x: number; y: number };
 type ContextMenu = { x: number; y: number };
@@ -127,6 +132,25 @@ function canvasToClient(point: Point, viewport: Point, zoom: number): Point {
   return { x: point.x * zoom + viewport.x, y: point.y * zoom + viewport.y };
 }
 
+function getNodeSummary(node: WorkflowNode): string {
+  switch (node.type) {
+    case 'click':
+      return '点击识别到的目标';
+    case 'input':
+      return node.data.value ? `输入：${node.data.value}` : '空输入';
+    case 'wait':
+      return node.data.mode === 'delay' ? `延时 ${node.data.delayMs ?? 1000}ms` : '条件等待';
+    case 'screenshot':
+      return node.data.regionMode === 'full' ? '全屏截图' : '选区截图';
+    case 'if':
+      return node.data.expression || '条件判断';
+    case 'loop':
+      return node.data.mode === 'count' ? `循环 ${node.data.count ?? 3} 次` : '条件循环';
+    case 'recognize':
+      return '';
+  }
+}
+
 export function App() {
   const initial = useMemo(readInitialDocument, []);
   const [nodes, setNodes] = useState<WorkflowNode[]>(initial.nodes);
@@ -140,9 +164,13 @@ export function App() {
   const [templateVersion, setTemplateVersion] = useState(0);
   const [yoloManagerOpen, setYoloManagerOpen] = useState(false);
   const [yoloVersion, setYoloVersion] = useState(0);
+  const [cloudApiManagerOpen, setCloudApiManagerOpen] = useState(false);
+  const [cloudApiVersion, setCloudApiVersion] = useState(0);
+  const [ocrTestOpen, setOcrTestOpen] = useState(false);
+  const [ocrTestPreset, setOcrTestPreset] = useState<{ text?: string; engine?: OcrEngine } | null>(null);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
-  const [dragging, setDragging] = useState<{ id: string; offset: Point } | null>(null);
+  const [dragging, setDragging] = useState<{ id: string; offset: Point; start: Point; moved: boolean } | null>(null);
   const [panning, setPanning] = useState<{ start: Point; viewport: Point } | null>(null);
   const [connecting, setConnecting] = useState<{ sourceId: string; point: Point; snapTargetId?: string; sourceHandleId?: string; targetHandleId?: string } | null>(null);
   const [, setHistoryVersion] = useState(0);
@@ -157,6 +185,30 @@ export function App() {
   const dragStartSnapshotRef = useRef<string | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+
+  const floatingPanelStyle = useMemo<CSSProperties | null>(() => {
+    if (!selectedNode) return null;
+    const canvas = canvasRef.current;
+    const clientWidth = canvas?.clientWidth ?? window.innerWidth;
+    const clientHeight = canvas?.clientHeight ?? window.innerHeight;
+    const nodeWidth = selectedNode.width ?? NODE_WIDTH;
+    const nodeHeight = selectedNode.height ?? NODE_HEIGHT;
+    const nodeLeft = selectedNode.position.x * zoom + viewport.x;
+    const nodeTop = selectedNode.position.y * zoom + viewport.y;
+    const maxPanelHeight = Math.min(clientHeight - 32, 640);
+    let left = nodeLeft + nodeWidth + PANEL_GAP;
+    if (left + PANEL_WIDTH > clientWidth - 8) {
+      left = Math.max(8, nodeLeft - PANEL_WIDTH - PANEL_GAP);
+    }
+    const top = Math.min(Math.max(8, nodeTop), Math.max(8, clientHeight - maxPanelHeight - 8));
+    return {
+      left,
+      top,
+      maxHeight: maxPanelHeight,
+      '--panel-left': `${left}px`,
+      '--panel-top': `${top}px`,
+    } as CSSProperties;
+  }, [selectedNode, viewport, zoom]);
 
   useEffect(() => {
     const closeMenu = () => setContextMenu(null);
@@ -269,10 +321,10 @@ export function App() {
       event.stopPropagation();
       const point = getLocalPoint(event);
       const canvasPoint = clientToCanvas(point, viewport, zoom);
-      setSelectedNodeId(node.id);
+      setSelectedNodeId(null);
       isDraggingRef.current = true;
       dragStartSnapshotRef.current = JSON.stringify({ nodes, edges });
-      setDragging({ id: node.id, offset: { x: canvasPoint.x - node.position.x, y: canvasPoint.y - node.position.y } });
+      setDragging({ id: node.id, offset: { x: canvasPoint.x - node.position.x, y: canvasPoint.y - node.position.y }, start: point, moved: false });
     },
     [getLocalPoint, viewport, zoom, nodes, edges],
   );
@@ -291,14 +343,21 @@ export function App() {
       const hovered = nodeAt(nodes, point, viewport, zoom);
       setHoveredNodeId(hovered?.id ?? null);
       if (dragging) {
-        const canvasPoint = clientToCanvas(point, viewport, zoom);
-        setNodes((current) =>
-          current.map((node) =>
-            node.id === dragging.id
-              ? { ...node, position: { x: canvasPoint.x - dragging.offset.x, y: canvasPoint.y - dragging.offset.y } }
-              : node,
-          ),
-        );
+        const moved = dragging.moved || Math.hypot(point.x - dragging.start.x, point.y - dragging.start.y) > 6;
+        if (moved !== dragging.moved) {
+          setDragging({ ...dragging, moved });
+        }
+        if (moved) {
+          setSelectedNodeId(null);
+          const canvasPoint = clientToCanvas(point, viewport, zoom);
+          setNodes((current) =>
+            current.map((node) =>
+              node.id === dragging.id
+                ? { ...node, position: { x: canvasPoint.x - dragging.offset.x, y: canvasPoint.y - dragging.offset.y } }
+                : node,
+            ),
+          );
+        }
       }
       if (panning) {
         setViewport({ x: panning.viewport.x + point.x - panning.start.x, y: panning.viewport.y + point.y - panning.start.y });
@@ -324,9 +383,12 @@ export function App() {
         }
       }
       if (dragging) {
-        const moved = nodes.find((node) => node.id === dragging.id);
-        if (moved) {
-          setNodes((current) => current.map((node) => (node.id === moved.id ? node : node)));
+        const movedNode = nodes.find((node) => node.id === dragging.id);
+        if (movedNode) {
+          setNodes((current) => current.map((node) => (node.id === movedNode.id ? node : node)));
+        }
+        if (!dragging.moved) {
+          setSelectedNodeId(dragging.id);
         }
         if (dragStartSnapshotRef.current) {
           const currentSnapshot = JSON.stringify({ nodes, edges });
@@ -364,7 +426,9 @@ export function App() {
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
+      if ((event.target as HTMLElement | null)?.closest('.properties-panel-anchor')) return;
       event.preventDefault();
+      setSelectedNodeId(null);
       const point = getLocalPoint(event);
       const before = clientToCanvas(point, viewport, zoom);
       const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * (event.deltaY < 0 ? 1.1 : 0.9)));
@@ -434,7 +498,7 @@ export function App() {
         }}
       >
         <div className="toolbar" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="toolbar__title">NoBoWo 工作流画布</div>
+          <div className="toolbar__title">NoBoWo 工具配置</div>
           <div className="toolbar__status-row">
             <div className="toolbar__status">
               <span className={`status-dot status-dot--${isAutosaved ? 'saved' : 'saving'}`} />
@@ -456,10 +520,12 @@ export function App() {
         </div>
 
           <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="toolbar-tools__title">工具</div>
+          <div className="toolbar-tools__title">工具配置</div>
           <div className="toolbar-tools__actions">
             <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
             <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
+            <button onClick={() => { setOcrTestPreset(null); setOcrTestOpen(true); }}>OCR 测试台</button>
+            <button onClick={() => setCloudApiManagerOpen(true)}>云端 API</button>
           </div>
         </div>
 
@@ -526,7 +592,7 @@ export function App() {
                     })}
                 </div>
               ) : (
-                <div className="workflow-node__body">{node.description ?? '未配置'}</div>
+                <div className="workflow-node__body">{getNodeSummary(node)}</div>
               )}
               <button
                 className={`node-handle node-handle--source ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
@@ -546,17 +612,31 @@ export function App() {
             <button onClick={deleteSelectedNode} disabled={!selectedNode}>删除节点</button>
           </div>
         )}
+        {selectedNode && !dragging && (
+          <div
+            className="properties-panel-anchor"
+            style={floatingPanelStyle ?? undefined}
+            onMouseDown={(event) => event.stopPropagation()}
+            onWheel={(event) => event.stopPropagation()}
+            onWheelCapture={(event) => event.stopPropagation()}
+          >
+            <PropertiesPanel
+              node={selectedNode}
+              onChangeNode={updateNode}
+              templateVersion={templateVersion}
+              cloudApiVersion={cloudApiVersion}
+              onOpenTemplateManager={() => setTemplateManagerOpen(true)}
+              onOpenCloudApiManager={() => setCloudApiManagerOpen(true)}
+              onOpenOcrTest={(preset) => {
+                setOcrTestPreset(preset ?? null);
+                setOcrTestOpen(true);
+              }}
+              yoloVersion={yoloVersion}
+              onOpenYoloManager={() => setYoloManagerOpen(true)}
+            />
+          </div>
+        )}
       </div>
-      {selectedNode && (
-        <PropertiesPanel
-          node={selectedNode}
-          onChangeNode={updateNode}
-          templateVersion={templateVersion}
-          onOpenTemplateManager={() => setTemplateManagerOpen(true)}
-          yoloVersion={yoloVersion}
-          onOpenYoloManager={() => setYoloManagerOpen(true)}
-        />
-      )}
       {templateManagerOpen && (
         <TemplateManagerModal
           onClose={() => setTemplateManagerOpen(false)}
@@ -567,6 +647,19 @@ export function App() {
         <YoloManagerModal
           onClose={() => setYoloManagerOpen(false)}
           onChanged={() => setYoloVersion((version) => version + 1)}
+        />
+      )}
+      {cloudApiManagerOpen && (
+        <CloudApiManagerModal
+          onClose={() => setCloudApiManagerOpen(false)}
+          onChanged={() => setCloudApiVersion((version) => version + 1)}
+        />
+      )}
+      {ocrTestOpen && (
+        <OcrTestModal
+          onClose={() => setOcrTestOpen(false)}
+          initialText={ocrTestPreset?.text}
+          initialEngine={ocrTestPreset?.engine}
         />
       )}
     </div>

@@ -1,5 +1,5 @@
-import type { OcrEngine, RecognizeNode, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import type { CloudApiProfile, OcrEngine, RecognizeNode, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
 import { ModelPicker } from './ModelPicker';
 import { TemplatePicker } from './TemplatePicker';
@@ -7,8 +7,12 @@ import { TemplatePicker } from './TemplatePicker';
 type Props = {
   node: WorkflowNode | null;
   onChangeNode: (node: WorkflowNode) => void;
+  style?: CSSProperties;
   templateVersion: number;
+  cloudApiVersion?: number;
   onOpenTemplateManager: () => void;
+  onOpenCloudApiManager: () => void;
+  onOpenOcrTest: (preset?: { text?: string; engine?: OcrEngine }) => void;
   yoloVersion?: number;
   onOpenYoloManager?: () => void;
 };
@@ -71,8 +75,12 @@ function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data'
 export function PropertiesPanel({
   node,
   onChangeNode,
+  style,
   templateVersion,
+  cloudApiVersion = 0,
   onOpenTemplateManager,
+  onOpenCloudApiManager,
+  onOpenOcrTest,
   yoloVersion,
   onOpenYoloManager,
 }: Props) {
@@ -95,6 +103,7 @@ export function PropertiesPanel({
   const strategiesRef = useRef<HTMLDivElement>(null);
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [folders, setFolders] = useState<TemplateFolder[]>([]);
+  const [apiProfiles, setApiProfiles] = useState<CloudApiProfile[]>([]);
 
   useEffect(() => {
     if (!window.templateAPI) {
@@ -113,6 +122,17 @@ export function PropertiesPanel({
         setFolders([]);
       });
   }, [templateVersion]);
+
+  useEffect(() => {
+    if (!window.cloudApiAPI) {
+      setApiProfiles([]);
+      return;
+    }
+    window.cloudApiAPI
+      .list()
+      .then(setApiProfiles)
+      .catch(() => setApiProfiles([]));
+  }, [cloudApiVersion, expandedStrategy]);
 
   const updateStrategy = useCallback(
     (strategyKey: StrategyKey, patch: Partial<LooseStrategy>) => {
@@ -220,20 +240,13 @@ export function PropertiesPanel({
   }
 
   return (
-    <aside className="properties-panel">
+    <aside className="properties-panel" style={style}>
       <div className="properties-panel__scroll">
         <div className="properties-panel__header">节点属性</div>
 
         <label>
           标题
           <input value={node.title} onChange={(e) => onChangeNode({ ...node, title: e.target.value })} />
-        </label>
-        <label>
-          描述
-          <textarea
-            value={node.description ?? ''}
-            onChange={(e) => onChangeNode({ ...node, description: e.target.value })}
-          />
         </label>
 
         {node.type === 'click' && (
@@ -365,7 +378,7 @@ export function PropertiesPanel({
         )}
 
         {node.type === 'recognize' && (
-          <section className="properties-panel__group">
+          <section className="properties-panel__group properties-panel__group--recognize" onWheel={(e) => e.stopPropagation()}>
             <h3>识别配置</h3>
             <label>
               执行模式
@@ -540,8 +553,11 @@ export function PropertiesPanel({
                               onChange={(e) => updateStrategy('ocr', { threshold: Number(e.target.value) })}
                             />
                           </label>
-                          <button className="properties-panel__ghost-button" disabled title="OCR 测试台开发中">
-                            测试台验证 · 开发中
+                          <button
+                            className="properties-panel__ghost-button"
+                            onClick={() => onOpenOcrTest({ text: strategy.text ?? '', engine: strategy.engine ?? 'auto' })}
+                          >
+                            测试台验证
                           </button>
                         </>
                       )}
@@ -550,14 +566,17 @@ export function PropertiesPanel({
                         <>
                           <label>
                             API 配置
-                            {strategy.profileId ? (
-                              <input value={strategy.profileId} disabled title="API 密钥管理工具开发中" />
-                            ) : (
-                              <div className="strategy-card__placeholder">未配置（API 密钥管理工具开发中）</div>
-                            )}
+                            <CustomSelect
+                              value={strategy.profileId ?? ''}
+                              options={[
+                                { value: '', label: '未配置' },
+                                ...apiProfiles.map((profile) => ({ value: profile.id, label: profile.name })),
+                              ]}
+                              onChange={(v) => updateStrategy('cloudApi', { profileId: v || undefined })}
+                            />
                           </label>
-                          <button className="properties-panel__ghost-button" disabled>
-                            管理 API… · 开发中
+                          <button className="properties-panel__ghost-button" onClick={onOpenCloudApiManager}>
+                            管理 API…
                           </button>
                           <label>
                             提示词
@@ -585,6 +604,7 @@ export function PropertiesPanel({
                 </Fragment>
               );
             })}
+              <div className="properties-panel__recognize-spacer" aria-hidden="true" />
             </div>
           </section>
         )}

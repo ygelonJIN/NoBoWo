@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { YoloAugmentConfig, YoloDataset, YoloEnvInfo, YoloEpochMetrics, YoloTrainConfig, YoloTrainingEvent, YoloTrainingState } from '@nobowo/core';
+import { CustomSelect } from './CustomSelect';
 
 type Props = {
   datasets: YoloDataset[];
@@ -369,14 +370,18 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
           <div className="yolo-config-section__title">基础设置</div>
           <label className="yolo-field">
             <span className="yolo-field__label">数据集</span>
-            <select value={selectedDatasetId ?? ''} onChange={(e) => onSelectDataset(e.target.value)}>
-              {datasets.length === 0 && <option value="">暂无数据集</option>}
-              {datasets.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}（{d.imageCount} 图 / {d.classCount} 类）
-                </option>
-              ))}
-            </select>
+            <CustomSelect
+              value={selectedDatasetId ?? ''}
+              options={[
+                ...(datasets.length === 0 ? [{ value: '', label: '暂无数据集' }] : []),
+                ...datasets.map((d) => ({
+                  value: d.id,
+                  label: `${d.name}（${d.imageCount} 图 / ${d.classCount} 类）`,
+                })),
+              ]}
+              onChange={onSelectDataset}
+              maxHeight={240}
+            />
           </label>
           {selectedDataset && (
             <div className="yolo-train__ds-stats">
@@ -385,24 +390,28 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
           )}
           <label className="yolo-field">
             <span className="yolo-field__label">基础模型</span>
-            <select value={cfg.model} onChange={(e) => patch({ model: e.target.value })}>
-              {BASE_MODELS.map((m) => (
-                <option key={m} value={m}>
-                  {m}（{m.includes('n.') ? 'nano' : m.includes('s.') ? 'small' : m.includes('m.') ? 'medium' : m.includes('l.') ? 'large' : m.includes('x.') ? 'xlarge' : m}）
-                </option>
-              ))}
-            </select>
+            <CustomSelect
+              value={cfg.model}
+              options={BASE_MODELS.map((m) => ({
+                value: m,
+                label: `${m}（${m.includes('n.') ? 'nano' : m.includes('s.') ? 'small' : m.includes('m.') ? 'medium' : m.includes('l.') ? 'large' : m.includes('x.') ? 'xlarge' : m}）`,
+              }))}
+              onChange={(model) => patch({ model })}
+              maxHeight={260}
+            />
             <span className="yolo-field__hint">越大的模型精度越高、训练越慢；小数据集优先 nano/small</span>
           </label>
           <label className="yolo-field">
             <span className="yolo-field__label">计算设备</span>
-            <select value={cfg.device} onChange={(e) => patch({ device: e.target.value })}>
-              {deviceOptions.map((d) => (
-                <option key={d} value={d}>
-                  {d === 'auto' ? 'auto（自动选择）' : d === 'cpu' ? 'CPU' : d === 'mps' ? 'MPS（Apple 芯片）' : d}
-                </option>
-              ))}
-            </select>
+            <CustomSelect
+              value={cfg.device}
+              options={deviceOptions.map((d) => ({
+                value: d,
+                label: d === 'auto' ? 'auto（自动选择）' : d === 'cpu' ? 'CPU' : d === 'mps' ? 'MPS（Apple 芯片）' : d,
+              }))}
+              onChange={(device) => patch({ device })}
+              maxHeight={220}
+            />
           </label>
           <SliderField
             label="训练集占比"

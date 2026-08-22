@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  OcrEngine,
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
@@ -12,6 +13,22 @@ import type {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // 后续扩展：执行引擎通信、文件操作等
+});
+
+contextBridge.exposeInMainWorld('cloudApiAPI', {
+  list: () => ipcRenderer.invoke('cloudApi:list'),
+  create: (payload: { name: string; baseUrl: string; apiKey: string; defaultPrompt?: string }) =>
+    ipcRenderer.invoke('cloudApi:create', payload),
+  update: (id: string, patch: { name?: string; baseUrl?: string; apiKey?: string; defaultPrompt?: string }) =>
+    ipcRenderer.invoke('cloudApi:update', id, patch),
+  remove: (id: string) => ipcRenderer.invoke('cloudApi:remove', id),
+  test: (payload: { baseUrl: string; apiKey: string; name?: string }) => ipcRenderer.invoke('cloudApi:test', payload),
+});
+
+contextBridge.exposeInMainWorld('ocrAPI', {
+  listEngines: () => ipcRenderer.invoke('ocr:listEngines'),
+  run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) =>
+    ipcRenderer.invoke('ocr:run', payload),
 });
 
 contextBridge.exposeInMainWorld('templateAPI', {
@@ -32,6 +49,7 @@ contextBridge.exposeInMainWorld('templateAPI', {
 contextBridge.exposeInMainWorld('yoloAPI', {
   listDatasets: () => ipcRenderer.invoke('yolo:listDatasets'),
   createDataset: (payload: { name: string; notes?: string }) => ipcRenderer.invoke('yolo:createDataset', payload),
+  updateDataset: (id: string, patch: { name?: string; notes?: string }) => ipcRenderer.invoke('yolo:updateDataset', id, patch),
   removeDataset: (id: string) => ipcRenderer.invoke('yolo:removeDataset', id),
   importImages: (
     datasetId: string,

@@ -449,23 +449,24 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
         <div className="yolo-annotate__class-list">
           {classes.length === 0 && <div className="yolo-annotate__empty-hint">还没有类别。先添加类别（例如「按钮」「输入框」「图标」），再框选图片并给它命名。</div>}
           {classes.map((cls) => (
-            <div key={cls.id} className={`yolo-annotate__class ${selectedAnnotation?.classId === cls.id ? 'active' : ''}`}>
+            <div key={cls.id} className={`yolo-annotate__class delete-hover ${selectedAnnotation?.classId === cls.id ? 'active' : ''}`}>
               <span className="yolo-annotate__class-dot" style={{ background: cls.color }} />
               <button className="yolo-annotate__class-name" onClick={() => assignClass(cls.id)} title="点击把当前选框归为该类别">
                 {cls.name}
               </button>
               <span className="yolo-annotate__class-count">{classCounts.get(cls.id) ?? 0}</span>
-              {confirmClass === cls.id ? (
-                <span className="yolo-annotate__confirm">
-                  删?
-                  <button onClick={() => void removeClass(cls.id)}>确定</button>
-                  <button onClick={() => setConfirmClass(null)}>取消</button>
-                </span>
-              ) : (
-                <button className="yolo-annotate__class-del" onClick={() => setConfirmClass(cls.id)} title="删除类别（会同时删除对应选框）">
-                  删
-                </button>
-              )}
+              <span className="yolo-annotate__delete-controls" onClick={(e) => e.stopPropagation()}>
+                {confirmClass === cls.id ? (
+                  <>
+                    <button className="delete-confirm__ok" onClick={() => void removeClass(cls.id)}>确定</button>
+                    <button className="delete-confirm__cancel" onClick={() => setConfirmClass(null)}>取消</button>
+                  </>
+                ) : (
+                  <button className="delete-trigger" onClick={() => setConfirmClass(cls.id)} title="删除类别（会同时删除对应选框）">
+                    删除
+                  </button>
+                )}
+              </span>
             </div>
           ))}
         </div>

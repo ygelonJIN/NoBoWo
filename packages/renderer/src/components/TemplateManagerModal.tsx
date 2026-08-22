@@ -434,7 +434,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                 <span className="template-folder__count">{templates.length}</span>
               </button>
               {folders.map((folder) => (
-                <div key={folder.id} className={`template-folder-row ${activeFolderId === folder.id ? 'active' : ''}`}>
+                <div key={folder.id} className={`template-folder-row delete-hover ${activeFolderId === folder.id ? 'active' : ''} ${confirmDeleteFolderId === folder.id ? 'template-folder-row--confirm' : ''}`}>
                   {renameFolderId === folder.id ? (
                     <input
                       className="template-folder__rename"
@@ -453,20 +453,19 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                       <span className="template-folder__count">{templates.filter((t) => t.folderId === folder.id).length}</span>
                     </button>
                   )}
-                  {confirmDeleteFolderId === folder.id ? (
-                    <span className="template-folder__confirm">
-                      <span>删除？</span>
-                      <button onClick={() => void deleteFolder(folder.id)}>确定</button>
-                      <button onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
-                    </span>
-                  ) : (
-                    renameFolderId !== folder.id && (
-                      <span className="template-folder__tools">
-                        <button title="重命名" onClick={() => startRenameFolder(folder)}>✎</button>
-                        <button className="template-folder__delete-btn" title="删除文件夹（其中的模板移到未归类）" onClick={() => setConfirmDeleteFolderId(folder.id)}>×</button>
-                      </span>
-                    )
-                  )}
+                  <span className="template-folder__tools delete-hover">
+                    {confirmDeleteFolderId === folder.id ? (
+                      <>
+                        <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
+                        <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="template-folder__rename-btn" title="重命名文件夹" onClick={() => startRenameFolder(folder)}>重命名</button>
+                        <button className="delete-trigger" title="删除文件夹（其中的模板移到未归类）" onClick={() => setConfirmDeleteFolderId(folder.id)}>删除</button>
+                      </>
+                    )}
+                  </span>
                 </div>
               ))}
             </div>
@@ -486,7 +485,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
               {activeTemplates.map((tpl) => (
                 <div
                   key={tpl.id}
-                  className={`template-grid-card ${selectedId === tpl.id ? 'template-grid-card--active' : ''} ${selectedIds.includes(tpl.id) ? 'checked' : ''}`}
+                  className={`template-grid-card delete-hover ${selectedId === tpl.id ? 'template-grid-card--active' : ''} ${selectedIds.includes(tpl.id) ? 'checked' : ''}`}
                   onClick={() => openTemplate(tpl)}
                   onMouseEnter={() => setSelectedId(tpl.id)}
                 >
@@ -497,15 +496,19 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                     <div className="template-grid-card__meta">{tpl.app ? `${tpl.app} · ` : ''}{tpl.resolution.width}×{tpl.resolution.height}{tpl.scaleFactor > 1 ? ` @${tpl.scaleFactor}x` : ''}</div>
                     <div className="template-grid-card__tags">{(tpl.tags ?? []).slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
                   </div>
-                  {confirmDeleteId === tpl.id ? (
-                    <div className="template-card__confirm" onClick={(e) => e.stopPropagation()}>
-                      <span>删除？</span>
-                      <button onClick={() => handleDelete(tpl.id)}>确定</button>
-                      <button onClick={() => setConfirmDeleteId(null)}>取消</button>
-                    </div>
-                  ) : (
-                    <button className="template-card__delete" title="删除模板" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(tpl.id); }}>删除</button>
-                  )}
+                  <div className="template-grid-card__delete-controls delete-hover" onClick={(e) => e.stopPropagation()}>
+                    {confirmDeleteId === tpl.id ? (
+                      <>
+                        <button className="delete-confirm__ok" onClick={() => handleDelete(tpl.id)}>确定</button>
+                        <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteId(null)}>取消</button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="template-grid-card__rename-btn" title="重命名模板">重命名</button>
+                        <button className="delete-trigger" title="删除模板" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(tpl.id); }}>删除</button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
               {activeTemplates.length === 0 && <div className="template-modal__empty">{templates.length === 0 ? '还没有模板，点击上方「＋ 新建模板」上传第一张截图' : '没有匹配的模板'}</div>}

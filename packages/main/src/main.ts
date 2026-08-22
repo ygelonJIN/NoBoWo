@@ -4,6 +4,8 @@ import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'no
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type {
+  CloudApiProfile,
+  OcrEngine,
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
@@ -11,6 +13,7 @@ import type {
   YoloAnnotation,
   YoloClassDefinition,
   YoloDataset,
+  OcrResult,
   YoloEnvInfo,
   YoloImage,
   YoloModel,
@@ -62,6 +65,7 @@ const templatesDir = () => join(app.getPath('userData'), 'templates');
 const indexFile = () => join(templatesDir(), 'index.json');
 const templateImagesDir = () => join(templatesDir(), 'images');
 const templateSourcesDir = () => join(templatesDir(), 'sources');
+const cloudApiProfilesFile = () => join(app.getPath('userData'), 'api-profiles.json');
 
 async function ensureTemplatesDir() {
   await mkdir(templatesDir(), { recursive: true });
@@ -88,6 +92,44 @@ async function loadIndex(): Promise<TemplateIndex> {
 async function saveIndex(index: TemplateIndex) {
   await ensureTemplatesDir();
   await writeFile(indexFile(), JSON.stringify(index, null, 2), 'utf8');
+}
+
+type CloudApiIndex = {
+  profiles: CloudApiProfile[];
+};
+
+function normalizeProfile(profile: CloudApiProfile): CloudApiProfile {
+  return {
+    ...profile,
+    baseUrl: profile.baseUrl.trim(),
+    name: profile.name.trim(),
+    apiKey: profile.apiKey ?? '',
+    defaultPrompt: profile.defaultPrompt ?? '',
+    lastTestAt: profile.lastTestAt ?? null,
+    lastTestStatus: profile.lastTestStatus ?? null,
+    lastTestMessage: profile.lastTestMessage ?? null,
+  };
+}
+
+async function loadCloudApiIndex(): Promise<CloudApiIndex> {
+  try {
+    const raw = await readFile(cloudApiProfilesFile(), 'utf8');
+    const parsed = JSON.parse(raw) as Partial<CloudApiIndex> | CloudApiProfile[];
+    if (Array.isArray(parsed)) {
+      return { profiles: parsed.map(normalizeProfile) };
+    }
+    if (parsed && Array.isArray(parsed.profiles)) {
+      return { profiles: parsed.profiles.map(normalizeProfile) };
+    }
+  } catch {
+    return { profiles: [] };
+  }
+  return { profiles: [] };
+}
+
+async function saveCloudApiIndex(index: CloudApiIndex) {
+  await mkdir(app.getPath('userData'), { recursive: true });
+  await writeFile(cloudApiProfilesFile(), JSON.stringify(index, null, 2), 'utf8');
 }
 
 function dataUrlToBuffer(dataUrl: string): { buffer: Buffer; mime: string } {
@@ -119,6 +161,178 @@ function ensureParentId(folderId?: string | null) {
 
 function normalizeFolderName(name: string) {
   return name.trim().replace(/\s+/g, ' ');
+}
+
+function registerCloudApiIpc() {
+  ipcMain.handle('cloudApi:list', async (): Promise<CloudApiProfile[]> => {
+    const index = await loadCloudApiIndex();
+    return index.profiles.sort((a, b) => b.updatedAt - a.updatedAt);
+  });
+
+  ipcMain.handle(
+    'cloudApi:create',
+    async (_event, payload: { name: string; baseUrl: string; apiKey: string; defaultPrompt?: string }): Promise<CloudApiProfile> => {
+      const now = Date.now();
+      const profile: CloudApiProfile = normalizeProfile({
+        id: randomUUID(),
+        name: payload.name,
+        baseUrl: payload.baseUrl,
+        apiKey: payload.apiKey,
+        defaultPrompt: payload.defaultPrompt ?? '',
+        createdAt: now,
+        updatedAt: now,
+        lastTestAt: null,
+        lastTestStatus: null,
+        lastTestMessage: null,
+      });
+      const index = await loadCloudApiIndex();
+      index.profiles.push(profile);
+      await saveCloudApiIndex(index);
+      return profile;
+    },
+  );
+
+  ipcMain.handle(
+    'cloudApi:update',
+    async (
+      _event,
+      id: string,
+      patch: { name?: string; baseUrl?: string; apiKey?: string; defaultPrompt?: string },
+    ): Promise<CloudApiProfile | null> => {
+      const index = await loadCloudApiIndex();
+      const profile = index.profiles.find((item) => item.id === id);
+      if (!profile) return null;
+      if (typeof patch.name === 'string') profile.name = patch.name.trim();
+      if (typeof patch.baseUrl === 'string') profile.baseUrl = patch.baseUrl.trim();
+      if (typeof patch.apiKey === 'string') profile.apiKey = patch.apiKey;
+      if (typeof patch.defaultPrompt === 'string') profile.defaultPrompt = patch.defaultPrompt;
+      profile.updatedAt = Date.now();
+      await saveCloudApiIndex(index);
+      return profile;
+    },
+  );
+
+  ipcMain.handle('cloudApi:remove', async (_event, id: string): Promise<void> => {
+    const index = await loadCloudApiIndex();
+    index.profiles = index.profiles.filter((profile) => profile.id !== id);
+    await saveCloudApiIndex(index);
+  });
+
+  ipcMain.handle(
+    'cloudApi:test',
+    async (_event, payload: { baseUrl: string; apiKey: string; name?: string }): Promise<{ ok: boolean; message?: string; lastTestAt: number }> => {
+      const baseUrl = payload.baseUrl.trim();
+      if (!baseUrl) return { ok: false, message: 'Base URL 不能为空', lastTestAt: Date.now() };
+      const normalized = baseUrl.replace(/\/+$/, '');
+      const now = Date.now();
+      try {
+        const response = await fetch(`${normalized}`,
+          {
+            method: 'GET',
+            headers: payload.apiKey ? { Authorization: `Bearer ${payload.apiKey}` } : undefined,
+          },
+        );
+        if (response.ok || response.status < 500) {
+          return { ok: true, message: `${payload.name ?? '配置'} 连接成功（HTTP ${response.status}）`, lastTestAt: now };
+        }
+        return { ok: false, message: `服务端返回 HTTP ${response.status}`, lastTestAt: now };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err), lastTestAt: now };
+      }
+    },
+  );
+}
+
+function registerOcrIpc() {
+  ipcMain.handle('ocr:listEngines', async (): Promise<{ available: OcrEngine[]; default: OcrEngine }> => ({
+    available: ['auto', 'macosVision', 'windowsOcr', 'tesseract', 'paddleOcr'],
+    default: 'auto',
+  }));
+
+  const ocrDataDir = () => join(app.getPath('userData'), 'ocr');
+
+  async function ensureOcrLangData(): Promise<{ langPath: string; gzip: boolean }> {
+    const dir = ocrDataDir();
+    await mkdir(dir, { recursive: true });
+    const gzPath = join(dir, 'eng.traineddata.gz');
+    const rawPath = join(dir, 'eng.traineddata');
+    try {
+      await stat(gzPath);
+      return { langPath: dir, gzip: true };
+    } catch {
+      // continue
+    }
+    try {
+      await stat(rawPath);
+      return { langPath: dir, gzip: false };
+    } catch {
+      // continue
+    }
+    const response = await fetch('https://tessdata.projectnaptha.com/4.0.0/eng.traineddata.gz');
+    if (!response.ok) {
+      throw new Error(`首次使用需要下载 OCR 语言包（HTTP ${response.status}），请检查网络后重试`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await writeFile(gzPath, buffer);
+    return { langPath: dir, gzip: true };
+  }
+
+  ipcMain.handle(
+    'ocr:run',
+    async (
+      _event,
+      payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number },
+    ): Promise<OcrResult> => {
+      const { createWorker } = await import('tesseract.js');
+      const { langPath, gzip } = await ensureOcrLangData();
+      const worker = await createWorker('eng', undefined, { langPath, gzip, cachePath: ocrDataDir() });
+      try {
+        const recognition = await worker.recognize(payload.imageDataUrl, undefined, { blocks: true });
+        const data = recognition.data as {
+          text?: string;
+          blocks?: Array<{
+            paragraphs?: Array<{
+              lines?: Array<{
+                words?: Array<{
+                  text?: string;
+                  confidence?: number;
+                  bbox?: { x0?: number; y0?: number; x1?: number; y1?: number };
+                }>;
+              }>;
+            }>;
+          }>;
+        };
+        const words = (data.blocks ?? [])
+          .flatMap((block) => block.paragraphs ?? [])
+          .flatMap((paragraph) => paragraph.lines ?? [])
+          .flatMap((line) => line.words ?? []);
+        const matches = words
+          .filter((word) => word.text?.trim())
+          .map((word, index) => ({
+            id: `ocr-${index}-${word.bbox?.x0 ?? 0}-${word.bbox?.y0 ?? 0}`,
+            text: word.text?.trim() ?? '',
+            box: {
+              x: word.bbox?.x0 ?? 0,
+              y: word.bbox?.y0 ?? 0,
+              width: Math.max(0, (word.bbox?.x1 ?? 0) - (word.bbox?.x0 ?? 0)),
+              height: Math.max(0, (word.bbox?.y1 ?? 0) - (word.bbox?.y0 ?? 0)),
+            },
+            confidence: typeof word.confidence === 'number' ? word.confidence / 100 : undefined,
+          }))
+          .filter((match) => match.text.length > 0);
+        return {
+          engine: payload.engine,
+          width: payload.width ?? 0,
+          height: payload.height ?? 0,
+          text: data.text?.trim() ?? '',
+          matches,
+          message: payload.targetText?.trim() ? `已搜索：${payload.targetText.trim()}` : undefined,
+        };
+      } finally {
+        await worker.terminate();
+      }
+    },
+  );
 }
 
 function registerTemplateIpc() {
@@ -898,6 +1112,21 @@ function registerYoloIpc() {
     return ds;
   });
 
+  ipcMain.handle('yolo:updateDataset', async (_event, id: string, patch: { name?: string; notes?: string }): Promise<YoloDataset> => {
+    const index = await loadYoloIndex();
+    const ds = index.datasets.find((d) => d.id === id);
+    if (!ds) throw new Error('数据集不存在');
+    if (patch.name !== undefined) {
+      const name = patch.name.trim();
+      if (!name) throw new Error('名称不能为空');
+      ds.name = name;
+    }
+    if (patch.notes !== undefined) ds.notes = patch.notes?.trim() || undefined;
+    ds.updatedAt = Date.now();
+    await saveYoloIndex(index);
+    return { ...ds };
+  });
+
   ipcMain.handle('yolo:removeDataset', async (_event, id: string): Promise<void> => {
     const index = await loadYoloIndex();
     index.datasets = index.datasets.filter((d) => d.id !== id);
@@ -1281,6 +1510,8 @@ function registerYoloIpc() {
 }
 
 app.whenReady().then(() => {
+  registerCloudApiIpc();
+  registerOcrIpc();
   registerTemplateIpc();
   registerYoloIpc();
   createWindow();

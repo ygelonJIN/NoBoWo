@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 
 import type {
+  CloudApiProfile,
+  OcrEngine,
+  OcrResult,
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
@@ -18,6 +21,17 @@ import type {
 declare global {
   interface Window {
     electronAPI: Record<string, never>;
+    cloudApiAPI?: {
+      list: () => Promise<CloudApiProfile[]>;
+      create: (payload: { name: string; baseUrl: string; apiKey: string; defaultPrompt?: string }) => Promise<CloudApiProfile>;
+      update: (id: string, patch: { name?: string; baseUrl?: string; apiKey?: string; defaultPrompt?: string }) => Promise<CloudApiProfile | null>;
+      remove: (id: string) => Promise<void>;
+      test: (payload: { baseUrl: string; apiKey: string; name?: string }) => Promise<{ ok: boolean; message?: string; lastTestAt: number }>;
+    };
+    ocrAPI?: {
+      run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) => Promise<OcrResult>;
+      listEngines: () => Promise<{ available: OcrEngine[]; default: OcrEngine }>;
+    };
     templateAPI: {
       list: () => Promise<{ folders: TemplateFolder[]; templates: TemplateDefinition[] }>;
       create: (payload: TemplateCreatePayload) => Promise<TemplateDefinition>;
@@ -34,6 +48,7 @@ declare global {
     yoloAPI: {
       listDatasets: () => Promise<YoloDataset[]>;
       createDataset: (payload: { name: string; notes?: string }) => Promise<YoloDataset>;
+      updateDataset: (id: string, patch: { name?: string; notes?: string }) => Promise<YoloDataset>;
       removeDataset: (id: string) => Promise<void>;
       importImages: (
         datasetId: string,

@@ -55,6 +55,9 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmImageDelete, setConfirmImageDelete] = useState<string | null>(null);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const selected = datasets.find((d) => d.id === selectedId) ?? null;
 
@@ -142,6 +145,23 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
     }
   };
 
+  const startRename = (id: string, name: string) => {
+    setRenameId(id);
+    setRenameName(name);
+  };
+
+  const submitRename = async () => {
+    const name = renameName.trim();
+    if (!renameId || !name || !window.yoloAPI) return;
+    try {
+      await window.yoloAPI.updateDataset(renameId, { name });
+      setRenameId(null);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const removeImage = async (imageId: string) => {
     if (!selectedId || !window.yoloAPI) return;
     try {
@@ -194,23 +214,43 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
         )}
         <div className="yolo-dataset__items">
           {filtered.map((d) => (
-            <div key={d.id} className={`yolo-dataset__item ${selectedId === d.id ? 'active' : ''}`} onClick={() => onSelect(d.id)}>
+            <div key={d.id} className={`yolo-dataset__item delete-hover ${selectedId === d.id ? 'active' : ''}`} onClick={() => onSelect(d.id)}>
               <div className="yolo-dataset__item-main">
                 <span className="yolo-dataset__item-name">{d.name}</span>
+                <div className="yolo-dataset__item-actions delete-hover">
+                  {renameId === d.id ? (
+                    <>
+                      <input
+                        className="yolo-dataset__rename-input"
+                        autoFocus
+                        value={renameName}
+                        onChange={(e) => setRenameName(e.target.value)}
+                        onBlur={() => void submitRename()}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void submitRename();
+                          if (e.key === 'Escape') setRenameId(null);
+                        }}
+                      />
+                      <button className="delete-confirm__cancel" onClick={() => setRenameId(null)}>取消</button>
+                    </>
+                  ) : confirmDelete === d.id ? (
+                    <>
+                      <button className="delete-confirm__ok" onClick={() => void removeDataset(d.id)}>确定</button>
+                      <button className="delete-confirm__cancel" onClick={() => setConfirmDelete(null)}>取消</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="yolo-dataset__rename-btn" onClick={(e) => { e.stopPropagation(); startRename(d.id, d.name); }}>重命名</button>
+                      <button className="delete-trigger" onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); }} title="删除数据集">
+                        删除
+                      </button>
+                    </>
+                  )}
+                </div>
                 <span className="yolo-dataset__item-meta">
                   {d.imageCount} 图 · {d.annotatedCount} 已标注 · {d.classCount} 类
                 </span>
               </div>
-              {confirmDelete === d.id ? (
-                <span className="yolo-dataset__confirm" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => void removeDataset(d.id)}>删除</button>
-                  <button onClick={() => setConfirmDelete(null)}>取消</button>
-                </span>
-              ) : (
-                <button className="yolo-dataset__item-del" onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); }} title="删除数据集">
-                  删
-                </button>
-              )}
             </div>
           ))}
           {filtered.length === 0 && <div className="yolo-annotate__empty-hint">没有匹配的数据集</div>}
@@ -222,9 +262,42 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
           <div className="yolo-dataset__empty">
             <div className="yolo-dataset__empty-icon">◈</div>
             <p>创建或选择一个数据集，开始上传截图训练素材</p>
-            <button className="yolo-dataset__new inline" onClick={() => setShowCreate(true)}>
-              + 新建数据集
-            </button>
+          </div>
+        ) : images.length === 0 ? (
+          <div className="yolo-dataset__empty yolo-dataset__empty--drop">
+            <div
+              className={`yolo-dataset__drop yolo-dataset__drop--full ${dragOver ? 'drag' : ''} ${busy ? 'busy' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                if (!busy) void importFiles(Array.from(e.dataTransfer.files));
+              }}
+              onClick={() => !busy && fileRef.current?.click()}
+            >
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files && e.target.files.length > 0) void importFiles(Array.from(e.target.files));
+                  e.target.value = '';
+                }}
+              />
+              <div className="yolo-dataset__drop-icon">⬆</div>
+              <div className="yolo-dataset__drop-text">
+                {busy ? '正在导入图片…' : '拖拽图片到这里，或点击选择文件（支持多选）'}
+              </div>
+              <div className="yolo-dataset__drop-sub">
+                {selected.name} · 建议使用真实应用截图，每个目标至少 10~50 张
+              </div>
+            </div>
           </div>
         ) : (
           <>
@@ -306,16 +379,23 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
               {images.map((img) => {
                 const anns = annotations[img.id] ?? [];
                 return (
-                  <div key={img.id} className="yolo-dataset__cell">
+                  <div key={img.id} className="yolo-dataset__cell delete-hover">
                     <YoloThumb datasetId={selected.id} imageId={img.id} className="yolo-dataset__cell-img" />
                     {anns.length > 0 && (
                       <span className="yolo-dataset__cell-count" title="标注框数量">
                         {anns.length}
                       </span>
                     )}
-                    <button className="yolo-dataset__cell-del" title="删除这张图片" onClick={() => void removeImage(img.id)}>
-                      ×
-                    </button>
+                    <span className="yolo-dataset__cell-delete-controls" onClick={(e) => e.stopPropagation()}>
+                      {confirmImageDelete === img.id ? (
+                        <>
+                          <button className="delete-confirm__ok" onClick={() => { setConfirmImageDelete(null); void removeImage(img.id); }}>确定</button>
+                          <button className="delete-confirm__cancel" onClick={() => setConfirmImageDelete(null)}>取消</button>
+                        </>
+                      ) : (
+                        <button className="delete-trigger" title="删除这张图片" onClick={() => setConfirmImageDelete(img.id)}>删除</button>
+                      )}
+                    </span>
                     <div className="yolo-dataset__cell-info">
                       <span className="yolo-dataset__cell-name">{img.fileName}</span>
                       <span className={`yolo-dataset__cell-badge ${anns.length > 0 ? '' : 'empty'}`}>{anns.length > 0 ? '已标注' : '未标注'}</span>
@@ -481,16 +561,18 @@ function ModelsTab({ models, onChanged, apiAvailable }: ModelsTabProps) {
               <button onClick={(e) => { e.stopPropagation(); void applyToWorkflow(m.id); }} disabled={!m.path || busy}>
                 应用到识别节点
               </button>
-              {confirm === m.id ? (
-                <span className="yolo-model-card__confirm" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => void remove(m.id)}>确定删除</button>
-                  <button onClick={() => setConfirm(null)}>取消</button>
-                </span>
-              ) : (
-                <button className="yolo-btn--danger" onClick={(e) => { e.stopPropagation(); setConfirm(m.id); }} disabled={busy}>
-                  删除
-                </button>
-              )}
+              <span className="yolo-model-card__delete-controls" onClick={(e) => e.stopPropagation()}>
+                {confirm === m.id ? (
+                  <>
+                    <button className="delete-confirm__ok" onClick={() => void remove(m.id)}>确定</button>
+                    <button className="delete-confirm__cancel" onClick={() => setConfirm(null)}>取消</button>
+                  </>
+                ) : (
+                  <button className="delete-trigger delete-trigger--visible" onClick={(e) => { e.stopPropagation(); setConfirm(m.id); }} disabled={busy}>
+                    删除
+                  </button>
+                )}
+              </span>
             </div>
           </div>
         ))}

@@ -1,9 +1,12 @@
 import { resolve } from 'node:path';
-import { defineConfig } from 'electron-vite';
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
+
+const excludeCore = { exclude: ['@nobowo/core'] };
 
 export default defineConfig({
   main: {
+    plugins: [externalizeDepsPlugin(excludeCore)],
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'packages/main/src/main.ts'),
@@ -16,6 +19,7 @@ export default defineConfig({
     },
   },
   preload: {
+    plugins: [externalizeDepsPlugin(excludeCore)],
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'packages/main/src/preload.ts'),
