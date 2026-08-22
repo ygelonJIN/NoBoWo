@@ -488,7 +488,7 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
             <span className="yolo-annotate__pos">
               {currentIndex + 1} / {images.length}
             </span>
-            <button onClick={goNext} disabled={currentIndex >= images.length - 1}>
+            <button className="yolo-btn--primary" onClick={goNext} disabled={currentIndex >= images.length - 1}>
               下一张
             </button>
             <button onClick={goNextUnannotated} disabled={annotatedImages >= images.length}>

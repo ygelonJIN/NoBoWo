@@ -174,6 +174,24 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
           <span className="yolo-panel-title__sub">{datasets.length} 个</span>
         </div>
         <input className="yolo-dataset__search" placeholder="搜索数据集…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        {showCreate ? (
+          <div className="yolo-dataset__create">
+            <input autoFocus value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => {
+              if (e.key === 'Enter') void createDataset();
+              if (e.key === 'Escape') setShowCreate(false);
+            }} placeholder="数据集名称…" />
+            <div className="yolo-dataset__create-actions">
+              <button onClick={() => void createDataset()} disabled={!newName.trim()}>
+                确定
+              </button>
+              <button onClick={() => setShowCreate(false)}>取消</button>
+            </div>
+          </div>
+        ) : (
+          <button className="yolo-dataset__new" onClick={() => setShowCreate(true)}>
+            ＋ 新建数据集
+          </button>
+        )}
         <div className="yolo-dataset__items">
           {filtered.map((d) => (
             <div key={d.id} className={`yolo-dataset__item ${selectedId === d.id ? 'active' : ''}`} onClick={() => onSelect(d.id)}>
@@ -197,21 +215,6 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
           ))}
           {filtered.length === 0 && <div className="yolo-annotate__empty-hint">没有匹配的数据集</div>}
         </div>
-        {showCreate ? (
-          <div className="yolo-dataset__create">
-            <input autoFocus value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void createDataset()} placeholder="数据集名称…" />
-            <div className="yolo-dataset__create-actions">
-              <button onClick={() => void createDataset()} disabled={!newName.trim()}>
-                创建
-              </button>
-              <button onClick={() => setShowCreate(false)}>取消</button>
-            </div>
-          </div>
-        ) : (
-          <button className="yolo-dataset__new" onClick={() => setShowCreate(true)}>
-            + 新建数据集
-          </button>
-        )}
       </aside>
 
       <section className="yolo-dataset__main">

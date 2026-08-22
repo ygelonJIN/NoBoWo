@@ -75,51 +75,6 @@ function normalizeTags(text: string) {
   return [...new Set(text.split(/[，,\n]/).map((v) => v.trim()).filter(Boolean))].join('，');
 }
 
-function TemplatePreview({ tpl }: { tpl: TemplateDefinition }) {
-  const [src, setSrc] = useState<string>('');
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setSrc('');
-    window.templateAPI?.getImage(tpl.id, 'source').then((v) => {
-      if (cancelled) return;
-      setSrc(v ?? '');
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [tpl.id]);
-
-  const hasSource = Boolean(src);
-
-  return (
-    <div className="template-preview">
-      <div className="template-preview__head">
-        <span>来源截图（复原图）</span>
-        {!hasSource && <span className="template-preview__state">{loading ? '加载中…' : '缺失'}</span>}
-      </div>
-      <div className="template-preview__canvas">
-        {hasSource ? (
-          <>
-            <img src={src} alt="模板预览" draggable={false} />
-            <div className="template-preview__crop" style={{ left: `${(tpl.sourceRect.x / tpl.resolution.width) * 100}%`, top: `${(tpl.sourceRect.y / tpl.resolution.height) * 100}%`, width: `${(tpl.sourceRect.width / tpl.resolution.width) * 100}%`, height: `${(tpl.sourceRect.height / tpl.resolution.height) * 100}%` }} />
-            <div className="template-preview__click" style={{ left: `calc(${((tpl.sourceRect.x + tpl.sourceRect.width / 2) / tpl.resolution.width) * 100}% + ${tpl.clickOffset.x}px)`, top: `calc(${((tpl.sourceRect.y + tpl.sourceRect.height / 2) / tpl.resolution.height) * 100}% + ${tpl.clickOffset.y}px)` }} />
-          </>
-        ) : (
-          <div className="template-preview__empty">{loading ? '来源截图加载中…' : '来源截图缺失，无法显示复原图。可在上方「更换截图后重新框选」补全。'}</div>
-        )}
-      </div>
-      <div className="template-preview__meta">
-        <span>应用：{tpl.app ?? '未填写'}</span>
-        <span>窗口：{tpl.windowTitle ?? '未填写'}</span>
-        <span>缩放：{tpl.appZoom ?? `${tpl.scaleFactor}x`}</span>
-      </div>
-    </div>
-  );
-}
-
 export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [folders, setFolders] = useState<TemplateFolder[]>([]);
@@ -380,7 +335,6 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   });
 
   const activeTemplates = filtered.filter((tpl) => (activeFolderId ? tpl.folderId === activeFolderId : true));
-  const selectedTemplate = templates.find((t) => t.id === selectedId) ?? null;
   const halfW = edit.sourceRect ? Math.round(edit.sourceRect.width / 2) : 0;
   const halfH = edit.sourceRect ? Math.round(edit.sourceRect.height / 2) : 0;
   const canSave = Boolean(edit.name.trim() && edit.sourceRect) && !apiUnavailable;
@@ -450,9 +404,31 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
           <aside className="template-modal__folders">
             <div className="template-modal__folders-head">
               <span className="template-modal__section-title">文件夹</span>
-              <button className="template-modal__folder-new" onClick={() => { setFolderCreateOpen((v) => !v); setRenameFolderId(null); }}>+ 新建</button>
             </div>
             <div className="template-modal__folders-list">
+              {folderCreateOpen ? (
+                <div className="template-folder--create">
+                  <input
+                    value={newFolder}
+                    autoFocus
+                    onChange={(e) => setNewFolder(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void createFolder();
+                      if (e.key === 'Escape') setFolderCreateOpen(false);
+                    }}
+                    placeholder="新文件夹名…"
+                  />
+                  <div className="template-folder__actions">
+                    <button onClick={() => void createFolder()} disabled={!newFolder.trim()}>确定</button>
+                    <button onClick={() => setFolderCreateOpen(false)}>取消</button>
+                  </div>
+                </div>
+              ) : (
+                <button className="template-folder-new-card" onClick={() => { setFolderCreateOpen(true); setRenameFolderId(null); }}>
+                  <span className="template-folder-new-card__icon">＋</span>
+                  <span className="template-folder-new-card__text">新建文件夹</span>
+                </button>
+              )}
               <button className={`template-folder ${activeFolderId === null ? 'active' : ''}`} onClick={() => setActiveFolderId(null)}>
                 <span className="template-folder__name">全部模板</span>
                 <span className="template-folder__count">{templates.length}</span>
@@ -494,24 +470,6 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                 </div>
               ))}
             </div>
-            {folderCreateOpen && (
-              <div className="template-folder template-folder--create">
-                <input
-                  value={newFolder}
-                  autoFocus
-                  onChange={(e) => setNewFolder(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void createFolder();
-                    if (e.key === 'Escape') setFolderCreateOpen(false);
-                  }}
-                  placeholder="新文件夹名…"
-                />
-                <div className="template-folder__actions">
-                  <button onClick={() => void createFolder()} disabled={!newFolder.trim()}>创建</button>
-                  <button onClick={() => setFolderCreateOpen(false)}>取消</button>
-                </div>
-              </div>
-            )}
           </aside>
 
           <section className="template-modal__list">
@@ -577,7 +535,6 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                   }}
                   onOffsetChange={(offset) => updateField('clickOffset', offset)}
                 />
-                {selectedTemplate && <TemplatePreview tpl={selectedTemplate} />}
                 <div className="template-modal__step">2 · 属性</div>
                 <TemplateForm edit={edit} halfW={halfW} halfH={halfH} canSave={canSave} onChange={updateField} onSave={handleSave} folders={folders} />
               </>
@@ -588,7 +545,6 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                   <p>该模板没有保存来源截图，无法直接重新框选。可更换截图后重新框选，或仅修改名称与配置。</p>
                   <button className="template-modal__link" onClick={() => { pendingReplaceRef.current = true; fileInputRef.current?.click(); }}>更换截图后重新框选</button>
                 </div>
-                {selectedTemplate && <TemplatePreview tpl={selectedTemplate} />}
                 <div className="template-modal__step">2 · 属性</div>
                 <TemplateForm edit={edit} halfW={halfW} halfH={halfH} canSave={Boolean(edit.name.trim())} onChange={updateField} onSave={handleSave} folders={folders} />
               </>
