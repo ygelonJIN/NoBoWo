@@ -1,11 +1,17 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell } from 'electron';
 import { join } from 'node:path';
 import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { connect as tcpConnect } from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type {
   CloudApiProfile,
   OcrEngine,
+  StreamConnectionTestResult,
+  StreamMotionResult,
+  StreamProbeResult,
+  StreamScreenshotResult,
+  StreamSourceProfile,
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
@@ -238,6 +244,283 @@ function registerCloudApiIpc() {
         return { ok: false, message: `服务端返回 HTTP ${response.status}`, lastTestAt: now };
       } catch (err) {
         return { ok: false, message: err instanceof Error ? err.message : String(err), lastTestAt: now };
+      }
+    },
+  );
+}
+
+// ===== 串流设备管理 =====
+
+const streamSourcesFile = () => join(app.getPath('userData'), 'stream-sources.json');
+
+type StreamSourceIndex = {
+  sources: StreamSourceProfile[];
+};
+
+function normalizeStreamSource(source: StreamSourceProfile): StreamSourceProfile {
+  return {
+    ...source,
+    name: source.name.trim(),
+    type: source.type ?? 'otherDevice',
+    host: source.host?.trim() || undefined,
+    port: source.port ? Number(source.port) : undefined,
+    url: source.url?.trim() || undefined,
+    windowHint: source.windowHint?.trim() || undefined,
+    notes: source.notes?.trim() || undefined,
+    lastTestAt: source.lastTestAt ?? null,
+    lastTestStatus: source.lastTestStatus ?? null,
+    lastTestMessage: source.lastTestMessage ?? null,
+  };
+}
+
+async function loadStreamSources(): Promise<StreamSourceIndex> {
+  try {
+    const raw = await readFile(streamSourcesFile(), 'utf8');
+    const parsed = JSON.parse(raw) as Partial<StreamSourceIndex> | StreamSourceProfile[];
+    if (Array.isArray(parsed)) {
+      return { sources: parsed.map(normalizeStreamSource) };
+    }
+    if (parsed && Array.isArray(parsed.sources)) {
+      return { sources: parsed.sources.map(normalizeStreamSource) };
+    }
+  } catch {
+    return { sources: [] };
+  }
+  return { sources: [] };
+}
+
+async function saveStreamSources(index: StreamSourceIndex) {
+  await mkdir(app.getPath('userData'), { recursive: true });
+  await writeFile(streamSourcesFile(), JSON.stringify(index, null, 2), 'utf8');
+}
+
+function testTcpConnection(host: string, port: number, timeoutMs = 4000): Promise<{ ok: boolean; latencyMs: number | null; message: string }> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = tcpConnect({ host, port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve({ ok: false, latencyMs: null, message: `连接超时（${timeoutMs}ms）` });
+    }, timeoutMs);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      const latency = Date.now() - started;
+      socket.destroy();
+      resolve({ ok: true, latencyMs: latency, message: `TCP 连接成功 · ${latency}ms` });
+    });
+    socket.once('error', (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, latencyMs: null, message: err instanceof Error ? err.message : String(err) });
+    });
+  });
+}
+
+async function captureWindowFrames(sourceId: string, thumbnailSize: { width: number; height: number }): Promise<{ frame: string; width: number; height: number } | null> {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['window'],
+      thumbnailSize,
+      fetchWindowIcons: false,
+    });
+    const source = sources.find((item) => item.id === sourceId);
+    if (!source || source.thumbnail.isEmpty()) return null;
+    const size = source.thumbnail.getSize();
+    return { frame: source.thumbnail.toDataURL(), width: size.width, height: size.height };
+  } catch {
+    return null;
+  }
+}
+
+function registerStreamIpc() {
+  ipcMain.handle('stream:list', async (): Promise<StreamSourceProfile[]> => {
+    const index = await loadStreamSources();
+    return index.sources.sort((a, b) => b.updatedAt - a.updatedAt);
+  });
+
+  ipcMain.handle(
+    'stream:create',
+    async (_event, payload: Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'>): Promise<StreamSourceProfile> => {
+      const now = Date.now();
+      const profile: StreamSourceProfile = normalizeStreamSource({
+        id: randomUUID(),
+        name: payload.name,
+        type: payload.type,
+        host: payload.host,
+        port: payload.port,
+        url: payload.url,
+        windowHint: payload.windowHint,
+        notes: payload.notes,
+        createdAt: now,
+        updatedAt: now,
+        lastTestAt: null,
+        lastTestStatus: null,
+        lastTestMessage: null,
+      });
+      const index = await loadStreamSources();
+      index.sources.push(profile);
+      await saveStreamSources(index);
+      return profile;
+    },
+  );
+
+  ipcMain.handle(
+    'stream:update',
+    async (_event, id: string, patch: Partial<Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'>>): Promise<StreamSourceProfile | null> => {
+      const index = await loadStreamSources();
+      const profile = index.sources.find((item) => item.id === id);
+      if (!profile) return null;
+      if (typeof patch.name === 'string') profile.name = patch.name.trim();
+      if (patch.type !== undefined) profile.type = patch.type;
+      if (typeof patch.host === 'string') profile.host = patch.host.trim() || undefined;
+      if (patch.port !== undefined) profile.port = patch.port ? Number(patch.port) : undefined;
+      if (typeof patch.url === 'string') profile.url = patch.url.trim() || undefined;
+      if (typeof patch.windowHint === 'string') profile.windowHint = patch.windowHint.trim() || undefined;
+      if (typeof patch.notes === 'string') profile.notes = patch.notes.trim() || undefined;
+      profile.updatedAt = Date.now();
+      await saveStreamSources(index);
+      return normalizeStreamSource(profile);
+    },
+  );
+
+  ipcMain.handle('stream:remove', async (_event, id: string): Promise<void> => {
+    const index = await loadStreamSources();
+    index.sources = index.sources.filter((source) => source.id !== id);
+    await saveStreamSources(index);
+  });
+
+  ipcMain.handle(
+    'stream:testConnection',
+    async (_event, payload: { host?: string; port?: number; url?: string; name?: string }): Promise<StreamConnectionTestResult> => {
+      const now = Date.now();
+      const host = payload.host?.trim();
+      const url = payload.url?.trim();
+      if (url) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5000);
+          const started = Date.now();
+          const response = await fetch(url, { method: 'GET', signal: controller.signal });
+          clearTimeout(timer);
+          const latency = Date.now() - started;
+          if (response.ok || response.status < 500) {
+            return { ok: true, message: `${payload.name ?? '串流源'} 可达（HTTP ${response.status}）· ${latency}ms`, latencyMs: latency, lastTestAt: now };
+          }
+          return { ok: false, message: `服务端返回 HTTP ${response.status}`, latencyMs: latency, lastTestAt: now };
+        } catch (err) {
+          const message = err instanceof Error ? (err.name === 'AbortError' ? '请求超时（5s）' : err.message) : String(err);
+          return { ok: false, message, latencyMs: null, lastTestAt: now };
+        }
+      }
+      const port = payload.port ? Number(payload.port) : undefined;
+      if (!host || !port || !Number.isInteger(port) || port <= 0 || port > 65535) {
+        return { ok: false, message: '请填写有效的主机地址和端口（1-65535）', latencyMs: null, lastTestAt: now };
+      }
+      const result = await testTcpConnection(host, port);
+      return { ok: result.ok, message: result.message, latencyMs: result.latencyMs, lastTestAt: now };
+    },
+  );
+
+  ipcMain.handle('stream:probeWindows', async (): Promise<StreamProbeResult> => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['window'],
+        thumbnailSize: { width: 320, height: 180 },
+        fetchWindowIcons: false,
+      });
+      const windows = sources
+        .filter((source) => !source.name.startsWith('NoBoWo'))
+        .map((source) => {
+          const size = source.thumbnail.getSize();
+          return {
+            id: source.id,
+            name: source.name,
+            thumbnail: source.thumbnail.toDataURL(),
+            width: size.width,
+            height: size.height,
+          };
+        })
+        .filter((item) => item.thumbnail.length > 0);
+      return {
+        ok: true,
+        message: `扫描到 ${windows.length} 个窗口`,
+        windows,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+        windows: [],
+      };
+    }
+  });
+
+  const captureResult = (captured: { frame: string; width: number; height: number } | null): StreamMotionResult => {
+    if (!captured) {
+      return { ok: false, changed: false, diffRatio: 0, message: '未能抓取该窗口画面（窗口可能已关闭、最小化或没有屏幕录制权限）' };
+    }
+    return { ok: true, changed: false, diffRatio: 0, frame: captured.frame, width: captured.width, height: captured.height, message: '抓帧成功' };
+  };
+
+  ipcMain.handle('stream:captureWindow', async (_event, sourceId: string): Promise<StreamMotionResult> => {
+    return captureResult(await captureWindowFrames(sourceId, { width: 960, height: 540 }));
+  });
+
+  ipcMain.handle('stream:captureSource', async (_event, sourceId: string): Promise<StreamMotionResult> => {
+    const index = await loadStreamSources();
+    const profile = index.sources.find((source) => source.id === sourceId);
+    if (!profile) return { ok: false, changed: false, diffRatio: 0, message: '找不到串流设备配置' };
+    const sources = await desktopCapturer.getSources({
+      types: ['window'],
+      thumbnailSize: { width: 960, height: 540 },
+      fetchWindowIcons: false,
+    });
+    const hint = profile.windowHint?.trim().toLowerCase();
+    const source = (hint ? sources.find((item) => item.name.toLowerCase().includes(hint)) : undefined)
+      ?? sources.find((item) => !item.name.startsWith('NoBoWo'));
+    return captureResult(source ? await captureWindowFrames(source.id, { width: 960, height: 540 }) : null);
+  });
+
+  ipcMain.handle(
+    'stream:captureScreenshot',
+    async (
+      _event,
+      payload: { source: 'screen' | 'stream'; streamSourceId?: string },
+    ): Promise<StreamScreenshotResult> => {
+      const thumbnailSize = { width: 1920, height: 1080 };
+      try {
+        if (payload.source === 'stream') {
+          const index = await loadStreamSources();
+          const profile = index.sources.find((source) => source.id === payload.streamSourceId);
+          if (!profile) {
+            return { ok: false, message: '找不到串流设备配置，请在「串流设备」中先创建并保存设备' };
+          }
+          const sources = await desktopCapturer.getSources({
+            types: ['window'],
+            thumbnailSize,
+            fetchWindowIcons: false,
+          });
+          const hint = profile.windowHint?.trim().toLowerCase();
+          const windowSource = (hint ? sources.find((item) => item.name.toLowerCase().includes(hint)) : undefined)
+            ?? sources.find((item) => !item.name.startsWith('NoBoWo'));
+          if (!windowSource || windowSource.thumbnail.isEmpty()) {
+            return { ok: false, message: '未找到串流窗口，请确认串流窗口已打开、macOS 屏幕录制权限已授权' };
+          }
+          const size = windowSource.thumbnail.getSize();
+          return { ok: true, frame: windowSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+        }
+        const sources = await desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize,
+          fetchWindowIcons: false,
+        });
+        const screenSource = sources[0];
+        if (!screenSource || screenSource.thumbnail.isEmpty()) {
+          return { ok: false, message: '无法截取屏幕画面，请确认屏幕录制权限已授权' };
+        }
+        const size = screenSource.thumbnail.getSize();
+        return { ok: true, frame: screenSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
       }
     },
   );
@@ -1511,6 +1794,7 @@ function registerYoloIpc() {
 
 app.whenReady().then(() => {
   registerCloudApiIpc();
+  registerStreamIpc();
   registerOcrIpc();
   registerTemplateIpc();
   registerYoloIpc();

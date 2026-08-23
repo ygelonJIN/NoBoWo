@@ -48,6 +48,9 @@ export type WaitNode = WorkflowNodeBase<'wait', {
 
 export type ScreenshotNode = WorkflowNodeBase<'screenshot', {
   regionMode: 'full' | 'selected';
+  /** capture from a configured stream window instead of the entire desktop */
+  source: 'screen' | 'stream';
+  streamSourceId?: string;
 }>;
 
 export type IfNode = WorkflowNodeBase<'if', {
@@ -95,6 +98,76 @@ export type OcrResult = {
   height: number;
   text: string;
   matches: OcrMatch[];
+  message?: string;
+};
+
+// ===== 串流设备管理 =====
+
+export type StreamSourceType = 'ps5' | 'xbox' | 'secondPc' | 'otherDevice';
+
+export type StreamSourceProfile = {
+  id: string;
+  name: string;
+  type: StreamSourceType;
+  /** 主机地址（IP / 主机名），用于连通性测试 */
+  host?: string;
+  /** 测试端口 */
+  port?: number;
+  /** 通用 URL（如 http/rtsp 流地址） */
+  url?: string;
+  /** 串流窗口标题关键字，用于画面探测时自动预选 */
+  windowHint?: string;
+  notes?: string;
+  createdAt: number;
+  updatedAt: number;
+  lastTestAt?: number | null;
+  lastTestStatus?: 'ok' | 'error' | null;
+  lastTestMessage?: string | null;
+};
+
+export type StreamWindowInfo = {
+  /** desktopCapturer 的 source id，用于抓帧 */
+  id: string;
+  /** 窗口标题 */
+  name: string;
+  /** 缩略图 dataURL */
+  thumbnail: string;
+  /** 窗口缩略图宽高 */
+  width: number;
+  height: number;
+};
+
+export type StreamScreenshotResult = {
+  ok: boolean;
+  frame?: string;
+  width?: number;
+  height?: number;
+  message?: string;
+};
+
+export type StreamProbeResult = {
+  ok: boolean;
+  message?: string;
+  windows: StreamWindowInfo[];
+};
+
+export type StreamConnectionTestResult = {
+  ok: boolean;
+  message?: string;
+  latencyMs?: number | null;
+  lastTestAt: number;
+};
+
+export type StreamMotionResult = {
+  ok: boolean;
+  /** 两帧画面是否有明显变化（判定画面在动） */
+  changed: boolean;
+  /** 差异比例 0-1 */
+  diffRatio: number;
+  /** 最新一帧 dataURL，用于预览 */
+  frame?: string;
+  width?: number;
+  height?: number;
   message?: string;
 };
 
@@ -431,7 +504,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         ...base,
         type,
         title: 'Screenshot',
-        data: { regionMode: 'full' },
+        data: { regionMode: 'full', source: 'screen' },
       };
     case 'if':
       return {

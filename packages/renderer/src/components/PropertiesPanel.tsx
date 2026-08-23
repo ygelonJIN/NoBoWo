@@ -1,4 +1,4 @@
-import type { CloudApiProfile, OcrEngine, RecognizeNode, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import type { CloudApiProfile, OcrEngine, RecognizeNode, StreamSourceProfile, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
 import { ModelPicker } from './ModelPicker';
@@ -104,6 +104,8 @@ export function PropertiesPanel({
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [folders, setFolders] = useState<TemplateFolder[]>([]);
   const [apiProfiles, setApiProfiles] = useState<CloudApiProfile[]>([]);
+  const [streamSources, setStreamSources] = useState<StreamSourceProfile[]>([]);
+  const [streamSourceLoading, setStreamSourceLoading] = useState(false);
 
   useEffect(() => {
     if (!window.templateAPI) {
@@ -124,6 +126,19 @@ export function PropertiesPanel({
   }, [templateVersion]);
 
   useEffect(() => {
+    if (!window.streamAPI) {
+      setStreamSources([]);
+      return;
+    }
+    setStreamSourceLoading(true);
+    window.streamAPI
+      .list()
+      .then(setStreamSources)
+      .catch(() => setStreamSources([]))
+      .finally(() => setStreamSourceLoading(false));
+  }, [node?.type]);
+
+  useEffect(() => {
     if (!window.cloudApiAPI) {
       setApiProfiles([]);
       return;
@@ -133,6 +148,14 @@ export function PropertiesPanel({
       .then(setApiProfiles)
       .catch(() => setApiProfiles([]));
   }, [cloudApiVersion, expandedStrategy]);
+
+  useEffect(() => {
+    if (!window.streamAPI) {
+      setStreamSources([]);
+      return;
+    }
+    window.streamAPI.list().then(setStreamSources).catch(() => setStreamSources([]));
+  }, [expandedStrategy, node?.type]);
 
   const updateStrategy = useCallback(
     (strategyKey: StrategyKey, patch: Partial<LooseStrategy>) => {
@@ -326,6 +349,30 @@ export function PropertiesPanel({
                 onChange={(v) => onChangeNode(updateNodeData(node, { regionMode: v as 'full' | 'selected' }))}
               />
             </label>
+            <label>
+              来源
+              <CustomSelect
+                value={node.data.source ?? 'screen'}
+                options={[
+                  { value: 'screen', label: '系统屏幕' },
+                  { value: 'stream', label: '串流窗口' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { source: v as 'screen' | 'stream' }))}
+              />
+            </label>
+            {node.data.source === 'stream' && (
+              <label>
+                串流设备
+                <CustomSelect
+                  value={node.data.streamSourceId ?? ''}
+                  options={[
+                    { value: '', label: streamSourceLoading ? '正在加载串流设备…' : '选择一个串流设备' },
+                    ...streamSources.map((source) => ({ value: source.id, label: `${source.name} · ${source.type.toUpperCase()}` })),
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                />
+              </label>
+            )}
           </section>
         )}
 

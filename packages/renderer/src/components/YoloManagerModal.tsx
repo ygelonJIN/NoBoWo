@@ -216,21 +216,30 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
           {filtered.map((d) => (
             <div key={d.id} className={`yolo-dataset__item delete-hover ${selectedId === d.id ? 'active' : ''}`} onClick={() => onSelect(d.id)}>
               <div className="yolo-dataset__item-main">
-                <span className="yolo-dataset__item-name">{d.name}</span>
+                <div className="yolo-dataset__item-head">
+                  {renameId === d.id ? (
+                    <input
+                      className="yolo-dataset__rename-input"
+                      autoFocus
+                      value={renameName}
+                      onChange={(e) => setRenameName(e.target.value)}
+                      onBlur={() => void submitRename()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void submitRename();
+                        if (e.key === 'Escape') setRenameId(null);
+                      }}
+                    />
+                  ) : (
+                    <span className="yolo-dataset__item-name">{d.name}</span>
+                  )}
+                  <span className="yolo-dataset__item-meta">
+                    {d.imageCount} 图 · {d.annotatedCount} 已标注 · {d.classCount} 类
+                  </span>
+                </div>
                 <div className="yolo-dataset__item-actions delete-hover">
                   {renameId === d.id ? (
                     <>
-                      <input
-                        className="yolo-dataset__rename-input"
-                        autoFocus
-                        value={renameName}
-                        onChange={(e) => setRenameName(e.target.value)}
-                        onBlur={() => void submitRename()}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void submitRename();
-                          if (e.key === 'Escape') setRenameId(null);
-                        }}
-                      />
+                      <button className="delete-confirm__ok" onClick={() => void submitRename()}>确定</button>
                       <button className="delete-confirm__cancel" onClick={() => setRenameId(null)}>取消</button>
                     </>
                   ) : confirmDelete === d.id ? (
@@ -241,15 +250,10 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
                   ) : (
                     <>
                       <button className="yolo-dataset__rename-btn" onClick={(e) => { e.stopPropagation(); startRename(d.id, d.name); }}>重命名</button>
-                      <button className="delete-trigger" onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); }} title="删除数据集">
-                        删除
-                      </button>
+                      <button className="delete-trigger" onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); }} title="删除数据集">删除</button>
                     </>
                   )}
                 </div>
-                <span className="yolo-dataset__item-meta">
-                  {d.imageCount} 图 · {d.annotatedCount} 已标注 · {d.classCount} 类
-                </span>
               </div>
             </div>
           ))}

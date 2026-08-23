@@ -12,6 +12,7 @@ import { TemplateManagerModal } from './components/TemplateManagerModal';
 import { YoloManagerModal } from './components/YoloManagerModal';
 import { CloudApiManagerModal } from './components/CloudApiManagerModal';
 import { OcrTestModal } from './components/OcrTestModal';
+import { StreamManagerModal } from './components/StreamManagerModal';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -141,7 +142,11 @@ function getNodeSummary(node: WorkflowNode): string {
     case 'wait':
       return node.data.mode === 'delay' ? `延时 ${node.data.delayMs ?? 1000}ms` : '条件等待';
     case 'screenshot':
-      return node.data.regionMode === 'full' ? '全屏截图' : '选区截图';
+      return node.data.source === 'stream'
+        ? `串流窗口截图 · ${node.data.regionMode === 'full' ? '全屏' : '选区'}`
+        : node.data.regionMode === 'full'
+          ? '全屏截图'
+          : '选区截图';
     case 'if':
       return node.data.expression || '条件判断';
     case 'loop':
@@ -168,6 +173,8 @@ export function App() {
   const [cloudApiVersion, setCloudApiVersion] = useState(0);
   const [ocrTestOpen, setOcrTestOpen] = useState(false);
   const [ocrTestPreset, setOcrTestPreset] = useState<{ text?: string; engine?: OcrEngine } | null>(null);
+  const [streamManagerOpen, setStreamManagerOpen] = useState(false);
+  const [streamVersion, setStreamVersion] = useState(0);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [dragging, setDragging] = useState<{ id: string; offset: Point; start: Point; moved: boolean } | null>(null);
@@ -526,6 +533,7 @@ export function App() {
             <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
             <button onClick={() => { setOcrTestPreset(null); setOcrTestOpen(true); }}>OCR 测试台</button>
             <button onClick={() => setCloudApiManagerOpen(true)}>云端 API</button>
+            <button onClick={() => setStreamManagerOpen(true)}>串流设备</button>
           </div>
         </div>
 
@@ -660,6 +668,12 @@ export function App() {
           onClose={() => setOcrTestOpen(false)}
           initialText={ocrTestPreset?.text}
           initialEngine={ocrTestPreset?.engine}
+        />
+      )}
+      {streamManagerOpen && (
+        <StreamManagerModal
+          onClose={() => setStreamManagerOpen(false)}
+          onChanged={() => setStreamVersion((version) => version + 1)}
         />
       )}
     </div>

@@ -215,33 +215,35 @@ export function CloudApiManagerModal({ onClose, onChanged }: Props) {
 
           <section className="cloud-api-modal__editor">
             <div className="template-modal__step">1 · 基本信息</div>
-            <div className="cloud-api-form">
-              <label className="template-form__field">
-                配置名称
-                <input value={draft.name} onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：OpenAI 视觉 / 自建多模态" />
-              </label>
-              <label className="template-form__field">
-                Base URL
-                <input value={draft.baseUrl} onChange={(e) => setDraft((prev) => ({ ...prev, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" />
-              </label>
-              <label className="template-form__field cloud-api-form__wide">
-                API Key
-                <textarea
-                  value={draft.apiKey}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, apiKey: e.target.value }))}
-                  rows={2}
-                  placeholder="粘贴你的密钥，仅保存在本地 userData"
-                />
-              </label>
-              <label className="template-form__field cloud-api-form__wide">
-                默认提示词
-                <textarea
-                  value={draft.defaultPrompt}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, defaultPrompt: e.target.value }))}
-                  rows={4}
-                  placeholder="例如：找到截图中最像“登录”按钮的中心点，并返回 JSON 坐标"
-                />
-              </label>
+            <div className="panel-card">
+              <div className="cloud-api-form">
+                <label className="template-form__field">
+                  配置名称
+                  <input value={draft.name} onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：OpenAI 视觉 / 自建多模态" />
+                </label>
+                <label className="template-form__field">
+                  Base URL
+                  <input value={draft.baseUrl} onChange={(e) => setDraft((prev) => ({ ...prev, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" />
+                </label>
+                <label className="template-form__field cloud-api-form__wide">
+                  API Key
+                  <textarea
+                    value={draft.apiKey}
+                    onChange={(e) => setDraft((prev) => ({ ...prev, apiKey: e.target.value }))}
+                    rows={2}
+                    placeholder="粘贴你的密钥，仅保存在本地 userData"
+                  />
+                </label>
+                <label className="template-form__field cloud-api-form__wide">
+                  默认提示词
+                  <textarea
+                    value={draft.defaultPrompt}
+                    onChange={(e) => setDraft((prev) => ({ ...prev, defaultPrompt: e.target.value }))}
+                    rows={4}
+                    placeholder="例如：找到截图中最像“登录”按钮的中心点，并返回 JSON 坐标"
+                  />
+                </label>
+              </div>
             </div>
 
             <div className="template-modal__step">2 · 测试连接</div>

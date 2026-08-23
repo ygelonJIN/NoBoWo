@@ -4,6 +4,11 @@ import type {
   CloudApiProfile,
   OcrEngine,
   OcrResult,
+  StreamConnectionTestResult,
+  StreamMotionResult,
+  StreamProbeResult,
+  StreamScreenshotResult,
+  StreamSourceProfile,
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
@@ -31,6 +36,18 @@ declare global {
     ocrAPI?: {
       run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) => Promise<OcrResult>;
       listEngines: () => Promise<{ available: OcrEngine[]; default: OcrEngine }>;
+    };
+    streamAPI?: {
+      list: () => Promise<StreamSourceProfile[]>;
+      create: (payload: Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'>) => Promise<StreamSourceProfile>;
+      update: (id: string, patch: Partial<Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<StreamSourceProfile | null>;
+      remove: (id: string) => Promise<void>;
+      testConnection: (payload: { host?: string; port?: number; url?: string; name?: string }) => Promise<StreamConnectionTestResult>;
+      probeWindows: () => Promise<StreamProbeResult>;
+      captureWindow: (sourceId: string) => Promise<StreamMotionResult>;
+      captureSource: (sourceId: string) => Promise<StreamMotionResult>;
+      captureScreenshot: (payload: { source: 'screen' | 'stream'; streamSourceId?: string }) => Promise<StreamScreenshotResult>;
+      captureSource: (sourceId: string) => Promise<StreamMotionResult>;
     };
     templateAPI: {
       list: () => Promise<{ folders: TemplateFolder[]; templates: TemplateDefinition[] }>;

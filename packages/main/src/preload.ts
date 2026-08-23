@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   OcrEngine,
+  StreamSourceProfile,
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
@@ -29,6 +30,22 @@ contextBridge.exposeInMainWorld('ocrAPI', {
   listEngines: () => ipcRenderer.invoke('ocr:listEngines'),
   run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) =>
     ipcRenderer.invoke('ocr:run', payload),
+});
+
+contextBridge.exposeInMainWorld('streamAPI', {
+  list: () => ipcRenderer.invoke('stream:list'),
+  create: (payload: Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'>) =>
+    ipcRenderer.invoke('stream:create', payload),
+  update: (id: string, patch: Partial<Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'>>) =>
+    ipcRenderer.invoke('stream:update', id, patch),
+  remove: (id: string) => ipcRenderer.invoke('stream:remove', id),
+  testConnection: (payload: { host?: string; port?: number; url?: string; name?: string }) =>
+    ipcRenderer.invoke('stream:testConnection', payload),
+  probeWindows: () => ipcRenderer.invoke('stream:probeWindows'),
+  captureWindow: (sourceId: string) => ipcRenderer.invoke('stream:captureWindow', sourceId),
+  captureSource: (sourceId: string) => ipcRenderer.invoke('stream:captureSource', sourceId),
+  captureScreenshot: (payload: { source: 'screen' | 'stream'; streamSourceId?: string }) =>
+    ipcRenderer.invoke('stream:captureScreenshot', payload),
 });
 
 contextBridge.exposeInMainWorld('templateAPI', {

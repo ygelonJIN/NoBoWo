@@ -429,43 +429,55 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                   <span className="template-folder-new-card__text">新建文件夹</span>
                 </button>
               )}
-              <button className={`template-folder ${activeFolderId === null ? 'active' : ''}`} onClick={() => setActiveFolderId(null)}>
-                <span className="template-folder__name">全部模板</span>
-                <span className="template-folder__count">{templates.length}</span>
-              </button>
+              <div className={`template-folder-row ${activeFolderId === null ? 'active' : ''}`}>
+                <div className="template-folder-card" onClick={() => setActiveFolderId(null)}>
+                  <button className="template-folder" onClick={() => setActiveFolderId(null)}>
+                    <span className="template-folder__name">全部模板</span>
+                    <span className="template-folder__count">{templates.length}</span>
+                  </button>
+                  <span className="template-folder__tools" />
+                </div>
+              </div>
               {folders.map((folder) => (
                 <div key={folder.id} className={`template-folder-row delete-hover ${activeFolderId === folder.id ? 'active' : ''} ${confirmDeleteFolderId === folder.id ? 'template-folder-row--confirm' : ''}`}>
-                  {renameFolderId === folder.id ? (
-                    <input
-                      className="template-folder__rename"
-                      value={renameFolderName}
-                      autoFocus
-                      onChange={(e) => setRenameFolderName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void commitRenameFolder();
-                        if (e.key === 'Escape') setRenameFolderId(null);
-                      }}
-                      onBlur={() => void commitRenameFolder()}
-                    />
-                  ) : (
-                    <button className="template-folder" onClick={() => setActiveFolderId(folder.id)}>
-                      <span className="template-folder__name">{folder.name}</span>
-                      <span className="template-folder__count">{templates.filter((t) => t.folderId === folder.id).length}</span>
-                    </button>
-                  )}
-                  <span className="template-folder__tools delete-hover">
-                    {confirmDeleteFolderId === folder.id ? (
-                      <>
-                        <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
-                        <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
-                      </>
+                  <div className="template-folder-card" onClick={() => setActiveFolderId(folder.id)}>
+                    {renameFolderId === folder.id ? (
+                      <input
+                        className="template-folder__rename"
+                        value={renameFolderName}
+                        autoFocus
+                        onChange={(e) => setRenameFolderName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void commitRenameFolder();
+                          if (e.key === 'Escape') setRenameFolderId(null);
+                        }}
+                        onBlur={() => void commitRenameFolder()}
+                      />
                     ) : (
-                      <>
-                        <button className="template-folder__rename-btn" title="重命名文件夹" onClick={() => startRenameFolder(folder)}>重命名</button>
-                        <button className="delete-trigger" title="删除文件夹（其中的模板移到未归类）" onClick={() => setConfirmDeleteFolderId(folder.id)}>删除</button>
-                      </>
+                      <button className="template-folder" onClick={() => setActiveFolderId(folder.id)}>
+                        <span className="template-folder__name">{folder.name}</span>
+                        <span className="template-folder__count">{templates.filter((t) => t.folderId === folder.id).length}</span>
+                      </button>
                     )}
-                  </span>
+                    <span className="template-folder__tools delete-hover" onClick={(e) => e.stopPropagation()}>
+                      {renameFolderId === folder.id ? (
+                        <>
+                          <button className="delete-confirm__ok" onClick={() => void commitRenameFolder()}>确定</button>
+                          <button className="delete-confirm__cancel" onClick={() => setRenameFolderId(null)}>取消</button>
+                        </>
+                      ) : confirmDeleteFolderId === folder.id ? (
+                        <>
+                          <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
+                          <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
+                        </>
+                      ) : (
+                        <>
+                          <button className="template-folder__rename-btn" title="重命名文件夹" onClick={() => startRenameFolder(folder)}>重命名</button>
+                          <button className="delete-trigger" title="删除文件夹（其中的模板移到未归类）" onClick={() => setConfirmDeleteFolderId(folder.id)}>删除</button>
+                        </>
+                      )}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -503,10 +515,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                         <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteId(null)}>取消</button>
                       </>
                     ) : (
-                      <>
-                        <button className="template-grid-card__rename-btn" title="重命名模板">重命名</button>
-                        <button className="delete-trigger" title="删除模板" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(tpl.id); }}>删除</button>
-                      </>
+                      <button className="delete-trigger" title="删除模板" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(tpl.id); }}>删除</button>
                     )}
                   </div>
                 </div>
@@ -584,69 +593,71 @@ function TemplateForm({ edit, halfW, halfH, canSave, onChange, onSave, folders }
 
   return (
     <div className="template-form">
-      <div className="template-form__grid">
-        <label className="template-form__field">
-          <span>名称 <span className="template-form__required">*</span></span>
-          <input value={edit.name} onChange={(e) => onChange('name', e.target.value)} placeholder="如：提交按钮" />
-        </label>
-        <label className="template-form__field">
-          目标应用
-          <input value={edit.app} onChange={(e) => onChange('app', e.target.value)} placeholder="如：Chrome / Excel" />
-        </label>
-      </div>
-
-      <div className="template-form__grid">
-        <label className="template-form__field">
-          应用内缩放
-          <input value={edit.appZoom} onChange={(e) => onChange('appZoom', e.target.value)} placeholder="如：100% / 125%（手动备注）" />
-        </label>
-        <div className="template-form__field">
-          <span>所属文件夹</span>
-          <CustomSelect
-            value={edit.folderId ?? ''}
-            options={[{ value: '', label: '未归类' }, ...folders.map((folder) => ({ value: folder.id, label: folder.name }))]}
-            onChange={(v) => onChange('folderId', v || null)}
-          />
+      <div className="panel-card">
+        <div className="template-form__grid">
+          <label className="template-form__field">
+            <span>名称 <span className="template-form__required">*</span></span>
+            <input value={edit.name} onChange={(e) => onChange('name', e.target.value)} placeholder="如：提交按钮" />
+          </label>
+          <label className="template-form__field">
+            目标应用
+            <input value={edit.app} onChange={(e) => onChange('app', e.target.value)} placeholder="如：Chrome / Excel" />
+          </label>
         </div>
-      </div>
-      <div className="template-form__grid">
-        <label className="template-form__field">
-          系统缩放比例
-          <input type="number" step="0.01" min="0.1" value={edit.scaleFactor} onChange={(e) => onChange('scaleFactor', Number(e.target.value))} />
-        </label>
-        <label className="template-form__field">
-          窗口标题 / 备注
-          <input value={edit.windowTitle} onChange={(e) => onChange('windowTitle', e.target.value)} placeholder="如：订单详情页 / 弹窗标题" />
-        </label>
-      </div>
-      <div className="template-form__grid">
-        <label className="template-form__field">
-          系统分辨率
-          <div className="template-form__resolution">
-            <input type="number" value={edit.resolutionW} onChange={(e) => onChange('resolutionW', Number(e.target.value))} />
-            <span>×</span>
-            <input type="number" value={edit.resolutionH} onChange={(e) => onChange('resolutionH', Number(e.target.value))} />
-          </div>
-        </label>
-        <div className="template-form__field">
-          点击偏移（0, 0 = 匹配区域中心）
-          <div className="template-form__offset">
-            <input type="number" value={edit.clickOffset.x} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, x: clampOffset('x', Number(e.target.value)) })} />
-            <input type="number" value={edit.clickOffset.y} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, y: clampOffset('y', Number(e.target.value)) })} />
-            <span className="template-form__offset-hint">X {edit.clickOffset.x} / Y {edit.clickOffset.y}</span>
+
+        <div className="template-form__grid">
+          <label className="template-form__field">
+            应用内缩放
+            <input value={edit.appZoom} onChange={(e) => onChange('appZoom', e.target.value)} placeholder="如：100% / 125%（手动备注）" />
+          </label>
+          <div className="template-form__field">
+            <span>所属文件夹</span>
+            <CustomSelect
+              value={edit.folderId ?? ''}
+              options={[{ value: '', label: '未归类' }, ...folders.map((folder) => ({ value: folder.id, label: folder.name }))]}
+              onChange={(v) => onChange('folderId', v || null)}
+            />
           </div>
         </div>
+        <div className="template-form__grid">
+          <label className="template-form__field">
+            系统缩放比例
+            <input type="number" step="0.01" min="0.1" value={edit.scaleFactor} onChange={(e) => onChange('scaleFactor', Number(e.target.value))} />
+          </label>
+          <label className="template-form__field">
+            窗口标题 / 备注
+            <input value={edit.windowTitle} onChange={(e) => onChange('windowTitle', e.target.value)} placeholder="如：订单详情页 / 弹窗标题" />
+          </label>
+        </div>
+        <div className="template-form__grid">
+          <label className="template-form__field">
+            系统分辨率
+            <div className="template-form__resolution">
+              <input type="number" value={edit.resolutionW} onChange={(e) => onChange('resolutionW', Number(e.target.value))} />
+              <span>×</span>
+              <input type="number" value={edit.resolutionH} onChange={(e) => onChange('resolutionH', Number(e.target.value))} />
+            </div>
+          </label>
+          <div className="template-form__field">
+            点击偏移（0, 0 = 匹配区域中心）
+            <div className="template-form__offset">
+              <input type="number" value={edit.clickOffset.x} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, x: clampOffset('x', Number(e.target.value)) })} />
+              <input type="number" value={edit.clickOffset.y} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, y: clampOffset('y', Number(e.target.value)) })} />
+              <span className="template-form__offset-hint">X {edit.clickOffset.x} / Y {edit.clickOffset.y}</span>
+            </div>
+          </div>
+        </div>
+
+        <label className="template-form__field">
+          标签（用逗号分隔）
+          <input value={edit.tags} onChange={(e) => onChange('tags', normalizeTags(e.target.value))} placeholder="登录, 首页, 按钮" />
+        </label>
+
+        <label className="template-form__field">
+          其他备注
+          <textarea value={edit.otherNotes} onChange={(e) => onChange('otherNotes', e.target.value)} placeholder="其他需要记录的信息…" rows={1} />
+        </label>
       </div>
-
-      <label className="template-form__field">
-        标签（用逗号分隔）
-        <input value={edit.tags} onChange={(e) => onChange('tags', normalizeTags(e.target.value))} placeholder="登录, 首页, 按钮" />
-      </label>
-
-      <label className="template-form__field">
-        其他备注
-        <textarea value={edit.otherNotes} onChange={(e) => onChange('otherNotes', e.target.value)} placeholder="其他需要记录的信息…" rows={1} />
-      </label>
 
       <div className="template-modal__footer">
         <button className="template-modal__save" onClick={onSave} disabled={!canSave || edit.saving}>
