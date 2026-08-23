@@ -376,6 +376,8 @@ export type YoloModel = {
   epochs: number;
   imageSize: number;
   batch: number;
+  /** 训练时的类别数（导出 / 推理时重建模型结构需要） */
+  numClasses?: number;
   file: string;
   sizeBytes: number;
   metrics: YoloModelMetrics | null;
@@ -449,7 +451,11 @@ export type YoloEnvInfo = {
   pythonAvailable: boolean;
   pythonPath: string | null;
   pythonVersion: string | null;
-  ultralytics: string | null;
+  /** pip 版本号，未安装为 null */
+  pip: string | null;
+  yolox: string | null;
+  /** 当前配置的 YOLOX 源码目录（绝对路径） */
+  yoloxPath: string | null;
   torch: string | null;
   cuda: boolean;
   mps: boolean;

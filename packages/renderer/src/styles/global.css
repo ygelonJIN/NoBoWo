@@ -3726,6 +3726,7 @@ pre::-webkit-scrollbar-thumb:hover {
 .yolo-console {
   display: flex;
   flex-direction: column;
+  flex: 1;
   min-height: 0;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -4912,18 +4913,36 @@ pre::-webkit-scrollbar-thumb:hover {
 /* ===== 环境页 ===== */
 .yolo-env {
   display: grid;
-  grid-template-columns: minmax(380px, 440px) 1fr;
+  grid-template-columns: minmax(330px, 400px) minmax(200px, 260px) 1fr;
   height: 100%;
+  min-height: 0;
   gap: 0;
 }
-.yolo-env__status {
+.yolo-env__col {
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding: 18px;
-  border-right: 1px solid rgba(255, 255, 255, 0.07);
   min-height: 0;
   overflow-y: auto;
+}
+.yolo-env__col--left {
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+.yolo-env__col--mid {
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+.yolo-env__col--right {
+  padding: 0;
+}
+.yolo-env__all-done {
+  font-size: 12px;
+  color: #6ae3a1;
+  background: rgba(106, 227, 161, 0.1);
+  border: 1px solid rgba(106, 227, 161, 0.25);
+  border-radius: 11px;
+  padding: 10px 14px;
+  font-weight: 600;
 }
 .yolo-env__head {
   display: flex;
@@ -4951,12 +4970,39 @@ pre::-webkit-scrollbar-thumb:hover {
 }
 .yolo-env-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 9px 12px;
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+.yolo-env-row--clickable {
+  cursor: pointer;
+}
+.yolo-env-row--clickable:hover {
+  border-color: rgba(155, 180, 220, 0.35);
+  background: rgba(255, 255, 255, 0.05);
+}
+.yolo-env-row--missing {
+  border-color: rgba(255, 143, 143, 0.45);
+  background: rgba(255, 143, 143, 0.06);
+  box-shadow: 0 0 0 3px rgba(255, 143, 143, 0.07);
+}
+.yolo-env-row--missing:hover {
+  border-color: rgba(255, 143, 143, 0.65);
+  background: rgba(255, 143, 143, 0.09);
+}
+.yolo-env-row--missing.open {
+  border-color: rgba(255, 143, 143, 0.65);
+  background: rgba(255, 143, 143, 0.1);
+}
+.yolo-env-row--na.open,
+.yolo-env-row--info.open {
+  border-color: rgba(155, 180, 220, 0.4);
+  background: rgba(255, 255, 255, 0.05);
 }
 .yolo-env-row__label {
   width: 130px;
@@ -4978,6 +5024,19 @@ pre::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 143, 143, 0.14);
   color: #ff9d9d;
 }
+.yolo-env-row__status.missing {
+  background: rgba(255, 143, 143, 0.16);
+  color: #ff9d9d;
+  font-weight: 700;
+}
+.yolo-env-row__status.na {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(231, 236, 243, 0.45);
+}
+.yolo-env-row__status.info {
+  background: rgba(120, 169, 255, 0.14);
+  color: #8fb4f5;
+}
 .yolo-env-row__status.unknown {
   background: rgba(255, 255, 255, 0.06);
   color: rgba(231, 236, 243, 0.4);
@@ -4991,6 +5050,42 @@ pre::-webkit-scrollbar-thumb:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: right;
+}
+.yolo-env-row__solve {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(155, 180, 220, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(231, 236, 243, 0.6);
+  user-select: none;
+}
+.yolo-env-row__solve.missing {
+  border-color: rgba(255, 143, 143, 0.35);
+  background: rgba(255, 143, 143, 0.1);
+  color: #ffb3b3;
+  font-weight: 600;
+}
+.yolo-env-row__solve.na {
+  color: rgba(231, 236, 243, 0.45);
+}
+.yolo-env-row__solve.info {
+  color: #8fb4f5;
+}
+.yolo-env-row__guide {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 2px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  margin-top: 2px;
+}
+.yolo-env-row__guide-hint {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: rgba(231, 236, 243, 0.68);
 }
 .yolo-env__actions {
   display: flex;
@@ -5017,33 +5112,144 @@ pre::-webkit-scrollbar-thumb:hover {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.yolo-env__tip {
-  font-size: 11.5px;
-  color: rgba(231, 236, 243, 0.4);
+.yolo-env__pick {
+  border: 1px solid rgba(155, 180, 220, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(231, 236, 243, 0.82);
+  border-radius: 11px;
+  padding: 9px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
 }
-.yolo-env__guide {
+.yolo-env__pick:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(155, 180, 220, 0.4);
+  color: rgba(231, 236, 243, 0.95);
+}
+.yolo-env__pick:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.yolo-env__weights {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   padding: 12px 14px;
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.yolo-env__weights-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 .yolo-env__guide-title {
   font-size: 12px;
   font-weight: 700;
   color: rgba(231, 236, 243, 0.85);
 }
-.yolo-env__guide code {
+.yolo-env__weights-note {
+  font-size: 11px;
+  line-height: 1.7;
+  color: rgba(231, 236, 243, 0.45);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.yolo-env__weights-empty {
+  font-size: 11.5px;
+  color: rgba(231, 236, 243, 0.4);
+  padding: 6px 0;
+}
+.yolo-env__weights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+}
+.yolo-weight-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.yolo-weight-card.present {
+  border-color: rgba(106, 227, 161, 0.25);
+  background: rgba(106, 227, 161, 0.05);
+}
+.yolo-weight-card__info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.yolo-weight-card__name {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(231, 236, 243, 0.85);
+  white-space: nowrap;
+}
+.yolo-weight-card__size {
+  font-size: 10.5px;
+  color: rgba(231, 236, 243, 0.45);
+}
+.yolo-weight-card__badge {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: #6ae3a1;
+  background: rgba(106, 227, 161, 0.12);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.yolo-env__tip {
+  font-size: 11.5px;
+  color: rgba(231, 236, 243, 0.4);
+}
+.yolo-env__guide-cmd {
+  position: relative;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(8, 12, 20, 0.55);
+  border: 1px solid rgba(120, 169, 255, 0.14);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
   font-size: 11px;
   color: #8fb4f5;
-  word-break: break-all;
   line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.yolo-env__guide-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  border: 1px solid rgba(155, 180, 220, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(231, 236, 243, 0.55);
+  border-radius: 6px;
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.yolo-env__guide-copy:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(231, 236, 243, 0.9);
 }
 .yolo-env__console {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
   padding: 18px;
 }

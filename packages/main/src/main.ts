@@ -847,14 +847,21 @@ function registerTemplateIpc() {
   );
 }
 
-// ===== YOLO 训练模块 =====
+// ===== YOLO 训练模块（YOLOX 引擎） =====
 
 const YOLO_ENGINE_SOURCE = String.raw`#!/usr/bin/env python3
-# NoBoWo YOLO 训练引擎 —— 向 stdout 输出结构化 JSON 事件
+# NoBoWo YOLOX 训练引擎 —— 向 stdout 输出结构化 JSON 事件
 import json
 import os
 import sys
 import traceback
+from types import SimpleNamespace
+
+try:
+    import torch
+except Exception as exc:
+    print(json.dumps({"t": "error", "message": "无法加载 PyTorch：" + str(exc) + "\n请先在「环境」页安装依赖。"}, ensure_ascii=False), flush=True)
+    sys.exit(1)
 
 
 def emit(**kw):
@@ -865,187 +872,573 @@ def emit(**kw):
         pass
 
 
+def setup_yolox(cfg):
+    yolox_path = cfg.get("yoloxPath")
+    if yolox_path and os.path.isdir(yolox_path):
+        sys.path.insert(0, yolox_path)
+    try:
+        import yolox  # noqa: F401
+        return yolox
+    except Exception as exc:
+        emit(t="error", message="无法加载 YOLOX：" + str(exc) + "\n请先在「环境」页确认 YOLOX 源码路径与依赖是否安装。")
+        return None
+
+
+def pick_device(cfg):
+    device = str(cfg.get("device", "auto"))
+    if device == "auto":
+        if torch.cuda.is_available():
+            return "cuda:0"
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return "mps"
+        return "cpu"
+    if device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            emit(t="log", level="warn", message="未检测到 CUDA，回退到 CPU")
+            return "cpu"
+        return device
+    if device == "mps":
+        mps = getattr(torch.backends, "mps", None)
+        if mps is None or not mps.is_available():
+            emit(t="log", level="warn", message="MPS 不可用，回退到 CPU")
+            return "cpu"
+        return "mps"
+    return device
+
+
+def build_exp(cfg):
+    from yolox.exp import get_exp
+
+    base = str(cfg.get("model", "yolox_s"))
+    exp = get_exp(None, base)
+    aug = cfg.get("augment", {})
+    imgsz = int(cfg["imageSize"])
+    epochs = int(cfg["epochs"])
+
+    exp.exp_name = cfg["runName"]
+    exp.num_classes = int(cfg["numClasses"])
+    exp.input_size = (imgsz, imgsz)
+    exp.test_size = (imgsz, imgsz)
+    exp.max_epoch = epochs
+    exp.basic_lr_per_img = float(cfg.get("lr0", 0.01)) / 64.0
+    exp.min_lr_ratio = float(cfg.get("lrf", 0.01))
+    exp.momentum = float(cfg.get("momentum", 0.9))
+    exp.weight_decay = float(cfg.get("weightDecay", 0.0005))
+    exp.warmup_epochs = float(cfg.get("warmupEpochs", 5))
+    exp.patience = int(cfg.get("patience", 20))
+    exp.data_num_workers = int(cfg.get("workers", 4))
+    exp.seed = int(cfg.get("seed", 0))
+    exp.print_interval = 10
+    exp.eval_interval = 1
+    exp.save_history_ckpt = False
+    exp.no_aug_epochs = min(15, max(1, int(epochs * 0.1)))
+    exp.ema = True
+
+    # 数据增强（ultralytics 参数名 -> YOLOX Exp 字段）
+    exp.flip_prob = float(aug.get("fliplr", 0.5))
+    exp.degrees = float(aug.get("degrees", 0.0))
+    exp.translate = float(aug.get("translate", 0.1))
+    exp.shear = float(aug.get("shear", 0.0))
+    exp.mosaic_prob = float(aug.get("mosaic", 1.0))
+    exp.mixup_prob = float(aug.get("mixup", 0.0))
+    exp.enable_mixup = exp.mixup_prob > 0
+    exp.hsv_prob = 1.0
+    exp.mosaic_scale = (0.1, 2)
+    exp.mixup_scale = (0.5, 1.5)
+    exp.multiscale_range = 5
+
+    # 数据集（COCO 格式，由导出器生成）
+    data_dir = cfg["dataDir"]
+    exp.data_dir = data_dir
+    exp.train_ann = "instances_train.json"
+    exp.val_ann = "instances_val.json"
+    exp.test_ann = "instances_val.json"
+    exp.train_image_set = "split/images/train"
+    exp.val_image_set = "split/images/val"
+
+    from yolox.data import COCODataset, TrainTransform, ValTransform
+
+    def make_dataset(json_file, image_set, img_size, transform, cache=False, cache_type="ram"):
+        return COCODataset(
+            data_dir=data_dir,
+            json_file=json_file,
+            name=image_set,
+            img_size=img_size,
+            preproc=transform,
+            cache=cache,
+            cache_type=cache_type,
+        )
+
+    def get_dataset(self, cache=False, cache_type="ram"):
+        return make_dataset(
+            self.train_ann, self.train_image_set, self.input_size,
+            TrainTransform(max_labels=50, flip_prob=self.flip_prob, hsv_prob=self.hsv_prob),
+            cache=cache, cache_type=cache_type,
+        )
+
+    def get_eval_dataset(self, **kwargs):
+        return make_dataset(
+            self.val_ann, self.val_image_set, self.test_size,
+            ValTransform(legacy=kwargs.get("legacy", False)),
+        )
+
+    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False):
+        return PlainEvaluator(
+            dataloader=self.get_eval_loader(batch_size, is_distributed, testdev=testdev, legacy=legacy),
+            img_size=self.test_size,
+            confthre=self.test_conf,
+            nmsthre=self.nmsthre,
+            num_classes=self.num_classes,
+            testdev=testdev,
+        )
+
+    exp.get_dataset = get_dataset.__get__(exp, type(exp))
+    exp.get_eval_dataset = get_eval_dataset.__get__(exp, type(exp))
+    exp.get_evaluator = get_evaluator.__get__(exp, type(exp))
+    exp.output_dir = cfg["projectDir"]
+    return exp
+
+
+class PlainPrefetcher:
+    """设备无关的预取器（YOLOX 自带 DataPrefetcher 仅支持 CUDA）。"""
+
+    def __init__(self, loader, device):
+        self.loader = iter(loader)
+        self.device = device
+        self.next_batch = None
+        self.preload()
+
+    def preload(self):
+        try:
+            self.next_batch = next(self.loader)
+        except StopIteration:
+            self.next_batch = None
+
+    def next(self):
+        batch = self.next_batch
+        self.preload()
+        if batch is None:
+            return None, None
+        inps, targets, _, _ = batch
+        return inps.to(self.device), targets.to(self.device)
+
+
+class PlainEvaluator:
+    """设备无关的 COCO 评估器（CPU / MPS / CUDA 通用）。"""
+
+    def __init__(self, dataloader, img_size, confthre, nmsthre, num_classes, testdev=False):
+        self.dataloader = dataloader
+        self.img_size = img_size
+        self.confthre = confthre
+        self.nmsthre = nmsthre
+        self.num_classes = num_classes
+        self.testdev = testdev
+        self.coco = dataloader.dataset.coco
+        self.class_ids = dataloader.dataset.class_ids
+        self._coco_eval = None
+
+    def evaluate(self, model, distributed=False, half=False, trt_file=None, decoder=None, test_size=None, return_outputs=False):
+        from yolox.utils import postprocess
+
+        model = model.eval()
+        device = next(model.parameters()).device
+        if half and str(device).startswith("cuda"):
+            model = model.half()
+
+        data_list = []
+        with torch.no_grad():
+            for imgs, _, info_imgs, img_ids in self.dataloader:
+                imgs = imgs.to(device)
+                outputs = model(imgs)
+                if decoder is not None:
+                    outputs = decoder(outputs, dtype=outputs.type())
+                outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
+                for output, img_h, img_w, img_id in zip(outputs, info_imgs[0], info_imgs[1], img_ids):
+                    if output is None:
+                        continue
+                    output = output.cpu()
+                    bboxes = output[:, 0:4].clone()
+                    scale = min(self.img_size[0] / float(img_h), self.img_size[1] / float(img_w))
+                    bboxes /= scale
+                    cls = output[:, 6]
+                    scores = output[:, 4] * output[:, 5]
+                    bboxes[:, 2:] -= bboxes[:, :2]  # xyxy -> xywh
+                    for ind in range(bboxes.shape[0]):
+                        label = self.class_ids[int(cls[ind])]
+                        data_list.append({
+                            "image_id": int(img_id),
+                            "category_id": label,
+                            "bbox": bboxes[ind].tolist(),
+                            "score": float(scores[ind]),
+                            "segmentation": [],
+                        })
+
+        if len(data_list) == 0:
+            self._coco_eval = None
+            return 0, 0, "验证集无检测结果。"
+
+        import io
+        import json
+        import tempfile
+        import contextlib
+
+        try:
+            from yolox.layers import COCOeval_opt as COCOeval
+        except Exception:
+            from pycocotools.cocoeval import COCOeval
+
+        _, tmp = tempfile.mkstemp()
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data_list, f)
+        coco_dt = self.coco.loadRes(tmp)
+        coco_eval = COCOeval(self.coco, coco_dt, "bbox")
+        coco_eval.evaluate()
+        coco_eval.accumulate()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            coco_eval.summarize()
+        self._coco_eval = coco_eval
+        return coco_eval.stats[0], coco_eval.stats[1], buf.getvalue()
+
+
+class EarlyStop(Exception):
+    pass
+
+
+def run_training(cfg):
+    yolox = setup_yolox(cfg)
+    if yolox is None:
+        return 1
+
+    from yolox.core.trainer import Trainer
+    from yolox.utils import get_model_info, ModelEMA, adjust_status, all_reduce_norm, is_parallel
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    class NoBoWoTrainer(Trainer):
+        def __init__(self, exp, args, device="cpu"):
+            super().__init__(exp, args)
+            self.device = device
+            self._loss_sum = {}
+            self._loss_count = 0
+            self._best_epoch = 0
+            self._best_metrics = None
+            self._last_metrics = None
+
+        def before_train(self):
+            from loguru import logger
+            logger.info("args: {}".format(self.args))
+            logger.info("exp value:\n{}".format(self.exp))
+            if self.device.startswith("cuda"):
+                torch.cuda.set_device(self.local_rank)
+            model = self.exp.get_model()
+            logger.info("Model Summary: {}".format(get_model_info(model, self.exp.test_size)))
+            model.to(self.device)
+            self.optimizer = self.exp.get_optimizer(self.args.batch_size)
+            model = self.resume_train(model)
+            self.no_aug = self.start_epoch >= self.max_epoch - self.exp.no_aug_epochs
+            self.train_loader = self.exp.get_data_loader(
+                batch_size=self.args.batch_size,
+                is_distributed=self.is_distributed,
+                no_aug=self.no_aug,
+                cache_img=self.args.cache,
+            )
+            logger.info("init prefetcher, this might take one minute or less...")
+            self.prefetcher = PlainPrefetcher(self.train_loader, self.device)
+            self.max_iter = len(self.train_loader)
+            self.lr_scheduler = self.exp.get_lr_scheduler(
+                self.exp.basic_lr_per_img * self.args.batch_size, self.max_iter
+            )
+            if self.is_distributed:
+                model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False)
+            if self.use_model_ema:
+                self.ema_model = ModelEMA(model, 0.9998)
+                self.ema_model.updates = self.max_iter * self.start_epoch
+            self.model = model
+            self.evaluator = self.exp.get_evaluator(
+                batch_size=self.args.batch_size, is_distributed=self.is_distributed
+            )
+            logger.info("Training start...")
+
+        def train(self):
+            from loguru import logger
+            self.before_train()
+            try:
+                self.train_in_epoch()
+            except EarlyStop:
+                logger.info("Training stopped by early stopping")
+            except Exception as e:
+                logger.error("Exception in training: {}".format(e))
+                raise
+            finally:
+                self.after_train()
+
+        def after_iter(self):
+            loss_meter = self.meter.get_filtered_meter("loss")
+            for k, v in loss_meter.items():
+                self._loss_sum[k] = self._loss_sum.get(k, 0.0) + float(v.latest)
+            self._loss_count += 1
+
+            if (self.iter + 1) % self.exp.print_interval == 0:
+                total = max(1, int(self.exp.max_epoch))
+                done = (self.epoch + (self.iter + 1) / max(1, self.max_iter)) / total
+                emit(
+                    t="progress",
+                    epoch=self.epoch + 1,
+                    percent=round(min(100.0, max(0.0, done * 100)), 1),
+                    message="epoch {}/{} · batch {}/{}".format(
+                        self.epoch + 1, total, self.iter + 1, self.max_iter
+                    ),
+                )
+
+            if (self.progress_in_iter + 1) % 10 == 0:
+                self.input_size = self._random_resize()
+
+        def _random_resize(self):
+            import random as _random
+            exp = self.exp
+            size_factor = exp.input_size[1] * 1.0 / exp.input_size[0]
+            if not hasattr(exp, "random_size"):
+                min_size = int(exp.input_size[0] / 32) - exp.multiscale_range
+                max_size = int(exp.input_size[0] / 32) + exp.multiscale_range
+                exp.random_size = (min_size, max_size)
+            size = _random.randint(*exp.random_size)
+            return (int(32 * size), 32 * int(size * size_factor))
+
+        def after_epoch(self):
+            self.save_ckpt(ckpt_name="latest")
+
+            losses = {}
+            for k, v in self._loss_sum.items():
+                losses[k] = v / max(1, self._loss_count)
+            self._loss_sum = {}
+            self._loss_count = 0
+
+            lr = float(self.optimizer.param_groups[0]["lr"])
+            emit(
+                t="epoch",
+                epoch=self.epoch + 1,
+                totalEpochs=self.max_epoch,
+                lr=lr,
+                metrics=self._build_metrics(losses),
+            )
+
+            if (self.epoch + 1) % self.exp.eval_interval == 0:
+                all_reduce_norm(self.model)
+                self.evaluate_and_save_model()
+
+        def _build_metrics(self, losses):
+            prev = self._last_metrics
+            return {
+                "boxLoss": round(float(losses.get("iou_loss", 0.0)), 4),
+                "clsLoss": round(float(losses.get("cls_loss", 0.0)), 4),
+                "dflLoss": round(float(losses.get("l1_loss", 0.0)), 4),
+                "precision": (prev or {}).get("precision", 0.0),
+                "recall": (prev or {}).get("recall", 0.0),
+                "mAP50": (prev or {}).get("mAP50", 0.0),
+                "mAP50_95": (prev or {}).get("mAP50_95", 0.0),
+            }
+
+        def evaluate_and_save_model(self):
+            if self.use_model_ema:
+                evalmodel = self.ema_model.ema
+            else:
+                evalmodel = self.model
+                if is_parallel(evalmodel):
+                    evalmodel = evalmodel.module
+
+            with adjust_status(evalmodel, training=False):
+                ap50_95, ap50, summary = self.exp.eval(
+                    evalmodel, self.evaluator, self.is_distributed, return_outputs=False
+                )
+
+            update_best = ap50_95 > self.best_ap
+            self.best_ap = max(self.best_ap, ap50_95)
+            if update_best:
+                self._best_epoch = self.epoch + 1
+
+            metrics = self._eval_metrics()
+            metrics["mAP50"] = round(float(ap50) * 100, 2)
+            metrics["mAP50_95"] = round(float(ap50_95) * 100, 2)
+            self._last_metrics = metrics
+            if update_best:
+                self._best_metrics = dict(metrics)
+
+            emit(
+                t="log",
+                level="info",
+                message="Eval @ epoch {} · mAP50 {}% · mAP50-95 {}% · precision {}% · recall {}%".format(
+                    self.epoch + 1, metrics["mAP50"], metrics["mAP50_95"], metrics["precision"], metrics["recall"]
+                ),
+            )
+
+            self.save_ckpt("last_epoch", update_best, ap=ap50_95)
+
+            patience = int(getattr(self.exp, "patience", 0) or 0)
+            if patience > 0 and (self.epoch + 1 - self._best_epoch) >= patience:
+                from loguru import logger
+                logger.info("Early stop triggered at epoch {} (no improvement for {} epochs)".format(self.epoch + 1, patience))
+                raise EarlyStop()
+
+        def _eval_metrics(self):
+            ce = getattr(self.evaluator, "_coco_eval", None)
+            if ce is None or ce.eval is None:
+                return {"precision": 0.0, "recall": 0.0}
+            prec = ce.eval["precision"]  # [T, R, K, A, M]
+            rec = ce.eval["recall"]      # [T, K, A, M]
+            p = prec[5, :, :, 0, -1]
+            p = p[p > -1]
+            precision = round(float(p.mean()) * 100, 2) if p.size else 0.0
+            r = rec[:, :, 0, -1]
+            r = r[r > -1]
+            recall = round(float(r.mean()) * 100, 2) if r.size else 0.0
+            return {"precision": precision, "recall": recall}
+
+        def after_train(self):
+            from loguru import logger
+            logger.info("Training done, best AP50-95: {:.2f}".format(self.best_ap * 100))
+            best_path = os.path.join(self.file_name, "best_ckpt.pth")
+            if not os.path.exists(best_path):
+                best_path = os.path.join(self.file_name, "latest_ckpt.pth")
+            if not os.path.exists(best_path):
+                emit(t="error", message="训练结束但未找到 checkpoint：" + best_path)
+                return
+            m = self._best_metrics or self._last_metrics
+            metrics = None
+            if m:
+                metrics = {
+                    "precision": m.get("precision", 0.0),
+                    "recall": m.get("recall", 0.0),
+                    "mAP50": m.get("mAP50", 0.0),
+                    "mAP50_95": m.get("mAP50_95", 0.0),
+                }
+            emit(
+                t="done",
+                modelPath=best_path,
+                sizeBytes=os.path.getsize(best_path),
+                metrics=metrics,
+                artifacts=None,
+            )
+
+    device = pick_device(cfg)
+    emit(t="log", level="info", message="YOLOX " + str(getattr(yolox, "__version__", "?")) + " 已就绪 · 设备 " + device)
+
+    total_epochs = int(cfg["epochs"])
+    emit(t="start", jobId=cfg["runName"], totalEpochs=total_epochs, message="训练已启动（YOLOX）")
+
+    try:
+        exp = build_exp(cfg)
+        args = SimpleNamespace(
+            experiment_name=cfg["runName"],
+            fp16=False,
+            batch_size=int(cfg["batch"]),
+            resume=False,
+            ckpt=cfg.get("ckptPath") or None,
+            start_epoch=None,
+            cache=None,
+            occupy=False,
+            logger="",
+            exp_file=None,
+            name=str(cfg.get("model", "yolox_s")),
+        )
+        trainer = NoBoWoTrainer(exp, args, device=device)
+        trainer.train()
+        return 0
+    except Exception:
+        emit(t="error", message=traceback.format_exc())
+        return 1
+
+
+def run_export(cfg):
+    yolox = setup_yolox(cfg)
+    if yolox is None:
+        return 1
+    fmt = str(cfg.get("format", "onnx"))
+    imgsz = int(cfg.get("imageSize", 640))
+    model_path = cfg["modelPath"]
+    try:
+        if fmt == "tflite":
+            emit(t="error", message="YOLOX 官方不支持 TFLite 导出。请导出 ONNX 后，用 onnx2tf / ai-edge-litert 等工具自行转换。")
+            return 1
+        if fmt == "openvino":
+            emit(t="error", message="YOLOX 官方不支持 OpenVINO 导出。请导出 ONNX 后，用 OpenVINO 工具链（mo）自行转换。")
+            return 1
+        return run_onnx(cfg, model_path, imgsz)
+    except Exception:
+        emit(t="error", message=traceback.format_exc())
+        return 1
+
+
+def run_onnx(cfg, model_path, imgsz):
+    from yolox.exp import get_exp
+    from yolox.models.network_blocks import SiLU
+    from yolox.utils import replace_module
+    from torch import nn
+
+    base = str(cfg.get("baseModel", "yolox_s"))
+    exp = get_exp(None, base)
+    num_classes = int(cfg.get("numClasses") or exp.num_classes)
+    exp.num_classes = num_classes
+    exp.test_size = (imgsz, imgsz)
+
+    model = exp.get_model()
+    ckpt = torch.load(model_path, map_location="cpu")
+    if "model" in ckpt:
+        ckpt = ckpt["model"]
+    model.load_state_dict(ckpt)
+    model.eval()
+    model = replace_module(model, nn.SiLU, SiLU)
+
+    out_dir = os.path.dirname(model_path)
+    out_name = os.path.join(out_dir, "yolox_{}x{}.onnx".format(imgsz, imgsz))
+    dummy = torch.randn(1, 3, imgsz, imgsz)
+    emit(t="log", level="info", message="开始导出 ONNX（{}x{}）…".format(imgsz, imgsz))
+    torch.onnx.export(
+        model,
+        dummy,
+        out_name,
+        input_names=["images"],
+        output_names=["output"],
+        opset_version=11,
+        dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
+    )
+    try:
+        import onnx
+        from onnxsim import simplify
+        onnx_model = onnx.load(out_name)
+        model_simp, check = simplify(onnx_model)
+        if check:
+            onnx.save(model_simp, out_name)
+    except Exception as exc:
+        emit(t="log", level="warn", message="onnx-simplifier 未安装，跳过精简：" + str(exc))
+    emit(t="log", level="info", message="导出完成：" + out_name)
+    emit(t="done", modelPath=out_name, sizeBytes=os.path.getsize(out_name), metrics=None)
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         emit(t="error", message="缺少配置文件参数")
         return 2
-    with open(sys.argv[1], "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-
+    cfg_path = sys.argv[1]
     try:
-        from ultralytics import YOLO
-        import ultralytics
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
     except Exception as exc:
-        emit(t="error", message="无法加载 ultralytics：" + str(exc) + "\n请先在「环境」页检查 Python 与依赖是否安装。")
+        emit(t="error", message="读取配置失败：" + str(exc))
         return 1
 
-    emit(t="log", level="info", message="ultralytics " + str(getattr(ultralytics, "__version__", "?")) + " 已就绪")
-
-    aug = cfg.get("augment", {})
-    data_yaml = cfg["dataYaml"]
-    project = cfg["projectDir"]
-    name = cfg["runName"]
-
-    emit(t="start", jobId=name, totalEpochs=int(cfg["epochs"]), message="训练已启动")
-
-    try:
-        model = YOLO(cfg["model"])
-
-        def on_epoch_end(trainer):
-            try:
-                metrics = trainer.metrics or {}
-                emit(
-                    t="epoch",
-                    epoch=int(trainer.epoch) + 1,
-                    totalEpochs=int(trainer.epochs),
-                    lr=round(float(trainer.lr), 6) if trainer.lr else 0.0,
-                    metrics={
-                        "boxLoss": round(float(metrics.get("train/box_loss", 0) or 0), 4),
-                        "clsLoss": round(float(metrics.get("train/cls_loss", 0) or 0), 4),
-                        "dflLoss": round(float(metrics.get("train/dfl_loss", 0) or 0), 4),
-                        "precision": round(float(metrics.get("metrics/precision(B)", 0) or 0) * 100, 2),
-                        "recall": round(float(metrics.get("metrics/recall(B)", 0) or 0) * 100, 2),
-                        "mAP50": round(float(metrics.get("metrics/mAP50(B)", 0) or 0) * 100, 2),
-                        "mAP50_95": round(float(metrics.get("metrics/mAP50-95(B)", 0) or 0) * 100, 2),
-                    },
-                )
-            except Exception:
-                pass
-
-        def on_batch_end(trainer):
-            try:
-                epoch = int(trainer.epoch)
-                i = int(trainer.i)
-                nb = int(getattr(trainer, "nb", 0)) or len(trainer.train_loader)
-                total = max(1, int(trainer.epochs))
-                done = (epoch + i / max(1, nb)) / total
-                emit(
-                    t="progress",
-                    epoch=epoch + 1,
-                    percent=round(min(100.0, max(0.0, done * 100)), 1),
-                    message="epoch " + str(epoch + 1) + "/" + str(total) + " · batch " + str(i) + "/" + str(nb),
-                )
-            except Exception:
-                pass
-
-        model.add_callback("on_train_epoch_end", on_epoch_end)
-        model.add_callback("on_train_batch_end", on_batch_end)
-
-        device = cfg.get("device", "auto")
-        if device == "auto":
-            device = None
-
-        kwargs = dict(
-            data=data_yaml,
-            epochs=int(cfg["epochs"]),
-            batch=int(cfg["batch"]),
-            imgsz=int(cfg["imageSize"]),
-            lr0=float(cfg.get("lr0", 0.01)),
-            lrf=float(cfg.get("lrf", 0.01)),
-            momentum=float(cfg.get("momentum", 0.937)),
-            weight_decay=float(cfg.get("weightDecay", 0.0005)),
-            warmup_epochs=float(cfg.get("warmupEpochs", 3.0)),
-            patience=int(cfg.get("patience", 20)),
-            device=device,
-            workers=int(cfg.get("workers", 4)),
-            seed=int(cfg.get("seed", 0)),
-            deterministic=bool(cfg.get("deterministic", True)),
-            project=project,
-            name=name,
-            exist_ok=True,
-            hsv_h=float(aug.get("hsvH", 0.015)),
-            hsv_s=float(aug.get("hsvS", 0.7)),
-            hsv_v=float(aug.get("hsvV", 0.4)),
-            degrees=float(aug.get("degrees", 0.0)),
-            translate=float(aug.get("translate", 0.1)),
-            scale=float(aug.get("scale", 0.5)),
-            shear=float(aug.get("shear", 0.0)),
-            perspective=float(aug.get("perspective", 0.0)),
-            flipud=float(aug.get("flipud", 0.0)),
-            fliplr=float(aug.get("fliplr", 0.5)),
-            mosaic=float(aug.get("mosaic", 1.0)),
-            mixup=float(aug.get("mixup", 0.0)),
-            copy_paste=float(aug.get("copyPaste", 0.0)),
-            erasing=float(aug.get("erasing", 0.0)),
-            crop_fraction=float(aug.get("cropFraction", 1.0)),
-        )
-
-        model.train(**kwargs)
-        emit(t="log", level="info", message="训练循环结束，开始验证集评估…")
-
-        best_pt = os.path.join(project, name, "weights", "best.pt")
-        if not os.path.exists(best_pt):
-            emit(t="error", message="未找到 best.pt，训练可能被中断")
-            return 1
-
-        metrics = None
-        val_dir = os.path.join(project, name + "-val")
-        try:
-            val_model = YOLO(best_pt)
-            val = val_model.val(
-                data=data_yaml,
-                imgsz=int(cfg["imageSize"]),
-                device=device,
-                verbose=False,
-                project=project,
-                name=name + "-val",
-                exist_ok=True,
-                plots=True,
-            )
-            rd = val.results_dict or {}
-            metrics = {
-                "precision": round(float(rd.get("metrics/precision(B)", 0) or 0) * 100, 2),
-                "recall": round(float(rd.get("metrics/recall(B)", 0) or 0) * 100, 2),
-                "mAP50": round(float(rd.get("metrics/mAP50(B)", 0) or 0) * 100, 2),
-                "mAP50_95": round(float(rd.get("metrics/mAP50-95(B)", 0) or 0) * 100, 2),
-            }
-        except Exception:
-            traceback.print_exc()
-
-        artifacts = {}
-        cm = os.path.join(val_dir, "confusion_matrix.png")
-        pr = os.path.join(val_dir, "PR_curve.png")
-        if os.path.exists(cm):
-            artifacts["confusionMatrix"] = cm
-        if os.path.exists(pr):
-            artifacts["prCurve"] = pr
-
-        emit(
-            t="done",
-            modelPath=best_pt,
-            sizeBytes=os.path.getsize(best_pt),
-            metrics=metrics,
-            artifacts=artifacts if artifacts else None,
-        )
-        return 0
-    except Exception:
-        emit(t="error", message=traceback.format_exc())
-        return 1
-
-
-def run_export(model_path, fmt, imgsz):
-    try:
-        from ultralytics import YOLO
-    except Exception as exc:
-        emit(t="error", message="无法加载 ultralytics：" + str(exc))
-        return 1
-    try:
-        emit(t="log", level="info", message="开始导出格式：" + fmt + "（首次导出可能需要下载对应依赖）")
-        model = YOLO(model_path)
-        exported = model.export(format=fmt, imgsz=int(imgsz), verbose=False)
-        emit(t="log", level="info", message="导出完成：" + str(exported))
-        emit(t="done", modelPath=str(exported), sizeBytes=os.path.getsize(str(exported)), metrics=None)
-        return 0
-    except Exception:
-        emit(t="error", message=traceback.format_exc())
-        return 1
+    if cfg.get("mode") == "export":
+        return run_export(cfg)
+    return run_training(cfg)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "export":
-        fmt = sys.argv[3] if len(sys.argv) > 3 else "onnx"
-        imgsz = sys.argv[4] if len(sys.argv) > 4 else "640"
-        sys.exit(run_export(sys.argv[2], fmt, imgsz))
+    try:
+        from yolox.utils import configure_module
+        configure_module()
+    except Exception:
+        pass
     sys.exit(main())
 `;
 
@@ -1054,6 +1447,70 @@ const yoloDatasetsDir = () => join(yoloRootDir(), 'datasets');
 const yoloModelsDir = () => join(yoloRootDir(), 'models');
 const yoloRunsDir = () => join(yoloRootDir(), 'runs');
 const yoloIndexFile = () => join(yoloRootDir(), 'index.json');
+const yoloSettingsFile = () => join(yoloRootDir(), 'settings.json');
+const yoloWeightsDir = () => join(yoloRootDir(), 'weights');
+
+type YoloSettings = {
+  /** YOLOX 源码目录（绝对路径） */
+  yoloxPath: string | null;
+};
+
+async function loadYoloSettings(): Promise<YoloSettings> {
+  try {
+    const raw = await readFile(yoloSettingsFile(), 'utf8');
+    const parsed = JSON.parse(raw) as Partial<YoloSettings>;
+    if (parsed && typeof parsed.yoloxPath === 'string' && parsed.yoloxPath.trim()) {
+      return { yoloxPath: parsed.yoloxPath };
+    }
+  } catch {
+    // 首次运行或文件损坏
+  }
+  return { yoloxPath: null };
+}
+
+async function saveYoloSettings(settings: YoloSettings) {
+  await ensureYoloDirs();
+  await writeFile(yoloSettingsFile(), JSON.stringify(settings, null, 2), 'utf8');
+}
+
+/** 解析 YOLOX 源码目录：先用户配置，其次项目内置 third_party/YOLOX */
+async function resolveYoloxPath(): Promise<string | null> {
+  const settings = await loadYoloSettings();
+  if (settings.yoloxPath) {
+    try {
+      await stat(join(settings.yoloxPath, 'yolox', '__init__.py'));
+      return settings.yoloxPath;
+    } catch {
+      // 配置路径失效，回退到内置路径
+    }
+  }
+  const candidates = [
+    join(app.getAppPath(), 'third_party', 'YOLOX'),
+    join(process.resourcesPath, 'third_party', 'YOLOX'),
+  ];
+  for (const p of candidates) {
+    try {
+      await stat(join(p, 'yolox', '__init__.py'));
+      return p;
+    } catch {
+      // continue
+    }
+  }
+  return null;
+}
+
+/** 查找本机已下载的 YOLOX 预训练权重（yolo/weights/{model}.pth） */
+async function resolvePretrainedWeight(baseModel: string): Promise<string | null> {
+  const name = String(baseModel ?? '').replace(/-/g, '_');
+  if (!name) return null;
+  const p = join(yoloWeightsDir(), `${name}.pth`);
+  try {
+    const s = await stat(p);
+    return s.size > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
 
 type YoloIndexFile = {
   version: 1;
@@ -1075,6 +1532,7 @@ type YoloJobMeta = {
   epochs: number;
   imageSize: number;
   batch: number;
+  numClasses: number;
 };
 
 let trainingChild: ChildProcess | null = null;
@@ -1177,8 +1635,8 @@ async function linkOrCopy(src: string, dest: string) {
   }
 }
 
-/** 导出数据集为 YOLO 格式（images + labels + data.yaml + 训练/验证划分），返回 data.yaml 路径 */
-async function writeYoloExport(datasetId: string, splitTrain: number, seed: number): Promise<string> {
+/** 导出数据集为 YOLO + COCO 格式（YOLO txt + data.yaml + COCO JSON + 训练/验证划分），返回导出目录与类别数 */
+async function writeYoloExport(datasetId: string, splitTrain: number, seed: number): Promise<{ dataDir: string; classCount: number }> {
   const data = await loadDatasetFile(datasetId);
   if (data.classes.length === 0) throw new Error('数据集没有类别，请先在「标注」页添加类别');
   if (data.images.length === 0) throw new Error('数据集没有图片，请先上传截图');
@@ -1235,9 +1693,66 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
     'names:',
     ...data.classes.map((c, i) => `  ${i}: ${JSON.stringify(c.name)}`),
   ].join('\n');
-  const yamlPath = join(exportDir, 'data.yaml');
-  await writeFile(yamlPath, yaml, 'utf8');
-  return yamlPath;
+  await writeFile(join(exportDir, 'data.yaml'), yaml, 'utf8');
+
+  // ===== COCO JSON（YOLOX 原生训练/评估格式） =====
+  const annotationsDir = join(exportDir, 'annotations');
+  await mkdir(annotationsDir, { recursive: true });
+
+  const writeCocoJson = async (imageIds: Set<string>, fileName: string) => {
+    const images: Array<Record<string, unknown>> = [];
+    const annotations: Array<Record<string, unknown>> = [];
+    const idByFile = new Map<string, number>();
+    let id = 0;
+    for (const img of data.images) {
+      if (!imageIds.has(img.id)) continue;
+      id += 1;
+      idByFile.set(img.file, id);
+      images.push({ id, file_name: img.file, width: img.width, height: img.height });
+    }
+    let annId = 1;
+    for (const img of data.images) {
+      if (!imageIds.has(img.id)) continue;
+      const imgId = idByFile.get(img.file);
+      if (!imgId) continue;
+      for (const ann of data.annotations[img.id] ?? []) {
+        if (!ann.classId) continue;
+        const ci = classIndex.get(ann.classId);
+        if (ci === undefined) continue;
+        const x = Math.min(1, Math.max(0, ann.box.x));
+        const y = Math.min(1, Math.max(0, ann.box.y));
+        const w = Math.min(1, Math.max(0, ann.box.width));
+        const h = Math.min(1, Math.max(0, ann.box.height));
+        const pw = w * img.width;
+        const ph = h * img.height;
+        if (pw <= 0 || ph <= 0) continue;
+        annotations.push({
+          id: annId,
+          image_id: imgId,
+          category_id: ci,
+          bbox: [Math.round(x * img.width * 100) / 100, Math.round(y * img.height * 100) / 100, Math.round(pw * 100) / 100, Math.round(ph * 100) / 100],
+          area: Math.round(pw * ph * 100) / 100,
+          iscrowd: 0,
+        });
+        annId += 1;
+      }
+    }
+    await writeFile(
+      join(annotationsDir, fileName),
+      JSON.stringify({
+        images,
+        annotations,
+        categories: data.classes.map((c, i) => ({ id: i, name: c.name })),
+      }),
+      'utf8',
+    );
+  };
+
+  await writeCocoJson(trainSet, 'instances_train.json');
+  const valSet = new Set(data.images.filter((img) => !trainSet.has(img.id)).map((img) => img.id));
+  await writeCocoJson(valSet, 'instances_val.json');
+
+  return { dataDir: exportDir, classCount: data.classes.length };
 }
 
 const pythonCommand = () => (process.platform === 'win32' ? 'python' : 'python3');
@@ -1293,6 +1808,12 @@ function registerYoloIpc() {
     }
   };
 
+  const broadcastPackage = (ev: YoloTrainingEvent) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('yolo:packageOutput', ev);
+    }
+  };
+
   const handleEngineLine = (rawLine: string) => {
     const line = rawLine.trim();
     if (!line) return;
@@ -1321,20 +1842,21 @@ function registerYoloIpc() {
       if (!meta) return;
       const index = await loadYoloIndex();
       const id = randomUUID();
-      const dest = join(yoloModelsDir(), `${id}.pt`);
+      const dest = join(yoloModelsDir(), `${id}.pth`);
       await mkdir(yoloModelsDir(), { recursive: true });
       await copyFile(ev.modelPath, dest);
       const size = await stat(dest);
       const model: YoloModel = {
         id,
-        name: `${meta.datasetName} · ${meta.baseModel.replace(/\.pt$/, '')}`,
+        name: `${meta.datasetName} · ${meta.baseModel.replace(/\.(pt|pth)$/, '')}`,
         baseModel: meta.baseModel,
         datasetId: meta.datasetId,
         datasetName: meta.datasetName,
         epochs: meta.epochs,
         imageSize: meta.imageSize,
         batch: meta.batch,
-        file: `${id}.pt`,
+        numClasses: meta.numClasses,
+        file: `${id}.pth`,
         sizeBytes: size.size,
         metrics: ev.metrics,
         createdAt: Date.now(),
@@ -1582,14 +2104,28 @@ function registerYoloIpc() {
     const index = await loadYoloIndex();
     const model = index.models.find((m) => m.id === id);
     if (!model) return { started: false, message: '模型不存在' };
+    const yoloxPath = await resolveYoloxPath();
+    if (!yoloxPath) return { started: false, message: '未找到 YOLOX 源码目录，请先在「环境」页选择 YOLOX 目录' };
     const cmd = pythonCommand();
     const runDir = join(yoloRunsDir(), `export-${Date.now()}`);
     await mkdir(runDir, { recursive: true });
     const enginePath = join(runDir, 'engine.py');
     const configPath = join(runDir, 'config.json');
     await writeFile(enginePath, YOLO_ENGINE_SOURCE, 'utf8');
-    await writeFile(configPath, JSON.stringify({ modelPath: join(yoloModelsDir(), model.file), format, imageSize }), 'utf8');
-    const child = spawn(cmd, [enginePath, 'export', join(yoloModelsDir(), model.file), format, String(imageSize)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mode: 'export',
+        yoloxPath,
+        modelPath: join(yoloModelsDir(), model.file),
+        format,
+        imageSize,
+        baseModel: model.baseModel,
+        numClasses: model.numClasses ?? 0,
+      }),
+      'utf8',
+    );
+    const child = spawn(cmd, [enginePath, configPath], { stdio: ['ignore', 'pipe', 'pipe'] });
     exportChild = child;
     const onData = (chunk: unknown) => {
       for (const line of String(chunk).split('\n')) {
@@ -1627,14 +2163,41 @@ function registerYoloIpc() {
   });
 
   // ===== 环境检测与依赖包 =====
+  ipcMain.handle('yolo:getYoloxPath', async (): Promise<string | null> => resolveYoloxPath());
+
+  ipcMain.handle('yolo:setYoloxPath', async (_event, path: string): Promise<void> => {
+    await saveYoloSettings({ yoloxPath: path?.trim() || null });
+  });
+
+  ipcMain.handle('yolo:pickYoloxPath', async (): Promise<string | null> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const result = win
+      ? await dialog.showOpenDialog(win, {
+          title: '选择 YOLOX 源码目录（含 yolox 子目录）',
+          properties: ['openDirectory'],
+          buttonLabel: '选择此目录',
+        })
+      : null;
+    if (!result || result.canceled || result.filePaths.length === 0) return null;
+    const picked = result.filePaths[0];
+    await saveYoloSettings({ yoloxPath: picked });
+    return picked;
+  });
+
   ipcMain.handle('yolo:getEnvInfo', async (): Promise<YoloEnvInfo> => {
     const cmd = pythonCommand();
+    const yoloxPath = await resolveYoloxPath();
     const probe = [
-      'import sys, json;',
-      'out={"python": sys.executable, "pythonVersion": sys.version.split()[0]};',
+      'import sys, json, subprocess;',
+      ...(yoloxPath ? [`sys.path.insert(0, ${JSON.stringify(yoloxPath)});`] : []),
+      'out={"python": sys.executable, "pythonVersion": sys.version.split()[0], "pip": None};',
       'try:',
-      '  import ultralytics; out["ultralytics"]=getattr(ultralytics,"__version__","?");',
-      'except Exception: out["ultralytics"]=None;',
+      '  r=subprocess.run([sys.executable,"-m","pip","--version"],capture_output=True,text=True,timeout=8);',
+      '  if r.returncode==0: out["pip"]=r.stdout.split()[1];',
+      'except Exception: out["pip"]=None;',
+      'try:',
+      '  import yolox; out["yolox"]=getattr(yolox,"__version__","?");',
+      'except Exception: out["yolox"]=None;',
       'try:',
       '  import torch; out["torch"]=torch.__version__;',
       '  out["cuda"]=bool(torch.cuda.is_available());',
@@ -1642,13 +2205,15 @@ function registerYoloIpc() {
       '  out["mps"]=bool(mps is not None and mps.is_available());',
       'except Exception: out["torch"]=None; out["cuda"]=False; out["mps"]=False;',
       'print(json.dumps(out))',
-    ].join(' ');
-    const res = await runCaptured(cmd, ['-c', probe], 15000);
+    ].join('\n');
+    const res = await runCaptured(cmd, ['-c', probe], 20000);
     const info: YoloEnvInfo = {
       pythonAvailable: false,
       pythonPath: null,
       pythonVersion: null,
-      ultralytics: null,
+      pip: null,
+      yolox: null,
+      yoloxPath,
       torch: null,
       cuda: false,
       mps: false,
@@ -1663,24 +2228,20 @@ function registerYoloIpc() {
       info.pythonAvailable = true;
       info.pythonPath = typeof parsed.python === 'string' ? parsed.python : null;
       info.pythonVersion = typeof parsed.pythonVersion === 'string' ? parsed.pythonVersion : null;
-      info.ultralytics = typeof parsed.ultralytics === 'string' ? parsed.ultralytics : null;
+      info.pip = typeof parsed.pip === 'string' ? parsed.pip : null;
+      info.yolox = typeof parsed.yolox === 'string' ? parsed.yolox : null;
       info.torch = typeof parsed.torch === 'string' ? parsed.torch : null;
       info.cuda = Boolean(parsed.cuda);
       info.mps = Boolean(parsed.mps);
-      info.device = info.cuda ? 'cuda' : info.mps ? 'mps' : 'cpu';
+      info.device = info.torch ? (info.cuda ? 'cuda' : info.mps ? 'mps' : 'cpu') : 'none';
       return info;
     } catch {
       return info;
     }
   });
 
-  ipcMain.handle('yolo:installPackage', async (_event, packageName: string): Promise<{ started: boolean }> => {
-    if (packageChild) return { started: false };
-    const broadcastPackage = (ev: YoloTrainingEvent) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('yolo:packageOutput', ev);
-      }
-    };
+  ipcMain.handle('yolo:installPackage', async (_event, packageName: string): Promise<{ started: boolean; message?: string }> => {
+    if (packageChild) return { started: false, message: '已有安装任务在进行中' };
     const cmd = pythonCommand();
     const child = spawn(cmd, ['-m', 'pip', 'install', '-U', packageName], { stdio: ['ignore', 'pipe', 'pipe'] });
     packageChild = child;
@@ -1707,6 +2268,97 @@ function registerYoloIpc() {
     return { started: true };
   });
 
+  ipcMain.handle('yolo:installYoloxDeps', async (): Promise<{ started: boolean; message?: string }> => {
+    if (packageChild) return { started: false, message: '已有安装任务在进行中' };
+    const yoloxPath = await resolveYoloxPath();
+    if (!yoloxPath) {
+      return { started: false, message: '未找到 YOLOX 源码目录，请先在「环境」页选择 YOLOX 目录' };
+    }
+    const reqFile = join(yoloxPath, 'requirements.txt');
+    try {
+      await stat(reqFile);
+    } catch {
+      return { started: false, message: `未找到 requirements.txt：${reqFile}` };
+    }
+    const cmd = pythonCommand();
+    const child = spawn(cmd, ['-m', 'pip', 'install', '-r', reqFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+    packageChild = child;
+    const onData = (level: 'info' | 'warn', chunk: unknown) => {
+      for (const line of String(chunk).split('\n')) {
+        const cleaned = sanitizeLogLine(line);
+        if (cleaned) broadcastPackage({ t: 'log', level, message: cleaned });
+      }
+    };
+    child.stdout?.on('data', (chunk) => onData('info', chunk));
+    child.stderr?.on('data', (chunk) => onData('warn', chunk));
+    child.on('error', (err) => {
+      broadcastPackage({ t: 'log', level: 'error', message: `pip 启动失败：${err.message}` });
+      packageChild = null;
+    });
+    child.on('close', (code) => {
+      broadcastPackage({
+        t: 'log',
+        level: code === 0 ? 'info' : 'warn',
+        message: code === 0 ? 'YOLOX 依赖安装完成 ✓' : `pip 退出，退出码 ${code}`,
+      });
+      packageChild = null;
+    });
+    return { started: true };
+  });
+
+  const YOLOX_WEIGHTS: Record<string, string> = {
+    yolox_nano: 'https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.pth',
+    yolox_tiny: 'https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.pth',
+    yolox_s: 'https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth',
+    yolox_m: 'https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.pth',
+    yolox_l: 'https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_l.pth',
+    yolox_x: 'https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_x.pth',
+  };
+
+  ipcMain.handle('yolo:getWeightsInfo', async (): Promise<{ name: string; present: boolean; sizeBytes: number }[]> => {
+    await mkdir(yoloWeightsDir(), { recursive: true });
+    const out: { name: string; present: boolean; sizeBytes: number }[] = [];
+    for (const name of Object.keys(YOLOX_WEIGHTS)) {
+      try {
+        const s = await stat(join(yoloWeightsDir(), `${name}.pth`));
+        out.push({ name, present: s.size > 0, sizeBytes: s.size });
+      } catch {
+        out.push({ name, present: false, sizeBytes: 0 });
+      }
+    }
+    return out;
+  });
+
+  ipcMain.handle('yolo:downloadWeights', async (_event, modelName: string): Promise<{ started: boolean; message?: string }> => {
+    const name = String(modelName ?? '').replace(/-/g, '_');
+    const url = YOLOX_WEIGHTS[name];
+    if (!url) return { started: false, message: `未知模型：${modelName}` };
+    if (packageChild) return { started: false, message: '已有安装任务在进行中' };
+    try {
+      await mkdir(yoloWeightsDir(), { recursive: true });
+      const dest = join(yoloWeightsDir(), `${name}.pth`);
+      try {
+        const existing = await stat(dest);
+        if (existing.size > 0) return { started: false, message: `${name} 预训练权重已存在` };
+      } catch {
+        // 不存在则下载
+      }
+      broadcastPackage({ t: 'log', level: 'info', message: `开始下载 ${name} 预训练权重…` });
+      const response = await fetch(url);
+      if (!response.ok) {
+        broadcastPackage({ t: 'log', level: 'error', message: `下载失败（HTTP ${response.status}），请检查网络后重试` });
+        return { started: false, message: `下载失败（HTTP ${response.status}）` };
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      await writeFile(dest, buffer);
+      broadcastPackage({ t: 'log', level: 'info', message: `${name} 预训练权重下载完成（${(buffer.length / 1024 / 1024).toFixed(1)} MB）` });
+      return { started: true };
+    } catch (err) {
+      broadcastPackage({ t: 'log', level: 'error', message: `下载失败：${err instanceof Error ? err.message : String(err)}` });
+      return { started: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // ===== 训练 =====
   ipcMain.handle(
     'yolo:startTraining',
@@ -1722,8 +2374,13 @@ function registerYoloIpc() {
         const ds = index.datasets.find((d) => d.id === datasetId);
         if (!ds) return { started: false, message: '数据集不存在' };
 
+        const yoloxPath = await resolveYoloxPath();
+        if (!yoloxPath) {
+          return { started: false, message: '未找到 YOLOX 源码目录，请先在「环境」页选择 YOLOX 目录（如 third_party/YOLOX）' };
+        }
+
         const jobId = `run-${Date.now()}`;
-        const yamlPath = await writeYoloExport(datasetId, cfg.splitTrain, cfg.seed);
+        const { dataDir, classCount } = await writeYoloExport(datasetId, cfg.splitTrain, cfg.seed);
         const runDir = join(yoloRunsDir(), jobId);
         await rm(runDir, { recursive: true, force: true });
         await mkdir(runDir, { recursive: true });
@@ -1733,7 +2390,20 @@ function registerYoloIpc() {
         const configPath = join(runDir, 'config.json');
         await writeFile(
           configPath,
-          JSON.stringify({ ...cfg, dataYaml: yamlPath, projectDir: yoloRunsDir(), runName: jobId }, null, 2),
+          JSON.stringify(
+            {
+              ...cfg,
+              mode: 'train',
+              yoloxPath,
+              dataDir,
+              numClasses: classCount,
+              ckptPath: await resolvePretrainedWeight(cfg.model),
+              projectDir: yoloRunsDir(),
+              runName: jobId,
+            },
+            null,
+            2,
+          ),
           'utf8',
         );
 
@@ -1745,6 +2415,7 @@ function registerYoloIpc() {
           epochs: cfg.epochs,
           imageSize: cfg.imageSize,
           batch: cfg.batch,
+          numClasses: classCount,
         };
         trainingJobId = jobId;
 

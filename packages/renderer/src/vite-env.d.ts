@@ -87,12 +87,19 @@ declare global {
       removeModel: (id: string) => Promise<void>;
       setActiveModel: (id: string) => Promise<void>;
       getEnvInfo: () => Promise<YoloEnvInfo>;
-      installPackage: (packageName: string) => Promise<{ started: boolean }>;
+      installPackage: (packageName: string) => Promise<{ started: boolean; message?: string }>;
+      getYoloxPath: () => Promise<string | null>;
+      setYoloxPath: (path: string) => Promise<void>;
+      pickYoloxPath: () => Promise<string | null>;
+      installYoloxDeps: () => Promise<{ started: boolean; message?: string }>;
+      getWeightsInfo: () => Promise<{ name: string; present: boolean; sizeBytes: number }[]>;
+      downloadWeights: (modelName: string) => Promise<{ started: boolean; message?: string }>;
       startTraining: (cfg: YoloTrainConfig, datasetId: string) => Promise<{ started: boolean; message?: string }>;
       stopTraining: () => Promise<void>;
       onTrainingEvent: (cb: (event: YoloTrainingEvent) => void) => () => void;
       onTrainingState: (cb: (state: YoloTrainingState) => void) => () => void;
-      onPackageOutput: (cb: (event: YoloTrainingEvent) => void) => () => void;    };
+      onPackageOutput: (cb: (event: YoloTrainingEvent) => void) => () => void;
+    };
   }
 }
 

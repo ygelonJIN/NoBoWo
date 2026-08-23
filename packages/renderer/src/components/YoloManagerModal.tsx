@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   YoloAnnotation,
   YoloDataset,
@@ -630,6 +630,7 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
   const [output, setOutput] = useState<YoloTrainingEvent[]>([]);
   const [installing, setInstalling] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const consoleRef = useRef<HTMLDivElement>(null);
   const [stickBottom, setStickBottom] = useState(true);
 
@@ -649,14 +650,14 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
     if (el && stickBottom) el.scrollTop = el.scrollHeight;
   }, [output, stickBottom]);
 
-  const install = async (pkg: string) => {
+  const installDeps = async () => {
     if (!window.yoloAPI || installing) return;
     setInstalling(true);
     try {
-      const res = await window.yoloAPI.installPackage(pkg);
+      const res = await window.yoloAPI.installYoloxDeps();
       if (!res.started) {
         setInstalling(false);
-        setOutput((prev) => [...prev, { t: 'log', level: 'warn', message: '已有安装任务在进行中' }]);
+        setOutput((prev) => [...prev, { t: 'log', level: 'warn', message: res.message ?? '已有安装任务在进行中' }]);
       }
     } catch (err) {
       setInstalling(false);
@@ -673,34 +674,174 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
     }
   };
 
-  const rows: { label: string; ok: boolean | null; value: string }[] = [
-    {
-      label: 'Python',
-      ok: envInfo ? envInfo.pythonAvailable : null,
-      value: envInfo?.pythonPath ? `${envInfo.pythonPath}（v${envInfo.pythonVersion}）` : envInfo ? '未找到 Python，请先安装 Python 3.8+' : '检测中…',
-    },
-    {
-      label: 'ultralytics',
-      ok: envInfo ? Boolean(envInfo.ultralytics) : null,
-      value: envInfo?.ultralytics ? `v${envInfo.ultralytics}` : envInfo ? '未安装' : '检测中…',
-    },
-    {
-      label: 'PyTorch',
-      ok: envInfo ? Boolean(envInfo.torch) : null,
-      value: envInfo?.torch ? `v${envInfo.torch}` : envInfo ? '未安装' : '检测中…',
-    },
-    { label: 'CUDA (NVIDIA GPU)', ok: envInfo ? envInfo.cuda : null, value: envInfo ? (envInfo.cuda ? '可用' : '不可用') : '检测中…' },
-    { label: 'MPS (Apple 芯片)', ok: envInfo ? envInfo.mps : null, value: envInfo ? (envInfo.mps ? '可用' : '不可用') : '检测中…' },
-    {
-      label: '推荐设备',
-      ok: null,
-      value: envInfo ? (envInfo.device === 'none' ? '无可用设备' : envInfo.device) : '检测中…',
-    },
-  ];
+  const isMac = navigator.platform.toLowerCase().includes('mac');
+
+  type EnvRow = {
+    id: string;
+    label: string;
+    state: 'ok' | 'missing' | 'na' | 'info' | 'unknown';
+    value: string;
+    hint?: string;
+    commands?: string[];
+  };
+
+  const rows = useMemo<EnvRow[]>(() => {
+    if (!envInfo) {
+      return [
+        { id: 'python', label: 'Python', state: 'unknown', value: '检测中…' },
+        { id: 'pip', label: 'pip', state: 'unknown', value: '检测中…' },
+        { id: 'yolox', label: 'YOLOX', state: 'unknown', value: '检测中…' },
+        { id: 'dir', label: 'YOLOX 目录', state: 'unknown', value: '检测中…' },
+        { id: 'torch', label: 'PyTorch', state: 'unknown', value: '检测中…' },
+        { id: 'cuda', label: 'CUDA (NVIDIA GPU)', state: 'unknown', value: '检测中…' },
+        { id: 'mps', label: 'MPS (Apple 芯片)', state: 'unknown', value: '检测中…' },
+        { id: 'device', label: '推荐设备', state: 'unknown', value: '检测中…' },
+      ];
+    }
+    const list: EnvRow[] = [];
+
+    if (envInfo.pythonAvailable) {
+      list.push({ id: 'python', label: 'Python', state: 'ok', value: `${envInfo.pythonPath ?? ''}（v${envInfo.pythonVersion}）` });
+    } else {
+      list.push({ id: 'python', label: 'Python', state: 'missing', value: '未找到 Python',
+        hint: 'YOLO 训练需要 Python 3.8+。macOS 自带 Python 可能缺少 pip，建议安装独立版本。',
+        commands: isMac ? ['brew install python@3.12', '# 或从 https://python.org 下载安装'] : ['从 https://python.org 下载 Python 3.12 并安装，勾选 "Add to PATH"'],
+      });
+    }
+
+    if (!envInfo.pythonAvailable) {
+      list.push({ id: 'pip', label: 'pip', state: 'na', value: '需先安装 Python', hint: '安装 Python 后自动自带 pip，重新检测即可。' });
+    } else if (envInfo.pip) {
+      list.push({ id: 'pip', label: 'pip', state: 'ok', value: `v${envInfo.pip}` });
+    } else {
+      list.push({ id: 'pip', label: 'pip', state: 'missing', value: '未安装 pip',
+        hint: 'pip 是 Python 的包管理器，安装 PyTorch、YOLOX 依赖都靠它。',
+        commands: ['python3 -m ensurepip --upgrade'],
+      });
+    }
+
+    if (envInfo.yoloxPath) {
+      list.push({ id: 'dir', label: 'YOLOX 目录', state: 'ok', value: envInfo.yoloxPath });
+    } else {
+      list.push({ id: 'dir', label: 'YOLOX 目录', state: 'missing', value: '未配置',
+        hint: '需要指向 YOLOX 源码目录（含 yolox 子目录）。可以点下方「选择 YOLOX 源码目录」，或用命令下载源码。',
+        commands: ['git clone https://github.com/Megvii-BaseDetection/YOLOX'],
+      });
+    }
+
+    if (envInfo.yolox) {
+      list.push({ id: 'yolox', label: 'YOLOX', state: 'ok', value: `v${envInfo.yolox}` });
+    } else if (envInfo.yoloxPath) {
+      list.push({ id: 'yolox', label: 'YOLOX', state: 'missing', value: '未安装',
+        hint: 'YOLOX 源码已就位，但依赖未安装。点下方「安装 YOLOX 依赖」按钮，或在 YOLOX 目录执行：',
+        commands: ['pip3 install -r requirements.txt  # 在 YOLOX 目录下执行'],
+      });
+    } else {
+      list.push({ id: 'yolox', label: 'YOLOX', state: 'na', value: '待目录', hint: '配置 YOLOX 源码目录后，自动检测 YOLOX 版本。' });
+    }
+
+    if (envInfo.torch) {
+      list.push({ id: 'torch', label: 'PyTorch', state: 'ok', value: `v${envInfo.torch}` });
+    } else {
+      list.push({ id: 'torch', label: 'PyTorch', state: 'missing', value: '未安装',
+        hint: 'PyTorch 是训练框架，带上 GPU 后端（MPS/CUDA）。安装后 App 自动启用加速。',
+        commands: isMac ? ['pip3 install torch torchvision torchaudio'] : ['pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121'],
+      });
+    }
+
+    if (isMac) {
+      list.push({ id: 'cuda', label: 'CUDA (NVIDIA GPU)', state: 'na', value: '不适用（Mac）',
+        hint: 'CUDA 只支持 NVIDIA 显卡。Mac 没有 NVIDIA GPU，属于正常情况。Apple 芯片的 GPU 加速走 MPS。',
+      });
+      if (envInfo.mps) {
+        list.push({ id: 'mps', label: 'MPS (Apple 芯片)', state: 'ok', value: '可用' });
+      } else if (envInfo.torch) {
+        list.push({ id: 'mps', label: 'MPS (Apple 芯片)', state: 'missing', value: '不可用',
+          hint: '已安装 PyTorch 但 MPS 未启用，可能是 PyTorch 版本或系统问题。运行以下命令确认：',
+          commands: ['python3 -c "import torch; print(torch.backends.mps.is_available())"'],
+        });
+      } else {
+        list.push({ id: 'mps', label: 'MPS (Apple 芯片)', state: 'na', value: '待 PyTorch',
+          hint: 'MPS 是 PyTorch 在 Apple 芯片上的 GPU 加速后端。装好 PyTorch 后自动启用，无需单独安装。',
+        });
+      }
+    } else {
+      if (envInfo.cuda) {
+        list.push({ id: 'cuda', label: 'CUDA (NVIDIA GPU)', state: 'ok', value: '可用' });
+      } else {
+        list.push({ id: 'cuda', label: 'CUDA (NVIDIA GPU)', state: 'missing', value: '不可用',
+          hint: '需要 NVIDIA 显卡 + 驱动，并用 CUDA 版 PyTorch。',
+          commands: ['pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121'],
+        });
+      }
+      list.push({ id: 'mps', label: 'MPS (Apple 芯片)', state: 'na', value: '不适用（Windows）',
+        hint: 'MPS 仅支持 Apple 芯片的 Mac，Windows 无需安装。',
+      });
+    }
+
+    const deviceLabels: Record<string, string> = {
+      cuda: 'CUDA（NVIDIA GPU 加速，最快）',
+      mps: 'MPS（Apple 芯片加速）',
+      cpu: 'CPU（无 GPU，训练较慢）',
+      none: '无可用设备（需先安装 PyTorch）',
+    };
+    list.push({ id: 'device', label: '推荐设备', state: 'info', value: deviceLabels[envInfo.device] ?? envInfo.device,
+      hint: '训练时自动选择最优计算后端，速度排序：CUDA（NVIDIA 显卡）> MPS（Apple 芯片）> CPU。有 GPU 会快很多；显示 CPU 表示当前没有 GPU 加速可用。',
+    });
+
+    return list;
+  }, [envInfo, isMac]);
+
+  const missingCount = rows.filter((r) => r.state === 'missing').length;
+  const allDone = envInfo !== null && missingCount === 0 && Boolean(envInfo.torch);
+
+  // ===== 权重 & 下载 =====
+  const [weights, setWeights] = useState<{ name: string; present: boolean; sizeBytes: number }[]>([]);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [weightsLoading, setWeightsLoading] = useState(false);
+
+  const refreshWeights = useCallback(async () => {
+    if (!window.yoloAPI) return;
+    setWeightsLoading(true);
+    try {
+      setWeights(await window.yoloAPI.getWeightsInfo());
+    } catch {
+      setWeights([]);
+    } finally {
+      setWeightsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshWeights();
+  }, [refreshWeights]);
+
+  const pickYoloxDir = async () => {
+    if (!window.yoloAPI) return;
+    const picked = await window.yoloAPI.pickYoloxPath();
+    if (picked) {
+      await onRefresh();
+      void refreshWeights();
+    }
+  };
+
+  const downloadWeight = async (name: string) => {
+    if (!window.yoloAPI || downloading) return;
+    setDownloading(name);
+    try {
+      await window.yoloAPI.downloadWeights(name);
+      await refreshWeights();
+    } catch (err) {
+      setOutput((prev) => [...prev, { t: 'log', level: 'error', message: String(err) }]);
+    } finally {
+      setDownloading(null);
+    }
+  };
 
   return (
     <div className="yolo-env">
-      <section className="yolo-env__status">
+      {/* ===== 左栏：运行环境 ===== */}
+      <section className="yolo-env__col yolo-env__col--left">
         <div className="yolo-env__head">
           <span className="yolo-panel-title">
             <span>运行环境</span>
@@ -711,31 +852,93 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
           </button>
         </div>
         <div className="yolo-env__rows">
-          {rows.map((r) => (
-            <div key={r.label} className="yolo-env-row">
-              <span className="yolo-env-row__label">{r.label}</span>
-              <span className={`yolo-env-row__status ${r.ok === null ? 'unknown' : r.ok ? 'ok' : 'bad'}`}>
-                {r.ok === null ? '—' : r.ok ? '✓ 正常' : '✗ 缺失'}
-              </span>
-              <span className="yolo-env-row__value">{r.value}</span>
-            </div>
-          ))}
+          {rows.map((r) => {
+            const isOpen = Boolean(expanded[r.id]);
+            const expandable = Boolean(r.hint || (r.commands && r.commands.length > 0));
+            return (
+              <div
+                key={r.id}
+                className={`yolo-env-row yolo-env-row--${r.state} ${expandable ? 'yolo-env-row--clickable' : ''} ${isOpen ? 'open' : ''}`}
+                onClick={() => expandable && setExpanded((p) => ({ ...p, [r.id]: !p[r.id] }))}
+              >
+                <span className="yolo-env-row__label">{r.label}</span>
+                <span className={`yolo-env-row__status ${r.state}`}>
+                  {r.state === 'ok' ? '✓ 正常' : r.state === 'missing' ? '✗ 缺失' : r.state === 'na' ? '— 不适用' : r.state === 'info' ? 'ℹ' : '…'}
+                </span>
+                <span className="yolo-env-row__value">{r.value}</span>
+                {expandable && (
+                  <span className={`yolo-env-row__solve ${r.state === 'missing' ? 'missing' : r.state === 'na' ? 'na' : 'info'}`}>
+                    {r.state === 'missing' ? '如何安装' : '说明'} {isOpen ? '▴' : '▾'}
+                  </span>
+                )}
+                {isOpen && (r.hint || r.commands) && (
+                  <div className="yolo-env-row__guide">
+                    {r.hint && <div className="yolo-env-row__guide-hint">{r.hint}</div>}
+                    {r.commands && r.commands.length > 0 && (
+                      <pre className="yolo-env__guide-cmd">
+                        <code>{r.commands.join('\n')}</code>
+                        <button
+                          className="yolo-env__guide-copy"
+                          onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(r.commands!.join('\n')).catch(() => {}); }}
+                          title="复制命令"
+                        >⎘</button>
+                      </pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
         <div className="yolo-env__actions">
-          <button className="yolo-env__install" onClick={() => void install('ultralytics')} disabled={installing || !apiAvailable}>
-            {installing ? '安装中…' : '安装 / 升级 ultralytics'}
+          <button className="yolo-env__install" onClick={() => void installDeps()} disabled={installing || !apiAvailable}>
+            {installing ? '安装中…' : '安装 YOLOX 依赖'}
           </button>
-          <span className="yolo-env__tip">pip install -U ultralytics（自动选择已装好的 PyTorch 版本）</span>
+          <button className="yolo-env__pick" onClick={() => void pickYoloxDir()} disabled={!apiAvailable}>
+            {envInfo?.yoloxPath ? '更换 YOLOX 源码目录' : '选择 YOLOX 源码目录'}
+          </button>
+          <span className="yolo-env__tip">按 YOLOX 仓库 requirements.txt 安装依赖。未手动配置时，会查找项目内 third_party/YOLOX。</span>
         </div>
-        <div className="yolo-env__guide">
-          <div className="yolo-env__guide-title">手动安装指引</div>
-          <code>macOS（Apple 芯片）：pip3 install ultralytics torch torchvision</code>
-          <code>Windows（NVIDIA GPU）：pip install ultralytics torch torchvision --index-url https://download.pytorch.org/whl/cu121</code>
-          <code>Windows / Linux（CPU 即可）：pip install ultralytics</code>
+        {allDone && <div className="yolo-env__all-done">所有依赖已就绪，可以开始训练 ✓</div>}
+      </section>
+
+      {/* ===== 中栏：预训练权重 ===== */}
+      <section className="yolo-env__col yolo-env__col--mid">
+        <div className="yolo-env__weights">
+          <div className="yolo-env__weights-head">
+            <span className="yolo-env__guide-title">YOLOX 预训练权重</span>
+          </div>
+          <div className="yolo-env__weights-note">
+            预训练权重是模型在 COCO 大规模数据集上预先训练好的参数。下载后，训练会作为初始权重（迁移学习 / 微调），只需少量轮次即可达到不错效果，比从零开始训练快很多、准很多。
+          </div>
+          {weightsLoading ? (
+            <div className="yolo-env__weights-empty">检查中…</div>
+          ) : weights.length === 0 ? (
+            <div className="yolo-env__weights-empty">暂无权重信息，请先配置 YOLOX 目录</div>
+          ) : (
+            <div className="yolo-env__weights-grid">
+              {weights.map((w) => (
+                <div key={w.name} className={`yolo-weight-card ${w.present ? 'present' : ''}`}>
+                  <div className="yolo-weight-card__info">
+                    <span className="yolo-weight-card__name">{w.name.replace(/_/g, '-')}</span>
+                    <span className="yolo-weight-card__size">{w.present ? `${(w.sizeBytes / 1024 / 1024).toFixed(1)} MB` : '未下载'}</span>
+                  </div>
+                  {w.present ? (
+                    <span className="yolo-weight-card__badge">已下载 ✓</span>
+                  ) : (
+                    <button className="yolo-btn yolo-btn--compact yolo-btn--primary" onClick={() => void downloadWeight(w.name)} disabled={downloading !== null}>
+                      {downloading === w.name ? '下载中…' : '下载'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 
-      <section className="yolo-env__console">
+      {/* ===== 右栏：安装输出 ===== */}
+      <section className="yolo-env__col yolo-env__col--right">
         <div className="yolo-console__head">
           <span>安装输出</span>
           <span className="yolo-console__count">{output.length} 条</span>
@@ -751,7 +954,7 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
             setStickBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 24);
           }}
         >
-          {output.length === 0 && <div className="yolo-console__placeholder">点击上方按钮后，pip 输出会实时显示在这里…</div>}
+          {output.length === 0 && <div className="yolo-console__placeholder">点击安装按钮后，pip 输出会实时显示在这里…</div>}
           {output.map((ev, i) => (
             <div key={i} className={`yolo-console__line yolo-console__line--${ev.t === 'log' ? ev.level : 'info'}`}>
               {ev.t === 'log' ? ev.message : JSON.stringify(ev)}

@@ -87,12 +87,21 @@ function PreviewCard({ preview }: { preview: AugPreview }) {
   );
 }
 
-const CONFIG_KEY = 'nobowo.yolo.trainConfig.v1';
+const CONFIG_KEY = 'nobowo.yolo.trainConfig.v2';
 
-const BASE_MODELS = ['yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt', 'yolov8x.pt', 'yolov8n-seg.pt', 'yolov8s-seg.pt'];
+type YoloxModelOption = { value: string; label: string; size: string };
+
+const BASE_MODELS: YoloxModelOption[] = [
+  { value: 'yolox_nano', label: 'YOLOX-Nano（最快）', size: '1.1 MB' },
+  { value: 'yolox_tiny', label: 'YOLOX-Tiny', size: '6.5 MB' },
+  { value: 'yolox_s', label: 'YOLOX-S（推荐）', size: '26.8 MB' },
+  { value: 'yolox_m', label: 'YOLOX-M', size: '73.8 MB' },
+  { value: 'yolox_l', label: 'YOLOX-L', size: '155.6 MB' },
+  { value: 'yolox_x', label: 'YOLOX-X', size: '281.9 MB' },
+];
 
 const defaultConfig = (): YoloTrainConfig => ({
-  model: 'yolov8n.pt',
+  model: 'yolox_s',
   epochs: 100,
   batch: 8,
   imageSize: 640,
@@ -274,7 +283,8 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
       const raw = window.localStorage.getItem(CONFIG_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as YoloTrainConfig;
-        if (parsed && parsed.augment && typeof parsed.augment === 'object') return parsed;
+        const validModel = parsed && BASE_MODELS.some((m) => m.value === parsed.model);
+        if (parsed && validModel && parsed.augment && typeof parsed.augment === 'object') return parsed;
       }
     } catch {
       // 配置损坏时使用默认值
@@ -393,13 +403,13 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
             <CustomSelect
               value={cfg.model}
               options={BASE_MODELS.map((m) => ({
-                value: m,
-                label: `${m}（${m.includes('n.') ? 'nano' : m.includes('s.') ? 'small' : m.includes('m.') ? 'medium' : m.includes('l.') ? 'large' : m.includes('x.') ? 'xlarge' : m}）`,
+                value: m.value,
+                label: `${m.label} · 权重 ${m.size}`,
               }))}
               onChange={(model) => patch({ model })}
               maxHeight={260}
             />
-            <span className="yolo-field__hint">越大的模型精度越高、训练越慢；小数据集优先 nano/small</span>
+            <span className="yolo-field__hint">越大的模型精度越高、训练越慢；小数据集优先 Nano / Tiny / S。下载预训练权重后可微调，训练更快更准。</span>
           </label>
           <label className="yolo-field">
             <span className="yolo-field__label">计算设备</span>
@@ -483,8 +493,8 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
         {!apiAvailable && (
           <div className="yolo-train__notice">当前运行在浏览器预览模式，训练功能不可用。请通过 npm run dev 启动桌面版。</div>
         )}
-        {envInfo && envInfo.pythonAvailable && !envInfo.ultralytics && (
-          <div className="yolo-train__notice">检测到 Python 但缺少 ultralytics，请到「环境」页安装依赖。</div>
+        {envInfo && envInfo.pythonAvailable && !envInfo.yolox && (
+          <div className="yolo-train__notice">检测到 Python 但缺少 YOLOX，请到「环境」页检查 YOLOX 目录与依赖。</div>
         )}
       </aside>
 
@@ -544,7 +554,7 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
           <div className="yolo-config-section__title">训练建议</div>
           <div className="yolo-config-section__desc">如果你是第一次训练，可以先用小模型 + 适中的增强参数，等数据集稳定后再逐步提高 epochs 与图像尺寸。</div>
           <ul className="yolo-compliance-list">
-            <li>数据少于 200 张时，优先使用 `yolov8n.pt` 或 `yolov8s.pt`。</li>
+            <li>数据少于 200 张时，优先使用 YOLOX-Nano / Tiny / S。</li>
             <li>卡顿或显存不足时，先把 batch 调小，再降低 imgsz。</li>
             <li>如果模型学偏了，先检查类别是否足够均衡，再调低 Mosaic/MixUp。</li>
           </ul>

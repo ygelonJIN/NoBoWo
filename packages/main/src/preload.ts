@@ -91,6 +91,12 @@ contextBridge.exposeInMainWorld('yoloAPI', {
   setActiveModel: (id: string) => ipcRenderer.invoke('yolo:setActiveModel', id),
   getEnvInfo: () => ipcRenderer.invoke('yolo:getEnvInfo'),
   installPackage: (packageName: string) => ipcRenderer.invoke('yolo:installPackage', packageName),
+  getYoloxPath: () => ipcRenderer.invoke('yolo:getYoloxPath'),
+  setYoloxPath: (path: string) => ipcRenderer.invoke('yolo:setYoloxPath', path),
+  pickYoloxPath: () => ipcRenderer.invoke('yolo:pickYoloxPath'),
+  installYoloxDeps: () => ipcRenderer.invoke('yolo:installYoloxDeps'),
+  getWeightsInfo: () => ipcRenderer.invoke('yolo:getWeightsInfo'),
+  downloadWeights: (modelName: string) => ipcRenderer.invoke('yolo:downloadWeights', modelName),
   startTraining: (cfg: YoloTrainConfig, datasetId: string) =>
     ipcRenderer.invoke('yolo:startTraining', cfg, datasetId),
   stopTraining: () => ipcRenderer.invoke('yolo:stopTraining'),
