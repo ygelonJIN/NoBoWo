@@ -5,7 +5,9 @@ export type NodeType =
   | 'screenshot'
   | 'if'
   | 'loop'
-  | 'recognize';
+  | 'recognize'
+  | 'scroll'
+  | 'keyboard';
 
 export type PortDirection = 'input' | 'output';
 
@@ -51,6 +53,7 @@ export type ScreenshotNode = WorkflowNodeBase<'screenshot', {
   /** capture from a configured stream window instead of the entire desktop */
   source: 'screen' | 'stream';
   streamSourceId?: string;
+  region?: TemplateRect;
 }>;
 
 export type IfNode = WorkflowNodeBase<'if', {
@@ -61,6 +64,16 @@ export type LoopNode = WorkflowNodeBase<'loop', {
   mode: 'count' | 'condition';
   count?: number;
   conditionText?: string;
+}>;
+
+export type ScrollNode = WorkflowNodeBase<'scroll', {
+  direction: 'up' | 'down' | 'left' | 'right';
+  amount: number;
+}>;
+
+export type KeyboardNode = WorkflowNodeBase<'keyboard', {
+  keys: string;
+  mode: 'tap' | 'hold';
 }>;
 
 export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
@@ -177,13 +190,13 @@ export type RecognizeNode = WorkflowNodeBase<'recognize', {
     template: { enabled: boolean; templateId?: string; templatePath?: string; threshold: number };
     yolo: { enabled: boolean; modelId?: string; modelPath?: string; classId?: string; label?: string; threshold: number };
     ocr: { enabled: boolean; text: string; engine?: OcrEngine; threshold: number };
-    cloudApi: { enabled: boolean; profileId?: string; url?: string; apiKey?: string; prompt: string; threshold: number };
+    cloudApi: { enabled: boolean; profileId?: string; apiIds?: string[]; apiMode?: 'cascade' | 'parallel'; url?: string; apiKey?: string; prompt: string; threshold: number };
   };
   executionMode: 'cascade' | 'parallel';
   strategyOrder: ('coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi')[];
 }>;
 
-export type WorkflowNode = ClickNode | InputNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode;
+export type WorkflowNode = ClickNode | InputNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode | ScrollNode | KeyboardNode;
 
 export type WorkflowEdge = {
   id: string;
@@ -305,6 +318,16 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
         { id: 'done', label: 'Done', direction: 'output', dataType: 'flow' },
       ];
     case 'recognize':
+      return [
+        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
+        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
+      ];
+    case 'scroll':
+      return [
+        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
+        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
+      ];
+    case 'keyboard':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
@@ -526,6 +549,20 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         title: 'Loop',
         data: { mode: 'count', count: 3 },
       };
+    case 'scroll':
+      return {
+        ...base,
+        type,
+        title: 'Scroll',
+        data: { direction: 'down', amount: 300 },
+      };
+    case 'keyboard':
+      return {
+        ...base,
+        type,
+        title: 'Keyboard',
+        data: { keys: 'enter', mode: 'tap' },
+      };
     case 'recognize':
       return {
         ...base,
@@ -537,7 +574,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
             template: { enabled: false, threshold: 60 },
             yolo: { enabled: false, threshold: 60 },
             ocr: { enabled: false, text: '', engine: 'auto', threshold: 60 },
-            cloudApi: { enabled: false, prompt: '', threshold: 60 },
+            cloudApi: { enabled: false, prompt: '', threshold: 60, apiMode: 'cascade' },
           },
           executionMode: 'cascade',
           strategyOrder: ['coords', 'template', 'yolo', 'ocr', 'cloudApi'],

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CloudApiProfile } from '@nobowo/core';
 
 const blankProfile = (): Omit<CloudApiProfile, 'id' | 'createdAt' | 'updatedAt'> => ({
@@ -10,6 +10,8 @@ const blankProfile = (): Omit<CloudApiProfile, 'id' | 'createdAt' | 'updatedAt'>
   lastTestStatus: null,
   lastTestMessage: null,
 });
+
+type ApiMode = 'cascade' | 'parallel';
 
 type Props = {
   onClose: () => void;
@@ -24,6 +26,9 @@ export function CloudApiManagerModal({ onClose, onChanged }: Props) {
   const [testing, setTesting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [apiMode, setApiMode] = useState<ApiMode>('cascade');
+  const [order, setOrder] = useState<string[]>([]);
+  const dragRef = useRef<{ id: string; index: number } | null>(null);
 
   const selected = useMemo(() => profiles.find((p) => p.id === selectedId) ?? null, [profiles, selectedId]);
   const isNew = !selected;

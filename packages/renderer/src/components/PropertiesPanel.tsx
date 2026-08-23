@@ -60,6 +60,8 @@ type LooseStrategy = {
   modelId?: string;
   modelPath?: string;
   profileId?: string;
+  apiIds?: string[];
+  apiMode?: 'cascade' | 'parallel';
 };
 
 function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data']>): T {
@@ -254,6 +256,75 @@ export function PropertiesPanel({
     setDragUI(null);
   }, []);
 
+  const apiDragRef = useRef<{ id: string; from: number } | null>(null);
+  const apiListRef = useRef<HTMLDivElement>(null);
+
+  const getCloudApiIds = useCallback((): string[] => {
+    if (!node || node.type !== 'recognize') return [];
+    const strategy = (node.data.strategies as unknown as Record<StrategyKey, LooseStrategy>).cloudApi;
+    return strategy.apiIds ?? (strategy.profileId ? [strategy.profileId] : []);
+  }, [node]);
+
+  const setCloudApiIds = useCallback(
+    (ids: string[]) => {
+      updateStrategy('cloudApi', { apiIds: ids, profileId: ids[0] ?? undefined });
+    },
+    [updateStrategy],
+  );
+
+  const addCloudApi = useCallback(
+    (profileId: string) => {
+      const ids = getCloudApiIds();
+      if (ids.includes(profileId)) return;
+      setCloudApiIds([...ids, profileId]);
+    },
+    [getCloudApiIds, setCloudApiIds],
+  );
+
+  const removeCloudApi = useCallback(
+    (profileId: string) => {
+      setCloudApiIds(getCloudApiIds().filter((id) => id !== profileId));
+    },
+    [getCloudApiIds, setCloudApiIds],
+  );
+
+  const handleApiGripPointerDown = useCallback((e: React.PointerEvent, id: string, index: number) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // pointer capture may be unavailable in previews
+    }
+    apiDragRef.current = { id, from: index };
+  }, []);
+
+  const handleApiGripPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const drag = apiDragRef.current;
+      const list = apiListRef.current;
+      if (!drag || !list) return;
+      const chips = Array.from(list.querySelectorAll<HTMLElement>('.api-chip'));
+      const ids = [...getCloudApiIds()];
+      for (let index = 0; index < chips.length; index += 1) {
+        const rect = chips[index].getBoundingClientRect();
+        if (e.clientY < rect.top + rect.height / 2 && index !== drag.from) {
+          const next = [...ids];
+          const [moved] = next.splice(drag.from, 1);
+          next.splice(index, 0, moved);
+          apiDragRef.current = { ...drag, from: index };
+          setCloudApiIds(next);
+          break;
+        }
+      }
+    },
+    [getCloudApiIds, setCloudApiIds],
+  );
+
+  const handleApiGripPointerUp = useCallback(() => {
+    apiDragRef.current = null;
+  }, []);
+
   if (!node) {
     return (
       <aside className="properties-panel">
@@ -270,6 +341,15 @@ export function PropertiesPanel({
         <label>
           标题
           <input value={node.title} onChange={(e) => onChangeNode({ ...node, title: e.target.value })} />
+        </label>
+
+        <label className="checkbox-row">
+          <span>启用该节点</span>
+          <input
+            type="checkbox"
+            checked={node.enabled !== false}
+            onChange={(e) => onChangeNode({ ...node, enabled: e.target.checked })}
+          />
         </label>
 
         {node.type === 'click' && (
@@ -349,6 +429,47 @@ export function PropertiesPanel({
                 onChange={(v) => onChangeNode(updateNodeData(node, { regionMode: v as 'full' | 'selected' }))}
               />
             </label>
+            {node.data.regionMode === 'selected' && (
+              <>
+                <p className="properties-panel__hint">执行时将只截取以下区域（相对所选屏幕/串流画面左上角）</p>
+                <div className="grid-two">
+                  <label>
+                    X
+                    <input
+                      type="number"
+                      value={node.data.region?.x ?? 0}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { y: 0, width: 100, height: 100 }), x: Number(e.target.value) } }))}
+                    />
+                  </label>
+                  <label>
+                    Y
+                    <input
+                      type="number"
+                      value={node.data.region?.y ?? 0}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, width: 100, height: 100 }), y: Number(e.target.value) } }))}
+                    />
+                  </label>
+                  <label>
+                    宽
+                    <input
+                      type="number"
+                      min={1}
+                      value={node.data.region?.width ?? 100}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, y: 0, height: 100 }), width: Number(e.target.value) } }))}
+                    />
+                  </label>
+                  <label>
+                    高
+                    <input
+                      type="number"
+                      min={1}
+                      value={node.data.region?.height ?? 100}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, y: 0, width: 100 }), height: Number(e.target.value) } }))}
+                    />
+                  </label>
+                </div>
+              </>
+            )}
             <label>
               来源
               <CustomSelect
@@ -421,6 +542,61 @@ export function PropertiesPanel({
                 />
               </label>
             )}
+          </section>
+        )}
+
+        {node.type === 'scroll' && (
+          <section className="properties-panel__group">
+            <h3>滚动配置</h3>
+            <label>
+              方向
+              <CustomSelect
+                value={node.data.direction}
+                options={[
+                  { value: 'up', label: '向上' },
+                  { value: 'down', label: '向下' },
+                  { value: 'left', label: '向左' },
+                  { value: 'right', label: '向右' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { direction: v as 'up' | 'down' | 'left' | 'right' }))}
+              />
+            </label>
+            <label>
+              滚动距离（px）
+              <input
+                type="number"
+                min={0}
+                value={node.data.amount}
+                onChange={(e) => onChangeNode(updateNodeData(node, { amount: Math.max(0, Number(e.target.value)) }))}
+              />
+            </label>
+            <p className="properties-panel__hint">执行时对当前激活窗口滚动指定像素</p>
+          </section>
+        )}
+
+        {node.type === 'keyboard' && (
+          <section className="properties-panel__group">
+            <h3>键盘配置</h3>
+            <label>
+              按键
+              <input
+                value={node.data.keys}
+                placeholder="例如：enter / ctrl+shift+a / F5"
+                onChange={(e) => onChangeNode(updateNodeData(node, { keys: e.target.value }))}
+              />
+            </label>
+            <label>
+              模式
+              <CustomSelect
+                value={node.data.mode}
+                options={[
+                  { value: 'tap', label: '点击（按下并松开）' },
+                  { value: 'hold', label: '按住（长按）' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'tap' | 'hold' }))}
+              />
+            </label>
+            <p className="properties-panel__hint">多个按键用 + 连接，如 ctrl+shift+a</p>
           </section>
         )}
 
@@ -612,16 +788,72 @@ export function PropertiesPanel({
                       {strategyKey === 'cloudApi' && (
                         <>
                           <label>
-                            API 配置
+                            执行模式
                             <CustomSelect
-                              value={strategy.profileId ?? ''}
+                              value={strategy.apiMode ?? 'cascade'}
                               options={[
-                                { value: '', label: '未配置' },
-                                ...apiProfiles.map((profile) => ({ value: profile.id, label: profile.name })),
+                                { value: 'cascade', label: '级联（按顺序逐个尝试，命中即停）' },
+                                { value: 'parallel', label: '并行（同时请求，取最高优先级结果）' },
                               ]}
-                              onChange={(v) => updateStrategy('cloudApi', { profileId: v || undefined })}
+                              onChange={(v) => updateStrategy('cloudApi', { apiMode: v as 'cascade' | 'parallel' })}
                             />
                           </label>
+                          <div className="api-chip-list" ref={apiListRef}>
+                            {getCloudApiIds().map((id, index) => {
+                              const profile = apiProfiles.find((p) => p.id === id);
+                              return (
+                                <div
+                                  key={id}
+                                  className={`api-chip ${apiDragRef.current?.id === id ? 'api-chip--dragging' : ''}`}
+                                >
+                                  <span
+                                    className="api-chip__grip"
+                                    title="拖动排序"
+                                    onPointerDown={(e) => handleApiGripPointerDown(e, id, index)}
+                                    onPointerMove={handleApiGripPointerMove}
+                                    onPointerUp={handleApiGripPointerUp}
+                                    onPointerCancel={handleApiGripPointerUp}
+                                  >
+                                    ⋮⋮
+                                  </span>
+                                  <span className="api-chip__index">{index + 1}</span>
+                                  <span className="api-chip__name">{profile?.name ?? id}</span>
+                                  {profile && (
+                                    <span className={`api-chip__status ${profile.lastTestStatus === 'ok' ? 'ok' : profile.lastTestStatus === 'error' ? 'bad' : 'idle'}`}>
+                                      {profile.lastTestStatus === 'ok' ? '✓' : profile.lastTestStatus === 'error' ? '✗' : '·'}
+                                    </span>
+                                  )}
+                                  <button
+                                    className="api-chip__remove"
+                                    title="移除"
+                                    onClick={() => removeCloudApi(id)}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              );
+                            })}
+                            {getCloudApiIds().length === 0 && (
+                              <p className="properties-panel__hint">还没有选择 API，从下方添加一个或多个配置</p>
+                            )}
+                          </div>
+                          {apiProfiles.filter((p) => !getCloudApiIds().includes(p.id)).length > 0 && (
+                            <label>
+                              添加 API
+                              <CustomSelect
+                                value=""
+                                options={[
+                                  { value: '', label: '选择要添加的 API…' },
+                                  ...apiProfiles
+                                    .filter((p) => !getCloudApiIds().includes(p.id))
+                                    .map((p) => ({ value: p.id, label: p.name })),
+                                ]}
+                                onChange={(v) => {
+                                  if (v) addCloudApi(v);
+                                }}
+                              />
+                            </label>
+                          )}
                           <button className="properties-panel__ghost-button" onClick={onOpenCloudApiManager}>
                             管理 API…
                           </button>

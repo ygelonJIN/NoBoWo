@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type WheelEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type WheelEvent } from 'react';
 import {
   createDefaultNode,
   defaultWorkflowDocument,
@@ -13,6 +13,7 @@ import { YoloManagerModal } from './components/YoloManagerModal';
 import { CloudApiManagerModal } from './components/CloudApiManagerModal';
 import { OcrTestModal } from './components/OcrTestModal';
 import { StreamManagerModal } from './components/StreamManagerModal';
+import { DebugPanel } from './components/DebugPanel';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -25,7 +26,7 @@ const PANEL_WIDTH = 320;
 const PANEL_GAP = 14;
 
 type Point = { x: number; y: number };
-type ContextMenu = { x: number; y: number };
+type ContextMenu = { x: number; y: number; edgeId?: string };
 
 const defaultSeedNodes: WorkflowNode[] = [createDefaultNode('click', 1), createDefaultNode('input', 2), createDefaultNode('wait', 3)];
 
@@ -60,8 +61,17 @@ function cloneNode(node: WorkflowNode, offset = 40): WorkflowNode {
   };
 }
 
-function getSourcePoint(node: WorkflowNode): Point {
-  return { x: node.position.x + (node.width ?? NODE_WIDTH), y: node.position.y + (node.height ?? NODE_HEIGHT) / 2 };
+function getSourcePoint(node: WorkflowNode, portId?: string): Point {
+  const height = node.height ?? NODE_HEIGHT;
+  let y: number;
+  if (node.type === 'if' && portId === 'true') {
+    y = node.position.y + height * 0.25;
+  } else if (node.type === 'if' && portId === 'false') {
+    y = node.position.y + height * 0.75;
+  } else {
+    y = node.position.y + height / 2;
+  }
+  return { x: node.position.x + (node.width ?? NODE_WIDTH), y };
 }
 
 function getTargetPoint(node: WorkflowNode): Point {
@@ -151,8 +161,27 @@ function getNodeSummary(node: WorkflowNode): string {
       return node.data.expression || '条件判断';
     case 'loop':
       return node.data.mode === 'count' ? `循环 ${node.data.count ?? 3} 次` : '条件循环';
+    case 'scroll':
+      return `滚动${directionLabel(node.data.direction)} ${node.data.amount}px`;
+    case 'keyboard':
+      return node.data.keys ? `按键：${node.data.keys}` : '空按键';
     case 'recognize':
       return '';
+  }
+}
+
+function directionLabel(direction: string): string {
+  switch (direction) {
+    case 'up':
+      return '向上';
+    case 'down':
+      return '向下';
+    case 'left':
+      return '向左';
+    case 'right':
+      return '向右';
+    default:
+      return direction;
   }
 }
 
@@ -161,6 +190,7 @@ export function App() {
   const [nodes, setNodes] = useState<WorkflowNode[]>(initial.nodes);
   const [edges, setEdges] = useState<WorkflowEdge[]>(initial.edges);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [clipboardNode, setClipboardNode] = useState<WorkflowNode | null>(null);
   const [isAutosaved, setIsAutosaved] = useState(true);
@@ -175,13 +205,17 @@ export function App() {
   const [ocrTestPreset, setOcrTestPreset] = useState<{ text?: string; engine?: OcrEngine } | null>(null);
   const [streamManagerOpen, setStreamManagerOpen] = useState(false);
   const [streamVersion, setStreamVersion] = useState(0);
+  const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
+  const [panelHeight, setPanelHeight] = useState(0);
+  const panelAnchorRef = useRef<HTMLDivElement | null>(null);
   const [dragging, setDragging] = useState<{ id: string; offset: Point; start: Point; moved: boolean } | null>(null);
   const [panning, setPanning] = useState<{ start: Point; viewport: Point } | null>(null);
   const [connecting, setConnecting] = useState<{ sourceId: string; point: Point; snapTargetId?: string; sourceHandleId?: string; targetHandleId?: string } | null>(null);
   const [, setHistoryVersion] = useState(0);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const autosaveTimer = useRef<number | null>(null);
   const historyRef = useRef<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }[]>([]);
   const futureRef = useRef<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }[]>([]);
@@ -192,6 +226,9 @@ export function App() {
   const dragStartSnapshotRef = useRef<string | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const closeDebugPanel = useCallback(() => {
+    setDebugPanelOpen(false);
+  }, []);
 
   const floatingPanelStyle = useMemo<CSSProperties | null>(() => {
     if (!selectedNode) return null;
@@ -199,7 +236,6 @@ export function App() {
     const clientWidth = canvas?.clientWidth ?? window.innerWidth;
     const clientHeight = canvas?.clientHeight ?? window.innerHeight;
     const nodeWidth = selectedNode.width ?? NODE_WIDTH;
-    const nodeHeight = selectedNode.height ?? NODE_HEIGHT;
     const nodeLeft = selectedNode.position.x * zoom + viewport.x;
     const nodeTop = selectedNode.position.y * zoom + viewport.y;
     const maxPanelHeight = Math.min(clientHeight - 32, 640);
@@ -216,6 +252,18 @@ export function App() {
       '--panel-top': `${top}px`,
     } as CSSProperties;
   }, [selectedNode, viewport, zoom]);
+
+  useLayoutEffect(() => {
+    const el = panelAnchorRef.current;
+    if (!el) {
+      return;
+    }
+    const update = () => setPanelHeight(el.offsetHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [selectedNodeId]);
 
   useEffect(() => {
     const closeMenu = () => setContextMenu(null);
@@ -329,20 +377,29 @@ export function App() {
       const point = getLocalPoint(event);
       const canvasPoint = clientToCanvas(point, viewport, zoom);
       setSelectedNodeId(null);
+      setSelectedEdgeId(null);
+      closeDebugPanel();
       isDraggingRef.current = true;
       dragStartSnapshotRef.current = JSON.stringify({ nodes, edges });
       setDragging({ id: node.id, offset: { x: canvasPoint.x - node.position.x, y: canvasPoint.y - node.position.y }, start: point, moved: false });
     },
-    [getLocalPoint, viewport, zoom, nodes, edges],
+    [getLocalPoint, viewport, zoom, nodes, edges, closeDebugPanel],
   );
 
   const handleSourcePointerDown = useCallback(
-    (event: MouseEvent, node: WorkflowNode) => {
+    (event: MouseEvent, node: WorkflowNode, sourceHandleId = 'out') => {
       event.stopPropagation();
-      setConnecting({ sourceId: node.id, point: getLocalPoint(event), sourceHandleId: 'source', targetHandleId: 'target' });
+      setConnecting({ sourceId: node.id, point: getLocalPoint(event), sourceHandleId, targetHandleId: 'in' });
     },
     [getLocalPoint],
   );
+
+  const handleEdgePointerDown = useCallback((event: React.MouseEvent, edgeId: string) => {
+    event.stopPropagation();
+    setSelectedEdgeId(edgeId);
+    setSelectedNodeId(null);
+    closeDebugPanel();
+  }, []);
 
   const handlePointerMove = useCallback(
     (event: MouseEvent) => {
@@ -384,8 +441,9 @@ export function App() {
         const snap = getConnectionSnap(nodes, connecting.sourceId, point, viewport, zoom);
         if (snap && snap.node.id !== connecting.sourceId) {
           setEdges((current) => {
-            if (current.some((edge) => edge.source === connecting.sourceId && edge.target === snap.node.id)) return current;
-            return [...current, { id: `edge-${Date.now()}`, source: connecting.sourceId, target: snap.node.id }];
+            if (current.some((edge) => edge.source === connecting.sourceId && edge.target === snap.node.id && edge.sourcePort === connecting.sourceHandleId)) return current;
+            const sourcePort = connecting.sourceHandleId !== 'out' ? connecting.sourceHandleId : undefined;
+            return [...current, { id: `edge-${Date.now()}`, source: connecting.sourceId, sourcePort, target: snap.node.id, targetPort: 'in' }];
           });
         }
       }
@@ -423,8 +481,11 @@ export function App() {
     (event: MouseEvent) => {
       if (event.button !== 0) return;
       setContextMenu(null);
+      setSelectedEdgeId(null);
+      closeDebugPanel();
       if (event.target !== event.currentTarget) return;
       setSelectedNodeId(null);
+      setDebugPanelOpen(false);
       const point = getLocalPoint(event);
       setPanning({ start: point, viewport });
     },
@@ -433,9 +494,10 @@ export function App() {
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
-      if ((event.target as HTMLElement | null)?.closest('.properties-panel-anchor')) return;
+      if ((event.target as HTMLElement | null)?.closest('.properties-panel-anchor, .debug-panel')) return;
       event.preventDefault();
       setSelectedNodeId(null);
+      closeDebugPanel();
       const point = getLocalPoint(event);
       const before = clientToCanvas(point, viewport, zoom);
       const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * (event.deltaY < 0 ? 1.1 : 0.9)));
@@ -466,8 +528,42 @@ export function App() {
     URL.revokeObjectURL(url);
   }, [edges, nodes]);
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
+  const importWorkflow = useCallback((file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as WorkflowDocument;
+        if (parsed?.version === 1 && Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
+          setNodes(parsed.nodes);
+          setEdges(parsed.edges);
+          setSelectedNodeId(null);
+          setSelectedEdgeId(null);
+          setContextMenu(null);
+          historyRef.current = [];
+          futureRef.current = [];
+          const snapshot = JSON.stringify(parsed);
+          lastSnapshotRef.current = snapshot;
+          previousStateRef.current = { nodes: parsed.nodes, edges: parsed.edges };
+        } else {
+          window.alert('无法识别的文件格式，请选择导出的 workflow.json');
+        }
+      } catch {
+        window.alert('文件解析失败，请选择导出的 workflow.json');
+      }
+    };
+    reader.readAsText(file);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const inFormField =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+      if (inFormField) return;
       const meta = event.metaKey || event.ctrlKey;
       if (meta && event.key.toLowerCase() === 'c') {
         event.preventDefault();
@@ -477,14 +573,20 @@ export function App() {
         pasteNode();
       } else if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
-        deleteSelectedNode();
+        if (selectedEdgeId) {
+          setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
+          setSelectedEdgeId(null);
+        } else {
+          deleteSelectedNode();
+        }
       }
-    },
-    [copySelectedNode, deleteSelectedNode, pasteNode],
-  );
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [copySelectedNode, deleteSelectedNode, pasteNode, selectedEdgeId]);
 
   return (
-    <div className={`app-shell ${selectedNode ? 'has-panel' : ''}`} onKeyDown={handleKeyDown} tabIndex={0}>
+    <div className={`app-shell ${selectedNode ? 'has-panel' : ''}`} tabIndex={0}>
       <div
         className="canvas-area"
         ref={canvasRef}
@@ -501,16 +603,23 @@ export function App() {
           if (event.target === event.currentTarget) {
             setContextMenu(null);
             setSelectedNodeId(null);
+            closeDebugPanel();
           }
         }}
       >
         <div className="toolbar" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="toolbar__title">NoBoWo 工具配置</div>
-          <div className="toolbar__status-row">
+          <div className="toolbar__top">
+            <div className="toolbar__title">NoBoWo 节点配置</div>
             <div className="toolbar__status">
               <span className={`status-dot status-dot--${isAutosaved ? 'saved' : 'saving'}`} />
               {isAutosaved ? '已自动保存' : '正在保存...'}
             </div>
+            <button
+              className={`toolbar__debug-btn ${debugPanelOpen ? 'toolbar__debug-btn--active' : ''}`}
+              onClick={() => setDebugPanelOpen((open) => !open)}
+            >
+              调试面板
+            </button>
             <div className="toolbar__history">
               <button className="toolbar__icon-button" onClick={zoomOut} aria-label="缩小" title="缩小">−</button>
               <button className="toolbar__icon-button" onClick={zoomIn} aria-label="放大" title="放大">+</button>
@@ -519,14 +628,27 @@ export function App() {
             </div>
           </div>
           <div className="toolbar__actions">
-            {(['recognize', 'click', 'input', 'wait', 'screenshot', 'if', 'loop'] as WorkflowNode['type'][]).map((type) => (
+            {(['recognize', 'click', 'input', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
               <button key={type} onClick={() => addNode(type)}>{type}</button>
             ))}
             <button onClick={exportWorkflow}>导出</button>
+            <button onClick={() => fileInputRef.current?.click()}>导入</button>
           </div>
         </div>
 
-          <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,application/json"
+          style={{ display: 'none' }}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) importWorkflow(file);
+            event.target.value = '';
+          }}
+        />
+
+        <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
           <div className="toolbar-tools__title">工具配置</div>
           <div className="toolbar-tools__actions">
             <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
@@ -543,14 +665,28 @@ export function App() {
               const source = nodes.find((node) => node.id === edge.source);
               const target = nodes.find((node) => node.id === edge.target);
               if (!source || !target) return null;
-              const start = getSourcePoint(source);
+              const start = getSourcePoint(source, edge.sourcePort);
               const end = getTargetPoint(target);
-              return <path key={edge.id} className="workflow-edge" d={`M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`} />;
+              const isSelected = selectedEdgeId === edge.id;
+              const isDisabled = source.enabled === false || target.enabled === false;
+              const branchClass =
+                source.type === 'if' && edge.sourcePort === 'true'
+                  ? 'workflow-edge--branch-true'
+                  : source.type === 'if' && edge.sourcePort === 'false'
+                    ? 'workflow-edge--branch-false'
+                    : '';
+              const d = `M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`;
+              return (
+                <g key={edge.id} className={`workflow-edge-group ${isSelected ? 'workflow-edge-group--selected' : ''} ${isDisabled ? 'workflow-edge-group--disabled' : ''}`}>
+                  <path className="workflow-edge workflow-edge--hit" d={d} onClick={(e) => handleEdgePointerDown(e, edge.id)} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelectedEdgeId(edge.id); const point = getLocalPoint(e); setContextMenu({ x: point.x, y: point.y, edgeId: edge.id }); }} />
+                  <path className={`workflow-edge ${isSelected ? 'workflow-edge--selected' : ''} ${branchClass}`} d={d} />
+                </g>
+              );
             })}
             {connecting && (() => {
               const source = nodes.find((node) => node.id === connecting.sourceId);
               if (!source) return null;
-              const start = getSourcePoint(source);
+              const start = getSourcePoint(source, connecting.sourceHandleId);
               const snappedTarget = connecting.snapTargetId ? nodes.find((node) => node.id === connecting.snapTargetId) : null;
               const end = snappedTarget ? getTargetPoint(snappedTarget) : clientToCanvas(connecting.point, viewport, zoom);
               return <path className="workflow-edge workflow-edge--draft" d={`M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`} />;
@@ -569,13 +705,14 @@ export function App() {
             return (
             <div
               key={node.id}
-              className={`workflow-node workflow-node--${node.type} ${isSelected ? 'workflow-node--selected' : ''} ${isHovered ? 'workflow-node--hovered' : ''} ${isSelected && isHovered ? 'workflow-node--selected-hovered' : ''} ${isSnapTarget ? 'workflow-node--snap-target' : ''} ${isOverlapping ? 'workflow-node--overlap' : ''}`}
+              className={`workflow-node workflow-node--${node.type} ${isSelected ? 'workflow-node--selected' : ''} ${isHovered ? 'workflow-node--hovered' : ''} ${isSelected && isHovered ? 'workflow-node--selected-hovered' : ''} ${isSnapTarget ? 'workflow-node--snap-target' : ''} ${isOverlapping ? 'workflow-node--overlap' : ''} ${!node.enabled ? 'workflow-node--disabled' : ''}`}
               style={{ left: node.position.x, top: node.position.y, width: node.width ?? NODE_WIDTH, height: node.height ?? NODE_HEIGHT, zIndex }}
               onMouseDown={(event) => handleNodePointerDown(event, node)}
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 setSelectedNodeId(node.id);
+                setSelectedEdgeId(null);
                 setContextMenu(getLocalPoint(event));
               }}
             >
@@ -602,11 +739,28 @@ export function App() {
               ) : (
                 <div className="workflow-node__body">{getNodeSummary(node)}</div>
               )}
-              <button
-                className={`node-handle node-handle--source ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
-                aria-label="连接输出"
-                onMouseDown={(event) => handleSourcePointerDown(event, node)}
-              />
+              {node.type === 'if' ? (
+                <>
+                  <button
+                    className={`node-handle node-handle--source node-handle--if node-handle--if-true ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
+                    aria-label="连接输出（真）"
+                    title="条件为真时走这条线"
+                    onMouseDown={(event) => handleSourcePointerDown(event, node, 'true')}
+                  />
+                  <button
+                    className={`node-handle node-handle--source node-handle--if node-handle--if-false ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
+                    aria-label="连接输出（假）"
+                    title="条件为假时走这条线"
+                    onMouseDown={(event) => handleSourcePointerDown(event, node, 'false')}
+                  />
+                </>
+              ) : (
+                <button
+                  className={`node-handle node-handle--source ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
+                  aria-label="连接输出"
+                  onMouseDown={(event) => handleSourcePointerDown(event, node)}
+                />
+              )}
               <span className={`node-handle node-handle--target ${isSnapTarget ? 'node-handle--snap' : ''}`} aria-hidden="true" />
             </div>
             );
@@ -615,14 +769,29 @@ export function App() {
 
         {contextMenu && (
           <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onMouseDown={(event) => event.stopPropagation()}>
-            <button onClick={copySelectedNode} disabled={!selectedNode}>复制节点</button>
-            <button onClick={pasteNode} disabled={!clipboardNode && !selectedNode}>粘贴节点</button>
-            <button onClick={deleteSelectedNode} disabled={!selectedNode}>删除节点</button>
+            {contextMenu.edgeId ? (
+              <button
+                onClick={() => {
+                  setEdges((current) => current.filter((edge) => edge.id !== contextMenu.edgeId));
+                  setSelectedEdgeId(null);
+                  setContextMenu(null);
+                }}
+              >
+                删除连线
+              </button>
+            ) : (
+              <>
+                <button onClick={copySelectedNode} disabled={!selectedNode}>复制节点</button>
+                <button onClick={pasteNode} disabled={!clipboardNode && !selectedNode}>粘贴节点</button>
+                <button onClick={deleteSelectedNode} disabled={!selectedNode}>删除节点</button>
+              </>
+            )}
           </div>
         )}
         {selectedNode && !dragging && (
           <div
             className="properties-panel-anchor"
+            ref={panelAnchorRef}
             style={floatingPanelStyle ?? undefined}
             onMouseDown={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
@@ -643,6 +812,15 @@ export function App() {
               onOpenYoloManager={() => setYoloManagerOpen(true)}
             />
           </div>
+        )}
+        {debugPanelOpen && (
+          <DebugPanel
+            nodes={nodes}
+            edges={edges}
+            selectedNodeId={selectedNodeId}
+            onFocusNode={(nodeId) => setSelectedNodeId(nodeId)}
+            onClose={() => setDebugPanelOpen(false)}
+          />
         )}
       </div>
       {templateManagerOpen && (

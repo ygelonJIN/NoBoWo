@@ -1,4 +1,5 @@
-import { useRef, useState, useEffect, useCallback, type KeyboardEvent, type CSSProperties } from 'react';
+import { useRef, useState, useEffect, useCallback, type KeyboardEvent, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { createPortal } from 'react-dom';
 
 type Option = { value: string; label: string };
 
@@ -15,6 +16,7 @@ const REOPEN_GUARD_MS = 250;
 export function CustomSelect({ value, options, onChange, maxHeight = 280 }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const justSelectedAt = useRef(0);
   const [pos, setPos] = useState<CSSProperties | null>(null);
 
@@ -23,7 +25,9 @@ export function CustomSelect({ value, options, onChange, maxHeight = 280 }: Prop
   useEffect(() => {
     if (!open) return;
     const close = (e: Event) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current?.contains(e.target as Node)) return;
+      if (dropdownRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', close, true);
     document.addEventListener('touchstart', close, true);
@@ -57,12 +61,22 @@ export function CustomSelect({ value, options, onChange, maxHeight = 280 }: Prop
           left: `${rect.left}px`,
           width: `${rect.width}px`,
           maxHeight,
-          zIndex: 1000,
+          zIndex: 2147483000,
         });
       }
     }
     setOpen((o) => !o);
   }, [open, options.length, maxHeight]);
+
+  // 在 pointerdown 阶段就提交选择，避免外层 capture 监听把下拉框先关掉导致 click 丢失
+  const handleOptionPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>, v: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handleSelect(v);
+    },
+    [handleSelect],
+  );
 
   const handleOptionClick = useCallback(
     (e: React.MouseEvent<HTMLButtonElement>, v: string) => {
@@ -83,6 +97,26 @@ export function CustomSelect({ value, options, onChange, maxHeight = 280 }: Prop
     [handleSelect],
   );
 
+  const dropdown = open && pos
+    ? createPortal(
+        <div className="custom-select__dropdown" ref={dropdownRef} style={{ ...pos, maxHeight }}>
+          {options.map((opt) => (
+            <button
+              type="button"
+              key={opt.value}
+              className={`custom-select__option ${opt.value === value ? 'custom-select__option--active' : ''}`}
+              onPointerDown={(e) => handleOptionPointerDown(e, opt.value)}
+              onClick={(e) => handleOptionClick(e, opt.value)}
+              onKeyDown={(e) => handleOptionKeyDown(e, opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )
+    : null;
+
   return (
     <div className="custom-select" ref={ref}>
       <button
@@ -98,21 +132,7 @@ export function CustomSelect({ value, options, onChange, maxHeight = 280 }: Prop
           <path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
-      {open && pos && (
-        <div className="custom-select__dropdown" style={{ ...pos, maxHeight }}>
-          {options.map((opt) => (
-            <button
-              type="button"
-              key={opt.value}
-              className={`custom-select__option ${opt.value === value ? 'custom-select__option--active' : ''}`}
-              onClick={(e) => handleOptionClick(e, opt.value)}
-              onKeyDown={(e) => handleOptionKeyDown(e, opt.value)}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {dropdown}
     </div>
   );
 }
