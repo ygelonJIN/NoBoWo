@@ -3,6 +3,7 @@ import {
   createDefaultNode,
   defaultWorkflowDocument,
   type OcrEngine,
+  type RecognizeNode,
   type WorkflowDocument,
   type WorkflowEdge,
   type WorkflowNode,
@@ -14,6 +15,7 @@ import { CloudApiManagerModal } from './components/CloudApiManagerModal';
 import { OcrTestModal } from './components/OcrTestModal';
 import { StreamManagerModal } from './components/StreamManagerModal';
 import { DebugPanel } from './components/DebugPanel';
+import { RecognizeTestModal } from './components/RecognizeTestModal';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -152,11 +154,15 @@ function getNodeSummary(node: WorkflowNode): string {
     case 'wait':
       return node.data.mode === 'delay' ? `延时 ${node.data.delayMs ?? 1000}ms` : '条件等待';
     case 'screenshot':
-      return node.data.source === 'stream'
-        ? `串流窗口截图 · ${node.data.regionMode === 'full' ? '全屏' : '选区'}`
-        : node.data.regionMode === 'full'
-          ? '全屏截图'
-          : '选区截图';
+      if (node.data.source === 'stream') {
+        return `串流窗口截图 · ${node.data.regionMode === 'full' ? '全屏' : '选区'}`;
+      }
+      if (node.data.source === 'window') {
+        return `本机窗口截图${node.data.windowHint ? ` · ${node.data.windowHint}` : ''}`;
+      }
+      return node.data.regionMode === 'full'
+        ? '全屏截图'
+        : '选区截图';
     case 'if':
       return node.data.expression || '条件判断';
     case 'loop':
@@ -203,6 +209,11 @@ export function App() {
   const [cloudApiVersion, setCloudApiVersion] = useState(0);
   const [ocrTestOpen, setOcrTestOpen] = useState(false);
   const [ocrTestPreset, setOcrTestPreset] = useState<{ text?: string; engine?: OcrEngine } | null>(null);
+  const [recognizeTestOpen, setRecognizeTestOpen] = useState(false);
+  const [recognizeTestPreset, setRecognizeTestPreset] = useState<{
+    strategies: RecognizeNode['data']['strategies'];
+    strategyOrder: RecognizeNode['data']['strategyOrder'];
+  } | null>(null);
   const [streamManagerOpen, setStreamManagerOpen] = useState(false);
   const [streamVersion, setStreamVersion] = useState(0);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
@@ -347,6 +358,25 @@ export function App() {
   const updateNode = useCallback((nextNode: WorkflowNode) => {
     setNodes((current) => current.map((node) => (node.id === nextNode.id ? nextNode : node)));
   }, []);
+
+  /** 测试台命中坐标 → 写回当前 recognize 节点的 coords 策略 */
+  const applyRecognizeCoords = useCallback(
+    (coords: { x: number; y: number }) => {
+      const node = selectedNode;
+      if (!node || node.type !== 'recognize') return;
+      updateNode({
+        ...node,
+        data: {
+          ...node.data,
+          strategies: {
+            ...node.data.strategies,
+            coords: { ...node.data.strategies.coords, x: coords.x, y: coords.y, enabled: true },
+          },
+        },
+      });
+    },
+    [selectedNode, updateNode],
+  );
 
   const deleteSelectedNode = useCallback(() => {
     if (!selectedNodeId) return;
@@ -804,9 +834,13 @@ export function App() {
               cloudApiVersion={cloudApiVersion}
               onOpenTemplateManager={() => setTemplateManagerOpen(true)}
               onOpenCloudApiManager={() => setCloudApiManagerOpen(true)}
-              onOpenOcrTest={(preset) => {
-                setOcrTestPreset(preset ?? null);
-                setOcrTestOpen(true);
+              onOpenRecognizeTest={() => {
+                if (!selectedNode || selectedNode.type !== 'recognize') return;
+                setRecognizeTestPreset({
+                  strategies: selectedNode.data.strategies,
+                  strategyOrder: selectedNode.data.strategyOrder,
+                });
+                setRecognizeTestOpen(true);
               }}
               yoloVersion={yoloVersion}
               onOpenYoloManager={() => setYoloManagerOpen(true)}
@@ -846,6 +880,14 @@ export function App() {
           onClose={() => setOcrTestOpen(false)}
           initialText={ocrTestPreset?.text}
           initialEngine={ocrTestPreset?.engine}
+        />
+      )}
+      {recognizeTestOpen && recognizeTestPreset && (
+        <RecognizeTestModal
+          onClose={() => setRecognizeTestOpen(false)}
+          strategies={recognizeTestPreset.strategies}
+          strategyOrder={recognizeTestPreset.strategyOrder}
+          onApplyCoords={applyRecognizeCoords}
         />
       )}
       {streamManagerOpen && (

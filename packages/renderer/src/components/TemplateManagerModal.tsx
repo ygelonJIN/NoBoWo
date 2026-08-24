@@ -3,6 +3,7 @@ import type { ClickOffset, TemplateDefinition, TemplateFolder, TemplateRect } fr
 import { CustomSelect } from './CustomSelect';
 import { TemplateCropEditor } from './TemplateCropEditor';
 import { TemplateThumb } from './TemplateThumb';
+import { EnvPanel } from './EnvPanel';
 
 type Props = {
   onClose: () => void;
@@ -90,6 +91,8 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const [batchReplace, setBatchReplace] = useState(false);
   const [renameFolderId, setRenameFolderId] = useState<string | null>(null);
   const [renameFolderName, setRenameFolderName] = useState('');
+  const [tab, setTab] = useState<'folders' | 'annotate' | 'env'>('folders');
+  const [tool, setTool] = useState<'draw' | 'move'>('draw');
   const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingReplaceRef = useRef(false);
@@ -131,6 +134,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
         sourceImage: String(reader.result),
         sourceRect: null,
         clickOffset: { x: 0, y: 0 },
+        folderId: keepEditing ? prev.folderId : activeFolderId,
         name: keepEditing ? prev.name : file.name.replace(/\.[^.]+$/, '') || prev.name,
         resolutionW: window.screen?.width ?? prev.resolutionW,
         resolutionH: window.screen?.height ?? prev.resolutionH,
@@ -138,9 +142,10 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
         error: null,
       }));
       if (!keepEditing) setSelectedId(null);
+      setTab('annotate');
     };
     reader.readAsDataURL(file);
-  }, []);
+  }, [activeFolderId]);
 
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -163,6 +168,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     setSelectedId(tpl.id);
     setConfirmDeleteId(null);
     setSelectedIds((prev) => (prev.includes(tpl.id) ? prev : [tpl.id]));
+    setTab('annotate');
     let source: string | null = null;
     if (window.templateAPI) {
       try {
@@ -338,6 +344,21 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const halfW = edit.sourceRect ? Math.round(edit.sourceRect.width / 2) : 0;
   const halfH = edit.sourceRect ? Math.round(edit.sourceRect.height / 2) : 0;
   const canSave = Boolean(edit.name.trim() && edit.sourceRect) && !apiUnavailable;
+  const enabledCount = activeTemplates.filter((t) => t.enabled !== false).length;
+  const tagTotal = new Set(activeTemplates.flatMap((t) => t.tags ?? [])).size;
+  const currentIdx = Math.max(0, activeTemplates.findIndex((t) => t.id === selectedId));
+  const boxCount = edit.sourceRect ? 1 : 0;
+
+  const goPrevTemplate = () => {
+    const idx = activeTemplates.findIndex((t) => t.id === selectedId);
+    if (idx > 0) void openTemplate(activeTemplates[idx - 1]);
+  };
+
+  const goNextTemplate = () => {
+    const idx = activeTemplates.findIndex((t) => t.id === selectedId);
+    if (idx >= 0 && idx < activeTemplates.length - 1) void openTemplate(activeTemplates[idx + 1]);
+  };
+
 
   const updateField = <K extends keyof EditState>(key: K, value: EditState[K]) =>
     setEdit((prev) => ({ ...prev, [key]: value }));
@@ -354,220 +375,371 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="template-modal template-modal--wide" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
-        <header className="template-modal__header">
-          <div>
+      <div className="template-modal template-modal--wide template-manager" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+        <header className="yolo-modal__header">
+          <div className="yolo-modal__title">
             <h2>模板管理</h2>
-            <p>按文件夹组织模板，支持批量操作、热区预览、来源截图与识别节点接入</p>
+            <p>按文件夹组织模板，框选目标区域，供识别节点的「模板匹配」策略使用</p>
           </div>
-          <div className="template-modal__header-actions">
-            <button className="template-modal__close" onClick={onClose} aria-label="关闭">×</button>
+          <div className="yolo-modal__training-pill">
+            <span className="status-dot status-dot--saved" />
+            {templates.length} 个模板
           </div>
+          <button className="yolo-modal__close" onClick={onClose} aria-label="关闭">×</button>
         </header>
 
-        <div className="template-modal__toolbar">
-          <input className="template-modal__search" placeholder="搜索模板、标签、应用名…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <div className="template-modal__toolbar-meta">已选 {selectedIds.length} 项</div>
-        </div>
+        <nav className="yolo-modal__tabs">
+          <button className={`yolo-modal__tab ${tab === 'folders' ? 'active' : ''}`} onClick={() => setTab('folders')}>
+            <span className="yolo-modal__tab-label">模板库</span>
+            {templates.length > 0 && <span className="yolo-modal__tab-badge">{templates.length}</span>}
+            <span className="yolo-modal__tab-hint">文件夹与模板列表</span>
+          </button>
+          <button className={`yolo-modal__tab ${tab === 'annotate' ? 'active' : ''}`} onClick={() => setTab('annotate')}>
+            <span className="yolo-modal__tab-label">标注</span>
+            <span className="yolo-modal__tab-hint">框选目标并设置属性</span>
+          </button>
+          <button className={`yolo-modal__tab ${tab === 'env' ? 'active' : ''}`} onClick={() => setTab('env')}>
+            <span className="yolo-modal__tab-label">环境</span>
+            <span className="yolo-modal__tab-hint">模板匹配依赖（OpenCV）</span>
+          </button>
+        </nav>
 
-        {selectedIds.length > 0 && (
-          <div className="template-modal__batchbar">
-            <span>批量操作</span>
-            <button onClick={async () => {
-              if (!window.templateAPI || !window.confirm(`确定删除选中的 ${selectedIds.length} 个模板吗？`)) return;
-              await window.templateAPI.batchDelete(selectedIds);
-              setSelectedIds([]);
-              setSelectedId(null);
-              setEdit(blankEdit());
-              await refreshList();
-              onChanged();
-            }}>批量删除</button>
-            <button onClick={async () => {
-              const tags = window.prompt('输入要追加的标签（用逗号分隔）');
-              if (!window.templateAPI || !tags?.trim()) return;
-              const current = new Set(tags.split(/[，,]/).map((tag) => tag.trim()).filter(Boolean));
-              await window.templateAPI.batchUpdate(selectedIds, { tags: [...current] });
-              await refreshList();
-            }}>批量打标签</button>
-            <button onClick={async () => { if (window.templateAPI) await window.templateAPI.export(selectedIds); }}>批量导出</button>
-            <button onClick={() => { setBatchReplace(true); fileInputRef.current?.click(); }}>批量替换来源截图</button>
-            <button onClick={async () => {
-              if (!window.templateAPI) return;
-              const shouldEnable = selectedIds.some((id) => templates.find((t) => t.id === id)?.enabled !== true);
-              await window.templateAPI.batchUpdate(selectedIds, { enabled: shouldEnable });
-              await refreshList();
-            }}>批量{selectedIds.some((id) => templates.find((t) => t.id === id)?.enabled !== true) ? '启用' : '禁用'}</button>
-          </div>
-        )}
-
-        <div className="template-modal__body template-modal__body--grid">
-          <aside className="template-modal__folders">
-            <div className="template-modal__folders-head">
-              <span className="template-modal__section-title">文件夹</span>
-            </div>
-            <div className="template-modal__folders-list">
-              {folderCreateOpen ? (
-                <div className="template-folder--create">
-                  <input
-                    value={newFolder}
-                    autoFocus
-                    onChange={(e) => setNewFolder(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void createFolder();
-                      if (e.key === 'Escape') setFolderCreateOpen(false);
-                    }}
-                    placeholder="新文件夹名…"
-                  />
-                  <div className="template-folder__actions">
-                    <button onClick={() => void createFolder()} disabled={!newFolder.trim()}>确定</button>
-                    <button onClick={() => setFolderCreateOpen(false)}>取消</button>
+        <div className="yolo-modal__body template-manager__body">
+          {tab === 'folders' && (
+            <div className="yolo-dataset template-dataset">
+              <aside className="yolo-dataset__list">
+                <div className="yolo-panel-title">
+                  <span>文件夹</span>
+                  <span className="yolo-panel-title__sub">{folders.length} 个</span>
+                </div>
+                <input
+                  className="yolo-dataset__search"
+                  placeholder="搜索模板、标签、应用名…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                {folderCreateOpen ? (
+                  <div className="yolo-dataset__create">
+                    <input
+                      autoFocus
+                      value={newFolder}
+                      onChange={(e) => setNewFolder(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void createFolder();
+                        if (e.key === 'Escape') setFolderCreateOpen(false);
+                      }}
+                      placeholder="文件夹名称…"
+                    />
+                    <div className="yolo-dataset__create-actions">
+                      <button onClick={() => void createFolder()} disabled={!newFolder.trim()}>确定</button>
+                      <button onClick={() => setFolderCreateOpen(false)}>取消</button>
+                    </div>
                   </div>
-                </div>
-              ) : (
-                <button className="template-folder-new-card" onClick={() => { setFolderCreateOpen(true); setRenameFolderId(null); }}>
-                  <span className="template-folder-new-card__icon">＋</span>
-                  <span className="template-folder-new-card__text">新建文件夹</span>
-                </button>
-              )}
-              <div className={`template-folder-row ${activeFolderId === null ? 'active' : ''}`}>
-                <div className="template-folder-card" onClick={() => setActiveFolderId(null)}>
-                  <button className="template-folder" onClick={() => setActiveFolderId(null)}>
-                    <span className="template-folder__name">全部模板</span>
-                    <span className="template-folder__count">{templates.length}</span>
+                ) : (
+                  <button className="yolo-dataset__new" onClick={() => setFolderCreateOpen(true)}>
+                    ＋ 新建文件夹
                   </button>
-                  <span className="template-folder__tools" />
+                )}
+                <div className="yolo-dataset__items">
+                  {folders.map((folder) => (
+                    <div key={folder.id} className={`yolo-dataset__item delete-hover ${activeFolderId === folder.id ? 'active' : ''} ${confirmDeleteFolderId === folder.id ? 'confirming' : ''}`} onClick={() => setActiveFolderId(folder.id)}>
+                      <div className="yolo-dataset__item-main">
+                        <div className="yolo-dataset__item-head">
+                          {renameFolderId === folder.id ? (
+                            <input
+                              className="yolo-dataset__rename-input"
+                              autoFocus
+                              value={renameFolderName}
+                              onChange={(e) => setRenameFolderName(e.target.value)}
+                              onBlur={() => void commitRenameFolder()}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') void commitRenameFolder();
+                                if (e.key === 'Escape') setRenameFolderId(null);
+                              }}
+                            />
+                          ) : (
+                            <span className="yolo-dataset__item-name">{folder.name}</span>
+                          )}
+                          <span className="yolo-dataset__item-meta">{templates.filter((t) => t.folderId === folder.id).length} 个</span>
+                        </div>
+                        <div className="yolo-dataset__item-actions delete-hover" onClick={(e) => e.stopPropagation()}>
+                          {renameFolderId === folder.id ? (
+                            <>
+                              <button className="delete-confirm__ok" onClick={() => void commitRenameFolder()}>确定</button>
+                              <button className="delete-confirm__cancel" onClick={() => setRenameFolderId(null)}>取消</button>
+                            </>
+                          ) : confirmDeleteFolderId === folder.id ? (
+                            <>
+                              <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
+                              <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
+                            </>
+                          ) : (
+                            <>
+                              <button className="yolo-dataset__rename-btn" onClick={(e) => { e.stopPropagation(); startRenameFolder(folder); }}>重命名</button>
+                              <button className="delete-trigger" onClick={(e) => { e.stopPropagation(); setConfirmDeleteFolderId(folder.id); }} title="删除文件夹（其中的模板移到未归类）">删除</button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {folders.length === 0 && <div className="yolo-annotate__empty-hint">还没有文件夹。文件夹用于把同类模板归到一起。</div>}
                 </div>
-              </div>
-              {folders.map((folder) => (
-                <div key={folder.id} className={`template-folder-row delete-hover ${activeFolderId === folder.id ? 'active' : ''} ${confirmDeleteFolderId === folder.id ? 'template-folder-row--confirm' : ''}`}>
-                  <div className="template-folder-card" onClick={() => setActiveFolderId(folder.id)}>
-                    {renameFolderId === folder.id ? (
-                      <input
-                        className="template-folder__rename"
-                        value={renameFolderName}
-                        autoFocus
-                        onChange={(e) => setRenameFolderName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void commitRenameFolder();
-                          if (e.key === 'Escape') setRenameFolderId(null);
-                        }}
-                        onBlur={() => void commitRenameFolder()}
-                      />
-                    ) : (
-                      <button className="template-folder" onClick={() => setActiveFolderId(folder.id)}>
-                        <span className="template-folder__name">{folder.name}</span>
-                        <span className="template-folder__count">{templates.filter((t) => t.folderId === folder.id).length}</span>
+              </aside>
+
+              <section className="yolo-dataset__main">
+                {!activeFolderId ? (
+                  <div className="yolo-dataset__empty">
+                    <div className="yolo-dataset__empty-icon">◈</div>
+                    <p>创建或选择一个文件夹，开始上传截图创建模板</p>
+                  </div>
+                ) : activeTemplates.length === 0 ? (
+                  <div className="yolo-dataset__empty yolo-dataset__empty--drop">
+                    <div
+                      className={`yolo-dataset__drop yolo-dataset__drop--full ${dragOver ? 'drag' : ''}`}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setDragOver(true);
+                      }}
+                      onDragLeave={() => setDragOver(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDragOver(false);
+                        const file = e.dataTransfer.files?.[0];
+                        if (file) readFile(file);
+                      }}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <div className="yolo-dataset__drop-icon">⬆</div>
+                      <div className="yolo-dataset__drop-text">拖拽截图到这里，或点击选择文件</div>
+                      <div className="yolo-dataset__drop-sub">上传后自动进入「标注」页框选目标区域</div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="yolo-dataset__stats">
+                      <div className="yolo-stat-card">
+                        <span className="yolo-stat-card__value">{activeTemplates.length}</span>
+                        <span className="yolo-stat-card__label">模板总数</span>
+                      </div>
+                      <div className="yolo-stat-card">
+                        <span className="yolo-stat-card__value">{enabledCount}</span>
+                        <span className="yolo-stat-card__label">已启用</span>
+                      </div>
+                      <div className="yolo-stat-card">
+                        <span className="yolo-stat-card__value">{activeTemplates.length - enabledCount}</span>
+                        <span className="yolo-stat-card__label">已停用</span>
+                      </div>
+                      <div className="yolo-stat-card">
+                        <span className="yolo-stat-card__value">{folders.length}</span>
+                        <span className="yolo-stat-card__label">文件夹</span>
+                      </div>
+                      <div className="yolo-stat-card">
+                        <span className="yolo-stat-card__value">{tagTotal}</span>
+                        <span className="yolo-stat-card__label">标签数</span>
+                      </div>
+                    </div>
+
+                    <div
+                      className={`yolo-dataset__drop ${dragOver ? 'drag' : ''}`}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setDragOver(true);
+                      }}
+                      onDragLeave={() => setDragOver(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDragOver(false);
+                        const file = e.dataTransfer.files?.[0];
+                        if (file) readFile(file);
+                      }}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <div className="yolo-dataset__drop-icon">⬆</div>
+                      <div className="yolo-dataset__drop-text">拖拽截图到这里创建新模板，或点击选择文件</div>
+                      <div className="yolo-dataset__drop-sub">上传后自动进入「标注」页框选目标区域</div>
+                    </div>
+
+                    {edit.error && <div className="yolo-annotate__error">{edit.error}</div>}
+
+                    <div className="yolo-dataset__grid-head">
+                      <span className="yolo-panel-title">
+                        <span>模板</span>
+                        <span className="yolo-panel-title__sub">{activeTemplates.length} 个</span>
+                      </span>
+                      <div className="yolo-dataset__grid-actions">
+                        <button
+                          onClick={async () => {
+                            if (window.templateAPI && templates.length > 0) await window.templateAPI.export(templates.map((t) => t.id));
+                          }}
+                          disabled={templates.length === 0}
+                          title="导出模板库到本地文件夹"
+                        >
+                          导出模板库
+                        </button>
+                        {activeFolderId !== null && (
+                          <button className="yolo-btn--danger" onClick={() => setConfirmDeleteFolderId(activeFolderId)}>
+                            删除文件夹
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="yolo-dataset__grid">
+                      {activeTemplates.map((tpl) => (
+                        <div key={tpl.id} className={`yolo-dataset__cell delete-hover ${selectedId === tpl.id ? 'active' : ''}`} onClick={() => void openTemplate(tpl)}>
+                          <TemplateThumb id={tpl.id} className="yolo-dataset__cell-img" />
+                          <span className="yolo-dataset__cell-delete-controls" onClick={(e) => e.stopPropagation()}>
+                            {confirmDeleteId === tpl.id ? (
+                              <>
+                                <button className="delete-confirm__ok" onClick={() => handleDelete(tpl.id)}>确定</button>
+                                <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteId(null)}>取消</button>
+                              </>
+                            ) : (
+                              <button className="delete-trigger" title="删除模板" onClick={() => setConfirmDeleteId(tpl.id)}>删除</button>
+                            )}
+                          </span>
+                          <div className="yolo-dataset__cell-info">
+                            <span className="yolo-dataset__cell-name">{tpl.name}</span>
+                            <span className={`yolo-dataset__cell-badge ${tpl.enabled !== false ? '' : 'empty'}`}>
+                              {tpl.enabled !== false ? '已启用' : '已停用'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {activeTemplates.length === 0 && <div className="yolo-dataset__empty small">这个文件夹还没有模板，拖拽截图到上方创建</div>}
+                  </>
+                )}
+              </section>
+            </div>
+          )}
+
+          {tab === 'annotate' && (
+            <div className="yolo-annotate template-annotate">
+              {/* 左：模板缩略图列表 */}
+              <aside className="yolo-annotate__thumbs">
+                <div className="yolo-panel-title">
+                  <span>模板</span>
+                  <span className="yolo-panel-title__sub">{activeTemplates.length} 个</span>
+                </div>
+                <button className="yolo-dataset__new" onClick={handleNewTemplate}>
+                  ＋ 上传新截图
+                </button>
+                <div className="yolo-annotate__thumb-list">
+                  {activeTemplates.length === 0 && <div className="yolo-annotate__empty-hint">{activeFolderId === null ? '先选择一个文件夹，再上传模板。' : '还没有模板，点击上方上传第一张截图。'}</div>}
+                  {activeTemplates.map((tpl) => (
+                    <button key={tpl.id} className={`yolo-annotate__thumb ${selectedId === tpl.id ? 'active' : ''}`} onClick={() => void openTemplate(tpl)}>
+                      <TemplateThumb id={tpl.id} className="yolo-annotate__thumb-img" />
+                      <div className="yolo-annotate__thumb-info">
+                        <span className="yolo-annotate__thumb-name">{tpl.name}</span>
+                        <span className={`yolo-annotate__thumb-meta ${tpl.enabled !== false ? '' : 'empty'}`}>
+                          {tpl.enabled !== false ? '已启用' : '已停用'}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </aside>
+
+              {/* 中：框选画布 */}
+              <section className="yolo-annotate__canvas">
+                <div className="yolo-annotate__toolbar">
+                  <div className="yolo-seg">
+                    <button className={tool === 'draw' ? 'active' : ''} onClick={() => setTool('draw')}>框选</button>
+                    <button className={tool === 'move' ? 'active' : ''} onClick={() => setTool('move')}>移动</button>
+                  </div>
+                  <div className="yolo-annotate__nav">
+                    <button onClick={goPrevTemplate} disabled={activeTemplates.length === 0 || currentIdx <= 0}>上一张</button>
+                    <span className="yolo-annotate__pos">
+                      {activeTemplates.length === 0 ? '0 / 0' : `${currentIdx + 1} / ${activeTemplates.length}`}
+                    </span>
+                    <button className="yolo-btn--primary" onClick={goNextTemplate} disabled={activeTemplates.length === 0 || currentIdx >= activeTemplates.length - 1}>下一张</button>
+                  </div>
+                  <div className="yolo-annotate__actions">
+                    <span className={`yolo-annotate__savestate ${edit.saving ? 'saving' : ''}`}>{edit.saving ? '保存中…' : '已保存'}</span>
+                    <button onClick={handleNewTemplate}>上传新截图</button>
+                    {edit.editing && (
+                      <button className="yolo-btn--danger" onClick={() => setConfirmDeleteId(edit.editing!.id)} disabled={Boolean(confirmDeleteId)}>
+                        删除模板
                       </button>
                     )}
-                    <span className="template-folder__tools delete-hover" onClick={(e) => e.stopPropagation()}>
-                      {renameFolderId === folder.id ? (
-                        <>
-                          <button className="delete-confirm__ok" onClick={() => void commitRenameFolder()}>确定</button>
-                          <button className="delete-confirm__cancel" onClick={() => setRenameFolderId(null)}>取消</button>
-                        </>
-                      ) : confirmDeleteFolderId === folder.id ? (
-                        <>
-                          <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
-                          <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
-                        </>
-                      ) : (
-                        <>
-                          <button className="template-folder__rename-btn" title="重命名文件夹" onClick={() => startRenameFolder(folder)}>重命名</button>
-                          <button className="delete-trigger" title="删除文件夹（其中的模板移到未归类）" onClick={() => setConfirmDeleteFolderId(folder.id)}>删除</button>
-                        </>
-                      )}
-                    </span>
                   </div>
                 </div>
-              ))}
-            </div>
-          </aside>
 
-          <section className="template-modal__list">
-            <div className="template-modal__list-head">
-              <span className="template-modal__section-title">模板列表</span>
-              <span className="template-modal__list-count">{activeTemplates.length} 项</span>
-            </div>
-            <div className="template-modal__list-items template-grid">
-              <button className="template-new-card" onClick={handleNewTemplate} title="上传截图并创建新模板">
-                <span className="template-new-card__icon">＋</span>
-                <span className="template-new-card__text">新建模板</span>
-                <span className="template-new-card__hint">上传截图并框选</span>
-              </button>
-              {activeTemplates.map((tpl) => (
-                <div
-                  key={tpl.id}
-                  className={`template-grid-card delete-hover ${selectedId === tpl.id ? 'template-grid-card--active' : ''} ${selectedIds.includes(tpl.id) ? 'checked' : ''}`}
-                  onClick={() => openTemplate(tpl)}
-                  onMouseEnter={() => setSelectedId(tpl.id)}
-                >
-                  <button className="template-grid-card__check" onClick={(e) => { e.stopPropagation(); toggleSelect(tpl.id); }}>✓</button>
-                  <TemplateThumb id={tpl.id} className="template-grid-card__thumb" />
-                  <div className="template-grid-card__content">
-                    <div className="template-grid-card__name">{tpl.name}</div>
-                    <div className="template-grid-card__meta">{tpl.app ? `${tpl.app} · ` : ''}{tpl.resolution.width}×{tpl.resolution.height}{tpl.scaleFactor > 1 ? ` @${tpl.scaleFactor}x` : ''}</div>
-                    <div className="template-grid-card__tags">{(tpl.tags ?? []).slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
-                  </div>
-                  <div className="template-grid-card__delete-controls delete-hover" onClick={(e) => e.stopPropagation()}>
-                    {confirmDeleteId === tpl.id ? (
-                      <>
-                        <button className="delete-confirm__ok" onClick={() => handleDelete(tpl.id)}>确定</button>
-                        <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteId(null)}>取消</button>
-                      </>
-                    ) : (
-                      <button className="delete-trigger" title="删除模板" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(tpl.id); }}>删除</button>
-                    )}
-                  </div>
+                <div className="yolo-annotate__stage-wrap">
+                  {edit.sourceImage ? (
+                    <TemplateCropEditor
+                      imageUrl={edit.sourceImage}
+                      rect={edit.sourceRect}
+                      offset={edit.clickOffset}
+                      tool={tool}
+                      onRectChange={(rect) => {
+                        updateField('sourceRect', rect);
+                        if (rect) {
+                          const boundX = Math.round(rect.width / 2);
+                          const boundY = Math.round(rect.height / 2);
+                          updateField('clickOffset', {
+                            x: Math.max(-boundX, Math.min(boundX, edit.clickOffset.x)),
+                            y: Math.max(-boundY, Math.min(boundY, edit.clickOffset.y)),
+                          });
+                        }
+                      }}
+                      onOffsetChange={(offset) => updateField('clickOffset', offset)}
+                    />
+                  ) : edit.editing ? (
+                    <div className="yolo-stage__empty">该模板没有保存来源截图。可点击「上传新截图」或更换截图后重新框选。</div>
+                  ) : (
+                    <div className={`template-modal__upload ${dragOver ? 'template-modal__upload--drag' : ''}`} onClick={() => fileInputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={(e) => { e.preventDefault(); setDragOver(false); handleDrop(e); }}>
+                      <div className="template-modal__upload-icon">＋</div>
+                      <div className="template-modal__upload-text">拖拽截图到这里，或点击选择文件</div>
+                      <div className="template-modal__upload-hint">支持 PNG / JPG / WebP · 建议截取目标应用的真实画面</div>
+                    </div>
+                  )}
                 </div>
-              ))}
-              {activeTemplates.length === 0 && <div className="template-modal__empty">{templates.length === 0 ? '还没有模板，点击上方「＋ 新建模板」上传第一张截图' : '没有匹配的模板'}</div>}
-            </div>
-          </section>
 
-          <aside className="template-modal__inspector">
-            {apiUnavailable ? (
-              <div className="template-modal__unavailable">模板库需要 Electron 主进程支持，请通过 <code>npm run dev</code> 启动后使用。</div>
-            ) : edit.sourceImage ? (
-              <>
-                <div className="template-modal__step">1 · 预览与框选</div>
-                <TemplateCropEditor
-                  imageUrl={edit.sourceImage}
-                  rect={edit.sourceRect}
-                  offset={edit.clickOffset}
-                  onRectChange={(rect) => {
-                    updateField('sourceRect', rect);
-                    if (rect) {
-                      const boundX = Math.round(rect.width / 2);
-                      const boundY = Math.round(rect.height / 2);
-                      updateField('clickOffset', {
-                        x: Math.max(-boundX, Math.min(boundX, edit.clickOffset.x)),
-                        y: Math.max(-boundY, Math.min(boundY, edit.clickOffset.y)),
-                      });
-                    }
-                  }}
-                  onOffsetChange={(offset) => updateField('clickOffset', offset)}
-                />
-                <div className="template-modal__step">2 · 属性</div>
-                <TemplateForm edit={edit} halfW={halfW} halfH={halfH} canSave={canSave} onChange={updateField} onSave={handleSave} folders={folders} />
-              </>
-            ) : edit.editing ? (
-              <>
-                <div className="template-modal__preview-only">
-                  <TemplateThumb id={edit.editing.id} className="template-modal__big-thumb" />
-                  <p>该模板没有保存来源截图，无法直接重新框选。可更换截图后重新框选，或仅修改名称与配置。</p>
-                  <button className="template-modal__link" onClick={() => { pendingReplaceRef.current = true; fileInputRef.current?.click(); }}>更换截图后重新框选</button>
+                {/* 状态栏 */}
+                <div className="yolo-annotate__status">
+                  {edit.editing ? (
+                    <>当前图片 {boxCount} 个框 · {edit.editing.name}</>
+                  ) : edit.sourceImage ? (
+                    <>当前图片 {boxCount} 个框 · 框选目标区域，设置名称后保存</>
+                  ) : (
+                    <>选择模板或上传新截图开始标注</>
+                  )}
                 </div>
-                <div className="template-modal__step">2 · 属性</div>
-                <TemplateForm edit={edit} halfW={halfW} halfH={halfH} canSave={Boolean(edit.name.trim())} onChange={updateField} onSave={handleSave} folders={folders} />
-              </>
-            ) : (
-              <div className={`template-modal__upload ${dragOver ? 'template-modal__upload--drag' : ''}`} onClick={() => fileInputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
-                <div className="template-modal__upload-icon">＋</div>
-                <div className="template-modal__upload-text">拖拽截图到这里，或点击选择文件</div>
-                <div className="template-modal__upload-hint">支持 PNG / JPG / WebP · 建议截取目标应用的真实画面</div>
-              </div>
-            )}
-          </aside>
+
+                {confirmDeleteId && edit.editing && (
+                  <div className="yolo-annotate__error">
+                    确认删除模板「{edit.editing.name}」？
+                    <button className="delete-confirm__ok" onClick={() => handleDelete(edit.editing!.id)}>确定删除</button>
+                    <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteId(null)}>取消</button>
+                  </div>
+                )}
+              </section>
+
+              {/* 右：模板属性 */}
+              <aside className="yolo-annotate__classes template-annotate__props">
+                {edit.editing || edit.sourceImage ? (
+                  <>
+                    <div className="yolo-panel-title">
+                      <span>模板属性</span>
+                      <span className="yolo-panel-title__sub">框选目标并设置属性</span>
+                    </div>
+                    <TemplateForm edit={edit} halfW={halfW} halfH={halfH} canSave={canSave} onChange={updateField} onSave={handleSave} />
+                  </>
+                ) : (
+                  <div className="yolo-annotate__empty-hint">从左侧选择模板开始编辑</div>
+                )}
+              </aside>
+            </div>
+          )}
+
+          {tab === 'env' && (
+            <div className="template-manager__env">
+              <EnvPanel mode="template" onChanged={() => void refreshList()} />
+            </div>
+          )}
         </div>
       </div>
       <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={handleFileInput} />
@@ -580,82 +752,84 @@ type FormProps = {
   halfW: number;
   halfH: number;
   canSave: boolean;
-  folders: TemplateFolder[];
   onChange: <K extends keyof EditState>(key: K, value: EditState[K]) => void;
   onSave: () => void;
 };
 
-function TemplateForm({ edit, halfW, halfH, canSave, onChange, onSave, folders }: FormProps) {
+const SCALE_PRESETS = [
+  { value: '1', label: '100%' },
+  { value: '1.25', label: '125%' },
+  { value: '1.5', label: '150%' },
+  { value: '1.75', label: '175%' },
+  { value: '2', label: '200%' },
+];
+
+function TemplateForm({ edit, halfW, halfH, canSave, onChange, onSave }: FormProps) {
+  const [customScale, setCustomScale] = useState(false);
   const clampOffset = (axis: 'x' | 'y', value: number) => {
     const bound = axis === 'x' ? halfW : halfH;
     return Math.max(-bound, Math.min(bound, Number.isFinite(value) ? value : 0));
   };
+  const isPresetScale = SCALE_PRESETS.some((p) => Number(p.value) === edit.scaleFactor);
 
   return (
     <div className="template-form">
-      <div className="panel-card">
-        <div className="template-form__grid">
-          <label className="template-form__field">
-            <span>名称 <span className="template-form__required">*</span></span>
-            <input value={edit.name} onChange={(e) => onChange('name', e.target.value)} placeholder="如：提交按钮" />
-          </label>
-          <label className="template-form__field">
-            目标应用
-            <input value={edit.app} onChange={(e) => onChange('app', e.target.value)} placeholder="如：Chrome / Excel" />
-          </label>
-        </div>
-
-        <div className="template-form__grid">
-          <label className="template-form__field">
-            应用内缩放
-            <input value={edit.appZoom} onChange={(e) => onChange('appZoom', e.target.value)} placeholder="如：100% / 125%（手动备注）" />
-          </label>
-          <div className="template-form__field">
-            <span>所属文件夹</span>
-            <CustomSelect
-              value={edit.folderId ?? ''}
-              options={[{ value: '', label: '未归类' }, ...folders.map((folder) => ({ value: folder.id, label: folder.name }))]}
-              onChange={(v) => onChange('folderId', v || null)}
-            />
-          </div>
-        </div>
-        <div className="template-form__grid">
-          <label className="template-form__field">
-            系统缩放比例
-            <input type="number" step="0.01" min="0.1" value={edit.scaleFactor} onChange={(e) => onChange('scaleFactor', Number(e.target.value))} />
-          </label>
-          <label className="template-form__field">
-            窗口标题 / 备注
-            <input value={edit.windowTitle} onChange={(e) => onChange('windowTitle', e.target.value)} placeholder="如：订单详情页 / 弹窗标题" />
-          </label>
-        </div>
-        <div className="template-form__grid">
-          <label className="template-form__field">
-            系统分辨率
-            <div className="template-form__resolution">
-              <input type="number" value={edit.resolutionW} onChange={(e) => onChange('resolutionW', Number(e.target.value))} />
-              <span>×</span>
-              <input type="number" value={edit.resolutionH} onChange={(e) => onChange('resolutionH', Number(e.target.value))} />
-            </div>
-          </label>
-          <div className="template-form__field">
-            点击偏移（0, 0 = 匹配区域中心）
-            <div className="template-form__offset">
-              <input type="number" value={edit.clickOffset.x} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, x: clampOffset('x', Number(e.target.value)) })} />
-              <input type="number" value={edit.clickOffset.y} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, y: clampOffset('y', Number(e.target.value)) })} />
-              <span className="template-form__offset-hint">X {edit.clickOffset.x} / Y {edit.clickOffset.y}</span>
-            </div>
-          </div>
-        </div>
-
+      <div className="panel-card template-form__stack">
         <label className="template-form__field">
-          标签（用逗号分隔）
-          <input value={edit.tags} onChange={(e) => onChange('tags', normalizeTags(e.target.value))} placeholder="登录, 首页, 按钮" />
+          <span>名称 <span className="template-form__required">*</span></span>
+          <input value={edit.name} onChange={(e) => onChange('name', e.target.value)} placeholder="如：提交按钮" />
         </label>
 
         <label className="template-form__field">
-          其他备注
-          <textarea value={edit.otherNotes} onChange={(e) => onChange('otherNotes', e.target.value)} placeholder="其他需要记录的信息…" rows={1} />
+          系统缩放比例
+          <CustomSelect
+            value={isPresetScale && !customScale ? String(edit.scaleFactor) : 'custom'}
+            options={[
+              ...SCALE_PRESETS,
+              { value: 'custom', label: '自定义…' },
+            ]}
+            onChange={(v) => {
+              if (v === 'custom') {
+                setCustomScale(true);
+                return;
+              }
+              setCustomScale(false);
+              onChange('scaleFactor', Number(v));
+            }}
+          />
+          {(!isPresetScale || customScale) && (
+            <input
+              type="number"
+              step="0.01"
+              min="0.1"
+              value={edit.scaleFactor}
+              onChange={(e) => onChange('scaleFactor', Number(e.target.value))}
+              placeholder="如 1.6"
+            />
+          )}
+        </label>
+
+        <label className="template-form__field">
+          系统分辨率
+          <div className="template-form__resolution">
+            <input type="number" value={edit.resolutionW} onChange={(e) => onChange('resolutionW', Number(e.target.value))} />
+            <span>×</span>
+            <input type="number" value={edit.resolutionH} onChange={(e) => onChange('resolutionH', Number(e.target.value))} />
+          </div>
+        </label>
+
+        <label className="template-form__field">
+          点击偏移（0, 0 = 匹配区域中心）
+          <div className="template-form__offset">
+            <input type="number" value={edit.clickOffset.x} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, x: clampOffset('x', Number(e.target.value)) })} />
+            <input type="number" value={edit.clickOffset.y} onChange={(e) => onChange('clickOffset', { ...edit.clickOffset, y: clampOffset('y', Number(e.target.value)) })} />
+            <span className="template-form__offset-hint">X {edit.clickOffset.x} / Y {edit.clickOffset.y}</span>
+          </div>
+        </label>
+
+        <label className="template-form__field">
+          备注
+          <textarea value={edit.otherNotes} onChange={(e) => onChange('otherNotes', e.target.value)} placeholder="目标应用、窗口标题、标签等…" rows={1} />
         </label>
       </div>
 

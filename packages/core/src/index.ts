@@ -50,9 +50,12 @@ export type WaitNode = WorkflowNodeBase<'wait', {
 
 export type ScreenshotNode = WorkflowNodeBase<'screenshot', {
   regionMode: 'full' | 'selected';
-  /** capture from a configured stream window instead of the entire desktop */
-  source: 'screen' | 'stream';
+  /** 画面来源：系统屏幕 / 本机指定窗口 / 配置的串流设备窗口 */
+  source: 'screen' | 'window' | 'stream';
+  /** source=stream 时：串流设备 id */
   streamSourceId?: string;
+  /** source=window 时：窗口标题关键字，用于匹配本机窗口 */
+  windowHint?: string;
   region?: TemplateRect;
 }>;
 
@@ -116,7 +119,7 @@ export type OcrResult = {
 
 // ===== 串流设备管理 =====
 
-export type StreamSourceType = 'ps5' | 'xbox' | 'secondPc' | 'otherDevice';
+export type StreamSourceType = 'ps5' | 'xbox' | 'secondPc' | 'local' | 'otherDevice';
 
 export type StreamSourceProfile = {
   id: string;
@@ -276,6 +279,65 @@ export type TemplateUpdatePatch = Partial<Omit<TemplateCreatePayload, 'imageData
   imageDataUrl?: string;
   enabled?: boolean;
 };
+
+// ===== 视觉运行时（识别测试台 / 执行引擎） =====
+
+export type EngineEnvInfo = {
+  /** OpenCV 版本号，未安装为 null */
+  cv2: string | null;
+  /** PyTorch 版本号，未安装为 null */
+  torch: string | null;
+  /** YOLOX 版本号，未安装为 null */
+  yolox: string | null;
+  cuda: boolean;
+  mps: boolean;
+  device: string;
+};
+
+export type TemplateMatchResult = {
+  ok: boolean;
+  /** 模板左上角在图片中的坐标 */
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  /** 匹配置信度 0-100 */
+  confidence?: number;
+  /** 按模板热点/点击偏移计算出的实际点击坐标 */
+  clickX?: number;
+  clickY?: number;
+  message?: string;
+};
+
+export type YoloDetection = {
+  label: string;
+  /** 置信度 0-100 */
+  confidence: number;
+  /** [x, y, width, height] */
+  box: [number, number, number, number];
+};
+
+export type YoloDetectResult = {
+  ok: boolean;
+  detections?: YoloDetection[];
+  message?: string;
+};
+
+export type CloudApiVisionResult = {
+  ok: boolean;
+  x?: number;
+  y?: number;
+  /** 服务端原始响应（截断） */
+  raw?: string;
+  message?: string;
+};
+
+export type EngineRunResult = {
+  ok: boolean;
+  message?: string;
+  [key: string]: unknown;
+};
+
 
 export const defaultWorkflowDocument = (): WorkflowDocument => ({
   version: 1,

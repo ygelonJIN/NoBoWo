@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('cloudApiAPI', {
     ipcRenderer.invoke('cloudApi:update', id, patch),
   remove: (id: string) => ipcRenderer.invoke('cloudApi:remove', id),
   test: (payload: { baseUrl: string; apiKey: string; name?: string }) => ipcRenderer.invoke('cloudApi:test', payload),
+  vision: (payload: { imageDataUrl: string; profileId: string; prompt?: string }) =>
+    ipcRenderer.invoke('cloudApi:vision', payload),
 });
 
 contextBridge.exposeInMainWorld('ocrAPI', {
@@ -44,8 +46,16 @@ contextBridge.exposeInMainWorld('streamAPI', {
   probeWindows: () => ipcRenderer.invoke('stream:probeWindows'),
   captureWindow: (sourceId: string) => ipcRenderer.invoke('stream:captureWindow', sourceId),
   captureSource: (sourceId: string) => ipcRenderer.invoke('stream:captureSource', sourceId),
-  captureScreenshot: (payload: { source: 'screen' | 'stream'; streamSourceId?: string }) =>
+  captureScreenshot: (payload: { source: 'screen' | 'window' | 'stream'; streamSourceId?: string; windowHint?: string }) =>
     ipcRenderer.invoke('stream:captureScreenshot', payload),
+});
+
+contextBridge.exposeInMainWorld('engineAPI', {
+  envInfo: () => ipcRenderer.invoke('engine:envInfo'),
+  templateMatch: (payload: { imageDataUrl: string; templateId?: string; templatePath?: string; threshold?: number }) =>
+    ipcRenderer.invoke('engine:templateMatch', payload),
+  yoloDetect: (payload: { imageDataUrl: string; modelId?: string; modelPath?: string; threshold?: number }) =>
+    ipcRenderer.invoke('engine:yoloDetect', payload),
 });
 
 contextBridge.exposeInMainWorld('templateAPI', {

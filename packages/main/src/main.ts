@@ -6,6 +6,9 @@ import { connect as tcpConnect } from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type {
   CloudApiProfile,
+  CloudApiVisionResult,
+  EngineEnvInfo,
+  EngineRunResult,
   OcrEngine,
   StreamConnectionTestResult,
   StreamMotionResult,
@@ -29,6 +32,7 @@ import type {
   YoloTrainingState,
 } from '@nobowo/core';
 import { YOLO_CLASS_COLORS } from '@nobowo/core';
+import { runVisionEngine, writeImageToTemp } from './engine';
 
 const createWindow = () => {
   const win = new BrowserWindow({
@@ -244,6 +248,82 @@ function registerCloudApiIpc() {
         return { ok: false, message: `服务端返回 HTTP ${response.status}`, lastTestAt: now };
       } catch (err) {
         return { ok: false, message: err instanceof Error ? err.message : String(err), lastTestAt: now };
+      }
+    },
+  );
+
+  /** 从云 API 响应中提取坐标：优先 JSON 的 x/y 字段，其次 OpenAI 风格 content 文本，最后正则 */
+  const extractCoordsFrom = (parsed: unknown, text: string): { x: number; y: number } | null => {
+    const pick = (value: unknown): { x: number; y: number } | null => {
+      if (!value || typeof value !== 'object') return null;
+      const record = value as Record<string, unknown>;
+      if (typeof record.x === 'number' && typeof record.y === 'number') {
+        return { x: record.x, y: record.y };
+      }
+      if (record.coordinates && typeof record.coordinates === 'object') {
+        const coords = record.coordinates as Record<string, unknown>;
+        if (typeof coords.x === 'number' && typeof coords.y === 'number') return { x: coords.x, y: coords.y };
+      }
+      if (typeof record.content === 'string') {
+        const matched = record.content.match(/(?:x|X)\s*[:=]\s*(-?\d+(?:\.\d+)?)\s*[,，;]\s*(?:y|Y)\s*[:=]\s*(-?\d+(?:\.\d+)?)/);
+        if (matched) return { x: Number(matched[1]), y: Number(matched[2]) };
+        const parenthesized = record.content.match(/\((-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*\)/);
+        if (parenthesized) return { x: Number(parenthesized[1]), y: Number(parenthesized[2]) };
+      }
+      return null;
+    };
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        const found = pick(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const root = parsed as Record<string, unknown> | null;
+    const candidates = [root, root?.result, root?.data, root?.output];
+    for (const candidate of candidates) {
+      const found = pick(candidate);
+      if (found) return found;
+    }
+    const raw = text.match(/(?:x|X)\s*[:=]\s*(-?\d+(?:\.\d+)?)\s*[,，;]\s*(?:y|Y)\s*[:=]\s*(-?\d+(?:\.\d+)?)/);
+    return raw ? { x: Number(raw[1]), y: Number(raw[2]) } : null;
+  };
+
+  ipcMain.handle(
+    'cloudApi:vision',
+    async (_event, payload: { imageDataUrl: string; profileId: string; prompt?: string }): Promise<CloudApiVisionResult> => {
+      const index = await loadCloudApiIndex();
+      const profile = index.profiles.find((item) => item.id === payload.profileId);
+      if (!profile) return { ok: false, message: '找不到 API 配置，请先在「云端 API」中创建' };
+      const baseUrl = profile.baseUrl.trim().replace(/\/+$/, '');
+      if (!baseUrl) return { ok: false, message: 'API 地址为空' };
+      const prompt = payload.prompt?.trim() || profile.defaultPrompt || '分析这张截图，返回目标位置的 x、y 坐标（JSON 格式 {"x":..,"y":..}）。';
+      try {
+        const response = await fetch(baseUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(profile.apiKey ? { Authorization: `Bearer ${profile.apiKey}` } : {}),
+          },
+          body: JSON.stringify({ prompt, image: payload.imageDataUrl }),
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          return { ok: false, message: `服务端返回 HTTP ${response.status}`, raw: text.slice(0, 500) };
+        }
+        let parsed: unknown = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // 非 JSON，按纯文本处理
+        }
+        const coords = extractCoordsFrom(parsed, text);
+        if (coords) {
+          return { ok: true, x: coords.x, y: coords.y, raw: text.slice(0, 2000), message: '已解析出坐标' };
+        }
+        return { ok: false, message: '未能从响应中解析出坐标', raw: text.slice(0, 2000) };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
       }
     },
   );
@@ -484,30 +564,25 @@ function registerStreamIpc() {
     'stream:captureScreenshot',
     async (
       _event,
-      payload: { source: 'screen' | 'stream'; streamSourceId?: string },
+      payload: { source: 'screen' | 'window' | 'stream'; streamSourceId?: string; windowHint?: string },
     ): Promise<StreamScreenshotResult> => {
       const thumbnailSize = { width: 1920, height: 1080 };
-      try {
-        if (payload.source === 'stream') {
-          const index = await loadStreamSources();
-          const profile = index.sources.find((source) => source.id === payload.streamSourceId);
-          if (!profile) {
-            return { ok: false, message: '找不到串流设备配置，请在「串流设备」中先创建并保存设备' };
-          }
-          const sources = await desktopCapturer.getSources({
-            types: ['window'],
-            thumbnailSize,
-            fetchWindowIcons: false,
-          });
-          const hint = profile.windowHint?.trim().toLowerCase();
-          const windowSource = (hint ? sources.find((item) => item.name.toLowerCase().includes(hint)) : undefined)
-            ?? sources.find((item) => !item.name.startsWith('NoBoWo'));
-          if (!windowSource || windowSource.thumbnail.isEmpty()) {
-            return { ok: false, message: '未找到串流窗口，请确认串流窗口已打开、macOS 屏幕录制权限已授权' };
-          }
-          const size = windowSource.thumbnail.getSize();
-          return { ok: true, frame: windowSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+      const captureWindowByHint = async (hintText?: string, label = '串流窗口') => {
+        const sources = await desktopCapturer.getSources({
+          types: ['window'],
+          thumbnailSize,
+          fetchWindowIcons: false,
+        });
+        const hint = hintText?.trim().toLowerCase();
+        const windowSource = (hint ? sources.find((item) => item.name.toLowerCase().includes(hint)) : undefined)
+          ?? sources.find((item) => !item.name.startsWith('NoBoWo'));
+        if (!windowSource || windowSource.thumbnail.isEmpty()) {
+          return { ok: false as const, message: `未找到${label}，请确认窗口已打开、macOS 屏幕录制权限已授权` };
         }
+        const size = windowSource.thumbnail.getSize();
+        return { ok: true as const, frame: windowSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+      };
+      const captureScreen = async () => {
         const sources = await desktopCapturer.getSources({
           types: ['screen'],
           thumbnailSize,
@@ -515,10 +590,29 @@ function registerStreamIpc() {
         });
         const screenSource = sources[0];
         if (!screenSource || screenSource.thumbnail.isEmpty()) {
-          return { ok: false, message: '无法截取屏幕画面，请确认屏幕录制权限已授权' };
+          return { ok: false as const, message: '无法截取本机屏幕，请确认屏幕录制权限已授权' };
         }
         const size = screenSource.thumbnail.getSize();
-        return { ok: true, frame: screenSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+        return { ok: true as const, frame: screenSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+      };
+      try {
+        if (payload.source === 'window') {
+          return await captureWindowByHint(payload.windowHint, '目标窗口');
+        }
+        if (payload.source === 'stream') {
+          const index = await loadStreamSources();
+          const profile = index.sources.find((source) => source.id === payload.streamSourceId);
+          if (!profile) {
+            return { ok: false, message: '找不到串流设备配置，请在「串流设备」中先创建并保存设备' };
+          }
+          if (profile.type === 'local') {
+            return profile.windowHint?.trim()
+              ? await captureWindowByHint(profile.windowHint, '本机窗口')
+              : await captureScreen();
+          }
+          return await captureWindowByHint(profile.windowHint, '串流窗口');
+        }
+        return await captureScreen();
       } catch (err) {
         return { ok: false, message: err instanceof Error ? err.message : String(err) };
       }
@@ -2463,12 +2557,107 @@ function registerYoloIpc() {
   });
 }
 
+// ===== 视觉引擎（识别测试台 / 执行引擎共用） =====
+
+function registerEngineIpc() {
+  ipcMain.handle('engine:envInfo', async (): Promise<EngineEnvInfo> => {
+    const yoloxPath = await resolveYoloxPath();
+    const result = await runVisionEngine('check', { yoloxPath }, 20000);
+    if (result.ok && result.env && typeof result.env === 'object') {
+      const env = result.env as Record<string, unknown>;
+      return {
+        cv2: typeof env.cv2 === 'string' ? env.cv2 : null,
+        torch: typeof env.torch === 'string' ? env.torch : null,
+        yolox: typeof env.yolox === 'string' ? env.yolox : null,
+        cuda: Boolean(env.cuda),
+        mps: Boolean(env.mps),
+        device: typeof env.device === 'string' ? env.device : 'none',
+      };
+    }
+    return { cv2: null, torch: null, yolox: null, cuda: false, mps: false, device: 'none' };
+  });
+
+  ipcMain.handle(
+    'engine:templateMatch',
+    async (
+      _event,
+      payload: { imageDataUrl: string; templateId?: string; templatePath?: string; threshold?: number },
+    ): Promise<EngineRunResult> => {
+      const index = await loadIndex();
+      const template = payload.templateId
+        ? index.templates.find((item) => item.id === payload.templateId)
+        : null;
+      const templatePath = template
+        ? join(templateImagesDir(), template.imageFile)
+        : (payload.templatePath ?? null);
+      if (!templatePath) {
+        return { ok: false, message: '未选择匹配模板，请先在策略中选定模板' };
+      }
+      try {
+        await stat(templatePath);
+      } catch {
+        return { ok: false, message: '模板文件不存在，可能已被删除' };
+      }
+      const imagePath = await writeImageToTemp(payload.imageDataUrl);
+      if (!imagePath) return { ok: false, message: '无法保存测试截图' };
+      return runVisionEngine('template', {
+        imagePath,
+        templatePath,
+        threshold: payload.threshold ?? 60,
+        sourceRect: template?.sourceRect,
+        hotspot: template?.matchHotspot,
+        clickOffset: template?.clickOffset,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    'engine:yoloDetect',
+    async (
+      _event,
+      payload: { imageDataUrl: string; modelId?: string; modelPath?: string; threshold?: number },
+    ): Promise<EngineRunResult> => {
+      const index = await loadYoloIndex();
+      const model = payload.modelId ? index.models.find((item) => item.id === payload.modelId) : null;
+      const modelPath = model ? join(yoloModelsDir(), model.file) : (payload.modelPath ?? null);
+      if (!modelPath) {
+        return { ok: false, message: '未选择 YOLO 模型，请先在策略中选定模型' };
+      }
+      try {
+        await stat(modelPath);
+      } catch {
+        return { ok: false, message: '模型文件不存在，可能已被删除' };
+      }
+      let classNames: string[] = [];
+      if (model?.datasetId) {
+        const data = await loadDatasetFile(model.datasetId);
+        classNames = data.classes.map((cls) => cls.name);
+      }
+      const imagePath = await writeImageToTemp(payload.imageDataUrl);
+      if (!imagePath) return { ok: false, message: '无法保存测试截图' };
+      const threshold = Math.max(1, Math.min(100, payload.threshold ?? 60));
+      return runVisionEngine('yolo', {
+        imagePath,
+        modelPath,
+        baseModel: model?.baseModel ?? 'yolox_s',
+        numClasses: model?.numClasses ?? classNames.length,
+        classNames,
+        imageSize: model?.imageSize ?? 640,
+        confThre: threshold / 100,
+        nmsThre: 0.45,
+        yoloxPath: await resolveYoloxPath(),
+      });
+    },
+  );
+}
+
 app.whenReady().then(() => {
   registerCloudApiIpc();
   registerStreamIpc();
   registerOcrIpc();
   registerTemplateIpc();
   registerYoloIpc();
+  registerEngineIpc();
   createWindow();
 
   app.on('activate', () => {

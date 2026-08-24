@@ -2,6 +2,9 @@
 
 import type {
   CloudApiProfile,
+  CloudApiVisionResult,
+  EngineEnvInfo,
+  EngineRunResult,
   OcrEngine,
   OcrResult,
   StreamConnectionTestResult,
@@ -32,6 +35,12 @@ declare global {
       update: (id: string, patch: { name?: string; baseUrl?: string; apiKey?: string; defaultPrompt?: string }) => Promise<CloudApiProfile | null>;
       remove: (id: string) => Promise<void>;
       test: (payload: { baseUrl: string; apiKey: string; name?: string }) => Promise<{ ok: boolean; message?: string; lastTestAt: number }>;
+      vision: (payload: { imageDataUrl: string; profileId: string; prompt?: string }) => Promise<CloudApiVisionResult>;
+    };
+    engineAPI?: {
+      envInfo: () => Promise<EngineEnvInfo>;
+      templateMatch: (payload: { imageDataUrl: string; templateId?: string; templatePath?: string; threshold?: number }) => Promise<EngineRunResult>;
+      yoloDetect: (payload: { imageDataUrl: string; modelId?: string; modelPath?: string; threshold?: number }) => Promise<EngineRunResult>;
     };
     ocrAPI?: {
       run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) => Promise<OcrResult>;
@@ -46,7 +55,7 @@ declare global {
       probeWindows: () => Promise<StreamProbeResult>;
       captureWindow: (sourceId: string) => Promise<StreamMotionResult>;
       captureSource: (sourceId: string) => Promise<StreamMotionResult>;
-      captureScreenshot: (payload: { source: 'screen' | 'stream'; streamSourceId?: string }) => Promise<StreamScreenshotResult>;
+      captureScreenshot: (payload: { source: 'screen' | 'window' | 'stream'; streamSourceId?: string; windowHint?: string }) => Promise<StreamScreenshotResult>;
       captureSource: (sourceId: string) => Promise<StreamMotionResult>;
     };
     templateAPI: {

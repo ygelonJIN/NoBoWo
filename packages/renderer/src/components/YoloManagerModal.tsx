@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  EngineEnvInfo,
   YoloAnnotation,
   YoloDataset,
   YoloEnvInfo,
@@ -629,8 +630,10 @@ type EnvTabProps = {
 function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
   const [output, setOutput] = useState<YoloTrainingEvent[]>([]);
   const [installing, setInstalling] = useState(false);
+  const [installingPkg, setInstallingPkg] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [visionEnv, setVisionEnv] = useState<EngineEnvInfo | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
   const [stickBottom, setStickBottom] = useState(true);
 
@@ -665,14 +668,39 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
     }
   };
 
+  const installPkg = async (pkg: string) => {
+    if (!window.yoloAPI || installingPkg) return;
+    setInstallingPkg(pkg);
+    try {
+      const res = await window.yoloAPI.installPackage(pkg);
+      if (!res.started) {
+        setInstallingPkg(null);
+        setOutput((prev) => [...prev, { t: 'log', level: 'warn', message: res.message ?? '已有安装任务在进行中' }]);
+      }
+    } catch (err) {
+      setInstallingPkg(null);
+      setOutput((prev) => [...prev, { t: 'log', level: 'error', message: String(err) }]);
+    }
+  };
+
   const refresh = async () => {
     setRefreshing(true);
     try {
       await onRefresh();
+      if (window.engineAPI) {
+        setVisionEnv(await window.engineAPI.envInfo());
+      }
+    } catch {
+      setVisionEnv(null);
     } finally {
       setRefreshing(false);
     }
   };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const isMac = navigator.platform.toLowerCase().includes('mac');
 
@@ -717,6 +745,15 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
       list.push({ id: 'pip', label: 'pip', state: 'missing', value: '未安装 pip',
         hint: 'pip 是 Python 的包管理器，安装 PyTorch、YOLOX 依赖都靠它。',
         commands: ['python3 -m ensurepip --upgrade'],
+      });
+    }
+
+    if (visionEnv?.cv2) {
+      list.push({ id: 'cv2', label: 'OpenCV', state: 'ok', value: `v${visionEnv.cv2}` });
+    } else {
+      list.push({ id: 'cv2', label: 'OpenCV', state: 'missing', value: '未安装',
+        hint: 'OpenCV 提供图像处理与模板匹配算法：模板匹配策略直接依赖它，YOLO 推理的前处理（缩放、归一化）也用到它。',
+        commands: ['python3 -m pip install opencv-python-headless'],
       });
     }
 
@@ -790,10 +827,10 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
     });
 
     return list;
-  }, [envInfo, isMac]);
+  }, [envInfo, isMac, visionEnv]);
 
   const missingCount = rows.filter((r) => r.state === 'missing').length;
-  const allDone = envInfo !== null && missingCount === 0 && Boolean(envInfo.torch);
+  const allDone = envInfo !== null && missingCount === 0 && Boolean(envInfo.torch) && Boolean(visionEnv?.cv2);
 
   // ===== 权重 & 下载 =====
   const [weights, setWeights] = useState<{ name: string; present: boolean; sizeBytes: number }[]>([]);
@@ -893,6 +930,9 @@ function EnvTab({ envInfo, onRefresh, apiAvailable }: EnvTabProps) {
         <div className="yolo-env__actions">
           <button className="yolo-env__install" onClick={() => void installDeps()} disabled={installing || !apiAvailable}>
             {installing ? '安装中…' : '安装 YOLOX 依赖'}
+          </button>
+          <button className="yolo-env__pick" onClick={() => void installPkg('opencv-python-headless')} disabled={installingPkg !== null || !apiAvailable}>
+            {installingPkg === 'opencv-python-headless' ? '安装中…' : '安装 OpenCV（模板匹配 / YOLO 前处理）'}
           </button>
           <button className="yolo-env__pick" onClick={() => void pickYoloxDir()} disabled={!apiAvailable}>
             {envInfo?.yoloxPath ? '更换 YOLOX 源码目录' : '选择 YOLOX 源码目录'}

@@ -9,6 +9,7 @@ export type CapturedImage = {
 /**
  * 按截图节点的配置抓取一帧画面：
  * - source = 'screen'：抓整个主屏幕
+ * - source = 'window'：按窗口标题关键字抓本机指定窗口
  * - source = 'stream'：从配置的串流设备（streamSourceId）窗口抓图
  * 模板匹配 / OCR 等识别策略统一通过这个入口取图，因此不会再看全屏。
  */
@@ -19,9 +20,13 @@ export async function captureNodeImage(node: ScreenshotNode): Promise<CapturedIm
   if (node.data.source === 'stream' && !node.data.streamSourceId) {
     throw new Error('截图节点选择了「串流窗口」，但没有选择串流设备');
   }
+  if (node.data.source === 'window' && !node.data.windowHint?.trim()) {
+    throw new Error('截图节点选择了「指定窗口」，但没有填写窗口标题关键字');
+  }
   const result = await window.streamAPI.captureScreenshot({
     source: node.data.source ?? 'screen',
     streamSourceId: node.data.source === 'stream' ? node.data.streamSourceId : undefined,
+    windowHint: node.data.source === 'window' ? node.data.windowHint : undefined,
   });
   if (!result.ok || !result.frame) {
     throw new Error(result.message ?? '截图失败');

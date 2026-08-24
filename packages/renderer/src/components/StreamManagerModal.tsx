@@ -3,6 +3,7 @@ import type { StreamSourceProfile, StreamSourceType, StreamWindowInfo } from '@n
 import { CustomSelect } from './CustomSelect';
 
 const STREAM_TYPE_OPTIONS: { value: StreamSourceType; label: string }[] = [
+  { value: 'local', label: '本机（当前电脑）' },
   { value: 'ps5', label: 'PS5 主机' },
   { value: 'xbox', label: 'Xbox 主机' },
   { value: 'secondPc', label: '第二台电脑' },
@@ -10,6 +11,7 @@ const STREAM_TYPE_OPTIONS: { value: StreamSourceType; label: string }[] = [
 ];
 
 const STREAM_TYPE_LABEL: Record<StreamSourceType, string> = {
+  local: '本机',
   ps5: 'PS5',
   xbox: 'Xbox',
   secondPc: '第二台电脑',
@@ -17,6 +19,7 @@ const STREAM_TYPE_LABEL: Record<StreamSourceType, string> = {
 };
 
 const TYPE_HELP: Record<StreamSourceType, string> = {
+  local: '直接截取本机屏幕，不需要串流窗口或主机地址。适合自动化本机上的游戏、办公软件。',
   ps5: '用 PS Remote Play 或 Chiaki 连接 PS5 后，串流画面会显示在本地窗口里。',
   xbox: '用 Xbox 应用或浏览器远程串流后，选择对应的串流窗口即可。',
   secondPc: '用 Parsec / Moonlight / Steam / 向日葵 等把第二台电脑的画面投到本机。',
@@ -459,7 +462,7 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                     </div>
                     <div className="stream-card__meta-row">
                       <span className="stream-card__type">{STREAM_TYPE_LABEL[source.type]}</span>
-                      <span className="stream-card__meta">{source.host || source.url || source.windowHint || '未配置连接信息'}</span>
+                      <span className="stream-card__meta">{source.type === 'local' ? '本机屏幕' : (source.host || source.url || source.windowHint || '未配置连接信息')}</span>
                     </div>
                   </button>
                 );
@@ -500,6 +503,8 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                 </div>
               </div>
 
+              {draft.type !== 'local' && (
+                <>
               <div className="template-modal__step">2 · 连通性测试（可选）</div>
               <div className="stream-modal__test">
                 <div className="stream-form stream-form--compact">
@@ -562,6 +567,17 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                   </div>
                 )}
               </div>
+                </>
+              )}
+
+              {draft.type === 'local' && (
+                <div className="stream-modal__local-note">
+                  <div className="stream-modal__local-note-title">本机屏幕 / 本机窗口</div>
+                  <div className="stream-modal__local-note-desc">
+                    保存后默认截取整个屏幕。若在上方「窗口标题关键字」里填了本机应用/串流窗口标题（如 Remote Play、游戏名），则改为截取该窗口。适用于本机上的游戏、办公软件与远程串流画面。
+                  </div>
+                </div>
+              )}
 
               </div>
               <div className="stream-modal__footer stream-modal__footer--middle">

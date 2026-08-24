@@ -1,4 +1,4 @@
-import type { CloudApiProfile, OcrEngine, RecognizeNode, StreamSourceProfile, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import type { CloudApiProfile, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
 import { ModelPicker } from './ModelPicker';
@@ -12,7 +12,7 @@ type Props = {
   cloudApiVersion?: number;
   onOpenTemplateManager: () => void;
   onOpenCloudApiManager: () => void;
-  onOpenOcrTest: (preset?: { text?: string; engine?: OcrEngine }) => void;
+  onOpenRecognizeTest: () => void;
   yoloVersion?: number;
   onOpenYoloManager?: () => void;
 };
@@ -82,7 +82,7 @@ export function PropertiesPanel({
   cloudApiVersion = 0,
   onOpenTemplateManager,
   onOpenCloudApiManager,
-  onOpenOcrTest,
+  onOpenRecognizeTest,
   yoloVersion,
   onOpenYoloManager,
 }: Props) {
@@ -108,6 +108,8 @@ export function PropertiesPanel({
   const [apiProfiles, setApiProfiles] = useState<CloudApiProfile[]>([]);
   const [streamSources, setStreamSources] = useState<StreamSourceProfile[]>([]);
   const [streamSourceLoading, setStreamSourceLoading] = useState(false);
+  const [windows, setWindows] = useState<StreamWindowInfo[]>([]);
+  const [probingWindows, setProbingWindows] = useState(false);
 
   useEffect(() => {
     if (!window.templateAPI) {
@@ -476,11 +478,58 @@ export function PropertiesPanel({
                 value={node.data.source ?? 'screen'}
                 options={[
                   { value: 'screen', label: '系统屏幕' },
+                  { value: 'window', label: '本机指定窗口' },
                   { value: 'stream', label: '串流窗口' },
                 ]}
-                onChange={(v) => onChangeNode(updateNodeData(node, { source: v as 'screen' | 'stream' }))}
+                onChange={(v) => onChangeNode(updateNodeData(node, { source: v as 'screen' | 'window' | 'stream' }))}
               />
             </label>
+            {node.data.source === 'window' && (
+              <>
+                <label>
+                  窗口标题关键字
+                  <input
+                    value={node.data.windowHint ?? ''}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { windowHint: e.target.value }))}
+                    placeholder="例如：Remote Play / Excel / 游戏名"
+                  />
+                </label>
+                <div className="properties-panel__window-picker">
+                  <button
+                    className="properties-panel__ghost-button"
+                    onClick={async () => {
+                      if (!window.streamAPI || probingWindows) return;
+                      setProbingWindows(true);
+                      try {
+                        const result = await window.streamAPI.probeWindows();
+                        setWindows(result.windows);
+                      } catch {
+                        setWindows([]);
+                      } finally {
+                        setProbingWindows(false);
+                      }
+                    }}
+                    disabled={probingWindows}
+                  >
+                    {probingWindows ? '扫描中…' : '扫描窗口并选择'}
+                  </button>
+                  {windows.length > 0 && (
+                    <div className="properties-panel__window-list">
+                      {windows.map((win) => (
+                        <button
+                          key={win.id}
+                          className={node.data.windowHint && win.name.toLowerCase().includes(node.data.windowHint.toLowerCase()) ? 'active' : ''}
+                          onClick={() => onChangeNode(updateNodeData(node, { windowHint: win.name }))}
+                          title={win.name}
+                        >
+                          {win.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
             {node.data.source === 'stream' && (
               <label>
                 串流设备
@@ -488,7 +537,11 @@ export function PropertiesPanel({
                   value={node.data.streamSourceId ?? ''}
                   options={[
                     { value: '', label: streamSourceLoading ? '正在加载串流设备…' : '选择一个串流设备' },
-                    ...streamSources.map((source) => ({ value: source.id, label: `${source.name} · ${source.type.toUpperCase()}` })),
+                    ...streamSources.map((source) => {
+                      const typeLabel =
+                        source.type === 'local' ? '本机' : source.type === 'ps5' ? 'PS5' : source.type === 'xbox' ? 'Xbox' : source.type === 'secondPc' ? '第二台电脑' : '其他设备';
+                      return { value: source.id, label: `${source.name} · ${typeLabel}` };
+                    }),
                   ]}
                   onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
                 />
@@ -674,24 +727,26 @@ export function PropertiesPanel({
                   {expanded && (
                     <div className="strategy-card__body">
                       {strategyKey === 'coords' && (
-                        <div className="grid-two">
-                          <label>
-                            X
-                            <input
-                              type="number"
-                              value={strategy.x ?? 0}
-                              onChange={(e) => updateStrategy('coords', { x: Number(e.target.value) })}
-                            />
-                          </label>
-                          <label>
-                            Y
-                            <input
-                              type="number"
-                              value={strategy.y ?? 0}
-                              onChange={(e) => updateStrategy('coords', { y: Number(e.target.value) })}
-                            />
-                          </label>
-                        </div>
+                        <>
+                          <div className="grid-two">
+                            <label>
+                              X
+                              <input
+                                type="number"
+                                value={strategy.x ?? 0}
+                                onChange={(e) => updateStrategy('coords', { x: Number(e.target.value) })}
+                              />
+                            </label>
+                            <label>
+                              Y
+                              <input
+                                type="number"
+                                value={strategy.y ?? 0}
+                                onChange={(e) => updateStrategy('coords', { y: Number(e.target.value) })}
+                              />
+                            </label>
+                          </div>
+                        </>
                       )}
 
                       {strategyKey === 'template' && (
@@ -776,12 +831,6 @@ export function PropertiesPanel({
                               onChange={(e) => updateStrategy('ocr', { threshold: Number(e.target.value) })}
                             />
                           </label>
-                          <button
-                            className="properties-panel__ghost-button"
-                            onClick={() => onOpenOcrTest({ text: strategy.text ?? '', engine: strategy.engine ?? 'auto' })}
-                          >
-                            测试台验证
-                          </button>
                         </>
                       )}
 
@@ -883,6 +932,9 @@ export function PropertiesPanel({
                 </Fragment>
               );
             })}
+              <button className="properties-panel__ghost-button properties-panel__recognize-test" onClick={onOpenRecognizeTest}>
+                测试台验证
+              </button>
               <div className="properties-panel__recognize-spacer" aria-hidden="true" />
             </div>
           </section>
