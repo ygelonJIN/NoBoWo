@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { WorkflowEdge, WorkflowNode } from '@nobowo/core';
+import type { WorkflowEdge, WorkflowNode, WorkflowRunEvent, WorkflowRunSnapshot } from '@nobowo/core';
 
 const STRATEGY_LABELS: Record<string, string> = {
   coords: '坐标回放',

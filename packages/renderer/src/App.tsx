@@ -16,6 +16,7 @@ import { OcrTestModal } from './components/OcrTestModal';
 import { StreamManagerModal } from './components/StreamManagerModal';
 import { DebugPanel } from './components/DebugPanel';
 import { RecognizeTestModal } from './components/RecognizeTestModal';
+import type { WorkflowRunSnapshot } from '@nobowo/core';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
 const NODE_WIDTH = 220;
@@ -217,6 +218,8 @@ export function App() {
   const [streamManagerOpen, setStreamManagerOpen] = useState(false);
   const [streamVersion, setStreamVersion] = useState(0);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const [workflowRunState, setWorkflowRunState] = useState<WorkflowRunSnapshot | null>(null);
+  const [workflowRunNotice, setWorkflowRunNotice] = useState<{ main: string; hint?: string } | null>(null);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [panelHeight, setPanelHeight] = useState(0);
@@ -239,6 +242,54 @@ export function App() {
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const closeDebugPanel = useCallback(() => {
     setDebugPanelOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.workflowAPI) return;
+    let active = true;
+    window.workflowAPI.getState().then((state) => {
+      if (active) setWorkflowRunState(state);
+    }).catch(() => {});
+    const off = window.workflowAPI.onEvent((event) => {
+      setWorkflowRunState((current) => {
+        const base = current ?? { runId: null, status: 'idle', startedAt: null, nodeStates: {}, nodeResults: {} };
+        if (event.t === 'start') {
+          setWorkflowRunNotice(null);
+          return { runId: event.runId, status: 'running', startedAt: Date.now(), nodeStates: {}, nodeResults: {} };
+        }
+        if (event.t === 'nodeStart') {
+          return { ...base, nodeStates: { ...base.nodeStates, [event.nodeId]: 'running' } };
+        }
+        if (event.t === 'nodeEnd') {
+          return {
+            ...base,
+            nodeStates: { ...base.nodeStates, [event.nodeId]: event.result.status },
+            nodeResults: { ...base.nodeResults, [event.nodeId]: event.result },
+          };
+        }
+        if (event.t === 'pause') {
+          setWorkflowRunNotice(null);
+          return { ...base, status: 'paused' };
+        }
+        if (event.t === 'resume') {
+          setWorkflowRunNotice(null);
+          return { ...base, status: 'running' };
+        }
+        if (event.t === 'stopped') {
+          setWorkflowRunNotice(null);
+          return { ...base, status: 'stopped' };
+        }
+        if (event.t === 'done') {
+          setWorkflowRunNotice(null);
+          return { ...base, status: 'done' };
+        }
+        return base;
+      });
+    });
+    return () => {
+      active = false;
+      off();
+    };
   }, []);
 
   const floatingPanelStyle = useMemo<CSSProperties | null>(() => {
@@ -354,6 +405,14 @@ export function App() {
     },
     [nodes.length, viewport, zoom],
   );
+
+  const workflowRunPercent = useMemo(() => {
+    if (!workflowRunState) return 0;
+    const states = workflowRunState.nodeStates;
+    const doneCount = Object.values(states).filter((state) => state === 'ok' || state === 'skipped').length;
+    const total = nodes.length || Object.keys(states).length;
+    return total === 0 ? 0 : Math.round((doneCount / total) * 100);
+  }, [workflowRunState, nodes.length]);
 
   const updateNode = useCallback((nextNode: WorkflowNode) => {
     setNodes((current) => current.map((node) => (node.id === nextNode.id ? nextNode : node)));
@@ -558,6 +617,35 @@ export function App() {
     URL.revokeObjectURL(url);
   }, [edges, nodes]);
 
+  const runWorkflow = useCallback(async () => {
+    if (!window.workflowAPI) {
+      setWorkflowRunNotice({
+        main: '当前环境没有工作流执行器',
+        hint: '请在桌面版中运行，若已打开应用请先完全退出再重新启动',
+      });
+      return;
+    }
+    const result = await window.workflowAPI.run({ version: 1, nodes, edges });
+    if (!result.started) {
+      setWorkflowRunNotice({ main: result.message ?? '工作流启动失败', hint: '请检查画布节点是否配置完整' });
+    } else {
+      setWorkflowRunNotice(null);
+      setDebugPanelOpen(true);
+    }
+  }, [edges, nodes]);
+
+  const pauseWorkflow = useCallback(() => {
+    void window.workflowAPI?.pause();
+  }, []);
+
+  const resumeWorkflow = useCallback(() => {
+    void window.workflowAPI?.resume();
+  }, []);
+
+  const stopWorkflow = useCallback(() => {
+    void window.workflowAPI?.stop();
+  }, []);
+
   const importWorkflow = useCallback((file: File) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -637,32 +725,76 @@ export function App() {
           }
         }}
       >
-        <div className="toolbar" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="toolbar__top">
-            <div className="toolbar__title">NoBoWo 节点配置</div>
-            <div className="toolbar__status">
-              <span className={`status-dot status-dot--${isAutosaved ? 'saved' : 'saving'}`} />
-              {isAutosaved ? '已自动保存' : '正在保存...'}
+        <div className="toolbar-left" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="toolbar-row">
+            <div className="toolbar-run-card">
+              <div className="toolbar-run-card__title-row">
+                <div className="toolbar-run-card__title">控制面板</div>
+                <div className="toolbar-run-card__status">
+                  <span className={`status-dot status-dot--${workflowRunState?.status === 'running' ? 'saving' : 'saved'}`} />
+                  {workflowRunState?.status === 'running'
+                    ? '工作流运行中'
+                    : workflowRunState?.status === 'paused'
+                      ? '工作流已暂停'
+                      : '工作流待命'}
+                </div>
+                <div className="toolbar-run-card__progress">
+                  {workflowRunPercent}%
+                </div>
+              </div>
+              {workflowRunNotice && (
+                <div className="toolbar-run-card__notice" role="alert">
+                  <div className="toolbar-run-card__notice-main">{workflowRunNotice.main}</div>
+                  {workflowRunNotice.hint && <div className="toolbar-run-card__notice-hint">{workflowRunNotice.hint}</div>}
+                </div>
+              )}
+              <div className="toolbar-run-card__actions">
+                <button className="toolbar-run-card__primary" onClick={runWorkflow}>运行</button>
+                <button onClick={pauseWorkflow} disabled={workflowRunState?.status !== 'running'}>暂停</button>
+                <button onClick={resumeWorkflow} disabled={workflowRunState?.status !== 'paused'}>继续</button>
+                <button onClick={stopWorkflow} disabled={workflowRunState?.status === 'idle' || workflowRunState?.status === 'done'}>停止</button>
+              </div>
             </div>
-            <button
-              className={`toolbar__debug-btn ${debugPanelOpen ? 'toolbar__debug-btn--active' : ''}`}
-              onClick={() => setDebugPanelOpen((open) => !open)}
-            >
-              调试面板
-            </button>
-            <div className="toolbar__history">
-              <button className="toolbar__icon-button" onClick={zoomOut} aria-label="缩小" title="缩小">−</button>
-              <button className="toolbar__icon-button" onClick={zoomIn} aria-label="放大" title="放大">+</button>
-              <button className="toolbar__icon-button" onClick={undo} disabled={historyRef.current.length === 0} aria-label="后退" title="后退">←</button>
-              <button className="toolbar__icon-button" onClick={redo} disabled={futureRef.current.length === 0} aria-label="前进" title="前进">→</button>
+
+            <div className="toolbar-tools">
+              <div className="toolbar-tools__title">工具配置</div>
+              <div className="toolbar-tools__actions">
+                <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
+                <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
+                <button onClick={() => { setOcrTestPreset(null); setOcrTestOpen(true); }}>OCR 测试台</button>
+                <button onClick={() => setCloudApiManagerOpen(true)}>云端 API</button>
+                <button onClick={() => setStreamManagerOpen(true)}>串流设备</button>
+              </div>
             </div>
-          </div>
-          <div className="toolbar__actions">
-            {(['recognize', 'click', 'input', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
-              <button key={type} onClick={() => addNode(type)}>{type}</button>
-            ))}
-            <button onClick={exportWorkflow}>导出</button>
-            <button onClick={() => fileInputRef.current?.click()}>导入</button>
+
+            <div className="toolbar">
+              <div className="toolbar__top">
+                <div className="toolbar__title">NoBoWo 节点配置</div>
+                <div className="toolbar__status">
+                  <span className={`status-dot status-dot--${isAutosaved ? 'saved' : 'saving'}`} />
+                  {isAutosaved ? '已自动保存' : '正在保存...'}
+                </div>
+                <button
+                  className={`toolbar__debug-btn ${debugPanelOpen ? 'toolbar__debug-btn--active' : ''}`}
+                  onClick={() => setDebugPanelOpen((open) => !open)}
+                >
+                  调试面板
+                </button>
+                <div className="toolbar__history">
+                  <button className="toolbar__icon-button" onClick={zoomOut} aria-label="缩小" title="缩小">−</button>
+                  <button className="toolbar__icon-button" onClick={zoomIn} aria-label="放大" title="放大">+</button>
+                  <button className="toolbar__icon-button" onClick={undo} disabled={historyRef.current.length === 0} aria-label="后退" title="后退">←</button>
+                  <button className="toolbar__icon-button" onClick={redo} disabled={futureRef.current.length === 0} aria-label="前进" title="前进">→</button>
+                </div>
+              </div>
+              <div className="toolbar__actions">
+                {(['recognize', 'click', 'input', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
+                  <button key={type} onClick={() => addNode(type)}>{type}</button>
+                ))}
+                <button onClick={exportWorkflow}>导出</button>
+                <button onClick={() => fileInputRef.current?.click()}>导入</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -677,17 +809,6 @@ export function App() {
             event.target.value = '';
           }}
         />
-
-        <div className="toolbar-tools" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="toolbar-tools__title">工具配置</div>
-          <div className="toolbar-tools__actions">
-            <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
-            <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
-            <button onClick={() => { setOcrTestPreset(null); setOcrTestOpen(true); }}>OCR 测试台</button>
-            <button onClick={() => setCloudApiManagerOpen(true)}>云端 API</button>
-            <button onClick={() => setStreamManagerOpen(true)}>串流设备</button>
-          </div>
-        </div>
 
         <svg className="workflow-edges" width="100%" height="100%">
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${zoom})`}>
@@ -730,12 +851,13 @@ export function App() {
             const isHovered = hoveredNodeId === node.id;
             const isSnapTarget = connecting?.snapTargetId === node.id;
             const isOverlapping = hasNodeOverlap(nodes, node);
+            const nodeRunStatus = workflowRunState?.nodeStates[node.id];
             const zIndex = isSelected ? 40 : isSnapTarget ? 35 : isHovered ? 30 : isOverlapping ? 20 : nodes.indexOf(node);
 
             return (
             <div
               key={node.id}
-              className={`workflow-node workflow-node--${node.type} ${isSelected ? 'workflow-node--selected' : ''} ${isHovered ? 'workflow-node--hovered' : ''} ${isSelected && isHovered ? 'workflow-node--selected-hovered' : ''} ${isSnapTarget ? 'workflow-node--snap-target' : ''} ${isOverlapping ? 'workflow-node--overlap' : ''} ${!node.enabled ? 'workflow-node--disabled' : ''}`}
+              className={`workflow-node workflow-node--${node.type} ${isSelected ? 'workflow-node--selected' : ''} ${isHovered ? 'workflow-node--hovered' : ''} ${isSelected && isHovered ? 'workflow-node--selected-hovered' : ''} ${isSnapTarget ? 'workflow-node--snap-target' : ''} ${isOverlapping ? 'workflow-node--overlap' : ''} ${!node.enabled ? 'workflow-node--disabled' : ''} ${nodeRunStatus ? `workflow-node--run-${nodeRunStatus}` : ''}`}
               style={{ left: node.position.x, top: node.position.y, width: node.width ?? NODE_WIDTH, height: node.height ?? NODE_HEIGHT, zIndex }}
               onMouseDown={(event) => handleNodePointerDown(event, node)}
               onContextMenu={(event) => {

@@ -16,6 +16,10 @@ import type {
   TemplateDefinition,
   TemplateFolder,
   TemplateUpdatePatch,
+  WorkflowDocument,
+  WorkflowRunEvent,
+  WorkflowRunHandle,
+  WorkflowRunSnapshot,
   YoloAnnotation,
   YoloDataset,
   YoloEnvInfo,
@@ -29,6 +33,14 @@ import type {
 declare global {
   interface Window {
     electronAPI: Record<string, never>;
+    workflowAPI?: {
+      getState: () => Promise<WorkflowRunSnapshot>;
+      run: (workflow: WorkflowDocument) => Promise<WorkflowRunHandle>;
+      pause: () => Promise<{ ok: boolean; message?: string }>;
+      resume: (opts?: { retry?: boolean }) => Promise<{ ok: boolean; message?: string }>;
+      stop: () => Promise<{ ok: boolean; message?: string }>;
+      onEvent: (cb: (event: WorkflowRunEvent) => void) => () => void;
+    };
     cloudApiAPI?: {
       list: () => Promise<CloudApiProfile[]>;
       create: (payload: { name: string; baseUrl: string; apiKey: string; defaultPrompt?: string }) => Promise<CloudApiProfile>;

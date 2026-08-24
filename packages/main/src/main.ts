@@ -30,9 +30,11 @@ import type {
   YoloTrainConfig,
   YoloTrainingEvent,
   YoloTrainingState,
+  WorkflowDocument,
 } from '@nobowo/core';
 import { YOLO_CLASS_COLORS } from '@nobowo/core';
 import { runVisionEngine, writeImageToTemp } from './engine';
+import { WorkflowExecutor } from './workflowExecutor';
 
 const createWindow = () => {
   const win = new BrowserWindow({
@@ -2651,6 +2653,24 @@ function registerEngineIpc() {
   );
 }
 
+// ===== 工作流执行引擎 =====
+
+const workflowExecutor = new WorkflowExecutor();
+
+function registerWorkflowIpc() {
+  workflowExecutor.onEvent((event) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('workflow:event', event);
+    }
+  });
+
+  ipcMain.handle('workflow:getState', async () => workflowExecutor.getSnapshot());
+  ipcMain.handle('workflow:run', async (_event, workflow: WorkflowDocument) => workflowExecutor.run(workflow));
+  ipcMain.handle('workflow:pause', async () => workflowExecutor.pause());
+  ipcMain.handle('workflow:resume', async (_event, opts?: { retry?: boolean }) => workflowExecutor.resume(opts));
+  ipcMain.handle('workflow:stop', async () => workflowExecutor.stop());
+}
+
 app.whenReady().then(() => {
   registerCloudApiIpc();
   registerStreamIpc();
@@ -2658,6 +2678,7 @@ app.whenReady().then(() => {
   registerTemplateIpc();
   registerYoloIpc();
   registerEngineIpc();
+  registerWorkflowIpc();
   createWindow();
 
   app.on('activate', () => {

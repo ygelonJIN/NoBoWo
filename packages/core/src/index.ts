@@ -339,6 +339,71 @@ export type EngineRunResult = {
 };
 
 
+// ===== 工作流执行引擎 =====
+
+export type WorkflowRunStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'done' | 'error';
+
+export type NodeRunStatus = 'pending' | 'running' | 'ok' | 'fail' | 'skipped';
+
+export type RecognizeStrategyKey = 'coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi';
+
+export type RecognizeStrategyRun = {
+  key: RecognizeStrategyKey;
+  status: 'hit' | 'miss' | 'error' | 'skipped';
+  confidence?: number;
+  message?: string;
+  x?: number;
+  y?: number;
+  elapsedMs?: number;
+};
+
+export type NodeRunResult = {
+  nodeId: string;
+  status: NodeRunStatus;
+  elapsedMs?: number;
+  message?: string;
+  /** recognize 命中坐标（也用于 click 节点回放） */
+  hitCoords?: { x: number; y: number };
+  /** recognize 各策略执行明细 */
+  strategies?: RecognizeStrategyRun[];
+  /** screenshot 节点捕获的画面 dataURL */
+  frame?: string;
+  /** loop 节点实际迭代次数 */
+  loopCount?: number;
+  /** if 节点走的分支 */
+  branch?: 'true' | 'false';
+  /** 命中使用的策略 key */
+  strategy?: RecognizeStrategyKey;
+};
+
+export type WorkflowRunEvent =
+  | { t: 'start'; runId: string; nodeCount: number; message?: string }
+  | { t: 'nodeStart'; runId: string; nodeId: string }
+  | { t: 'nodeEnd'; runId: string; nodeId: string; result: NodeRunResult }
+  | { t: 'log'; runId: string; level: 'info' | 'warn' | 'error' | 'debug'; message: string; nodeId?: string }
+  | { t: 'pause'; runId: string; nodeId?: string; message?: string }
+  | { t: 'resume'; runId: string }
+  | { t: 'stopped'; runId: string; message?: string }
+  | {
+      t: 'done';
+      runId: string;
+      summary: { ok: boolean; nodeCount: number; failedNodeIds: string[]; durationMs: number; message?: string };
+    };
+
+export type WorkflowRunSnapshot = {
+  runId: string | null;
+  status: WorkflowRunStatus;
+  startedAt: number | null;
+  nodeStates: Record<string, NodeRunStatus>;
+  nodeResults: Record<string, NodeRunResult>;
+};
+
+export type WorkflowRunHandle = {
+  started: boolean;
+  message?: string;
+  runId?: string;
+};
+
 export const defaultWorkflowDocument = (): WorkflowDocument => ({
   version: 1,
   nodes: [],

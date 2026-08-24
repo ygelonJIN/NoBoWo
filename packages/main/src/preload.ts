@@ -6,6 +6,10 @@ import type {
   TemplateDefinition,
   TemplateFolder,
   TemplateUpdatePatch,
+  WorkflowDocument,
+  WorkflowRunEvent,
+  WorkflowRunHandle,
+  WorkflowRunSnapshot,
   YoloAnnotation,
   YoloTrainConfig,
   YoloTrainingEvent,
@@ -14,6 +18,20 @@ import type {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // 后续扩展：执行引擎通信、文件操作等
+});
+
+contextBridge.exposeInMainWorld('workflowAPI', {
+  getState: (): Promise<WorkflowRunSnapshot> => ipcRenderer.invoke('workflow:getState'),
+  run: (workflow: WorkflowDocument): Promise<WorkflowRunHandle> => ipcRenderer.invoke('workflow:run', workflow),
+  pause: (): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke('workflow:pause'),
+  resume: (opts?: { retry?: boolean }): Promise<{ ok: boolean; message?: string }> =>
+    ipcRenderer.invoke('workflow:resume', opts),
+  stop: (): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke('workflow:stop'),
+  onEvent: (cb: (event: WorkflowRunEvent) => void): (() => void) => {
+    const listener = (_event: unknown, data: WorkflowRunEvent) => cb(data);
+    ipcRenderer.on('workflow:event', listener);
+    return () => ipcRenderer.removeListener('workflow:event', listener);
+  },
 });
 
 contextBridge.exposeInMainWorld('cloudApiAPI', {

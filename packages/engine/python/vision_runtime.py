@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NoBoWo 视觉运行时 —— 模板匹配 / YOLO 推理
+"""NoBoWo 视觉 + 输入运行时 —— 模板匹配 / YOLO 推理 / 键鼠输入
 
 用法: python3 vision_runtime.py <command> <config.json>
 
@@ -7,6 +7,7 @@
   check    检查依赖（cv2 / torch / yolox）
   template OpenCV 模板匹配
   yolo     YOLOX 模型推理
+  input    键鼠输入（pyautogui：click / type / key / scroll / move）
 
 输出: stdout 每行一个 JSON 事件，状态统一为 {"t":"done","ok":bool,...}
 """
@@ -223,6 +224,63 @@ def run_yolo(cfg):
     return 0
 
 
+def run_input(cfg):
+    """键鼠输入：click / type / key / scroll / move（pyautogui）"""
+    try:
+        import pyautogui
+    except Exception as exc:
+        return fail("input", "无法加载 pyautogui，请先安装：pip install pyautogui")
+
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = float(cfg.get("pause", 0.05))
+    action = cfg.get("action", "")
+
+    try:
+        if action == "click":
+            x = float(cfg["x"]) if "x" in cfg else None
+            y = float(cfg["y"]) if "y" in cfg else None
+            button = cfg.get("button", "left")
+            clicks = int(cfg.get("clicks", 1))
+            duration = float(cfg.get("duration", 0))
+            if x is not None and y is not None:
+                pyautogui.click(x, y, clicks=clicks, interval=0.05, button=button, duration=duration)
+            else:
+                pyautogui.click(clicks=clicks, interval=0.05, button=button)
+        elif action == "type":
+            text = str(cfg.get("text", ""))
+            interval = float(cfg.get("interval", 0.02))
+            pyautogui.write(text, interval=interval)
+        elif action == "key":
+            keys = str(cfg.get("keys", ""))
+            mode = cfg.get("mode", "tap")
+            if not keys:
+                return fail("input", "按键内容为空")
+            if mode == "hold":
+                pyautogui.keyDown(keys)
+            elif mode == "release":
+                pyautogui.keyUp(keys)
+            else:
+                pyautogui.press(keys)
+        elif action == "scroll":
+            amount = int(cfg.get("amount", 0))
+            direction = cfg.get("direction", "down")
+            if direction in ("left", "right"):
+                pyautogui.hscroll(amount if direction == "right" else -amount)
+            else:
+                pyautogui.scroll(amount if direction == "up" else -amount)
+        elif action == "move":
+            x = float(cfg["x"])
+            y = float(cfg["y"])
+            pyautogui.moveTo(x, y, duration=float(cfg.get("duration", 0.2)))
+        else:
+            return fail("input", "未知动作：{0}".format(action))
+    except Exception as exc:
+        return fail("input", "输入执行失败：{0}".format(traceback.format_exc()))
+
+    emit(t="done", command="input", ok=True, action=action, message="输入执行完成")
+    return 0
+
+
 def main():
     if len(sys.argv) < 3:
         emit(t="error", message="用法: vision_runtime.py <command> <config.json>")
@@ -241,6 +299,8 @@ def main():
         return run_template(cfg)
     if command == "yolo":
         return run_yolo(cfg)
+    if command == "input":
+        return run_input(cfg)
     emit(t="error", message="未知命令：{0}".format(command))
     return 2
 
