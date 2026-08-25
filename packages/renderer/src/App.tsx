@@ -9,7 +9,7 @@ import {
   type WorkflowNode,
 } from '@nobowo/core';
 import { PropertiesPanel } from './components/PropertiesPanel';
-import { TemplateManagerModal } from './components/TemplateManagerModal';
+import { TemplateManagerModal, GlobalEnvModal } from './components/TemplateManagerModal';
 import { YoloManagerModal } from './components/YoloManagerModal';
 import { CloudApiManagerModal } from './components/CloudApiManagerModal';
 import { OcrTestModal } from './components/OcrTestModal';
@@ -202,6 +202,7 @@ export function App() {
   const [clipboardNode, setClipboardNode] = useState<WorkflowNode | null>(null);
   const [isAutosaved, setIsAutosaved] = useState(true);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [globalEnvOpen, setGlobalEnvOpen] = useState(false);
   const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [templateVersion, setTemplateVersion] = useState(0);
   const [yoloManagerOpen, setYoloManagerOpen] = useState(false);
@@ -219,7 +220,9 @@ export function App() {
   const [streamVersion, setStreamVersion] = useState(0);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [workflowRunState, setWorkflowRunState] = useState<WorkflowRunSnapshot | null>(null);
+  const [workflowRunLogs, setWorkflowRunLogs] = useState<string[]>([]);
   const [workflowRunNotice, setWorkflowRunNotice] = useState<{ main: string; hint?: string } | null>(null);
+  const nodesRef = useRef(nodes);
   const [viewport, setViewport] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [panelHeight, setPanelHeight] = useState(0);
@@ -245,12 +248,28 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
     if (!window.workflowAPI) return;
     let active = true;
     window.workflowAPI.getState().then((state) => {
       if (active) setWorkflowRunState(state);
     }).catch(() => {});
     const off = window.workflowAPI.onEvent((event) => {
+      if (event.t === 'start') {
+        setWorkflowRunLogs([`[${new Date().toLocaleTimeString()}] 开始运行（${event.nodeCount} 个节点）`]);
+      } else if (event.t === 'log') {
+        setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] ${event.message}`]);
+      } else if (event.t === 'nodeStart') {
+        const node = nodesRef.current.find((item) => item.id === event.nodeId);
+        setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] 执行节点：${node?.title ?? event.nodeId}`]);
+      } else if (event.t === 'nodeEnd') {
+        const node = nodesRef.current.find((item) => item.id === event.nodeId);
+        const message = event.result.message ?? event.result.status;
+        setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] ${node?.title ?? event.nodeId} → ${message}`]);
+      }
       setWorkflowRunState((current) => {
         const base = current ?? { runId: null, status: 'idle', startedAt: null, nodeStates: {}, nodeResults: {} };
         if (event.t === 'start') {
@@ -618,6 +637,7 @@ export function App() {
   }, [edges, nodes]);
 
   const runWorkflow = useCallback(async () => {
+    setDebugPanelOpen(true);
     if (!window.workflowAPI) {
       setWorkflowRunNotice({
         main: '当前环境没有工作流执行器',
@@ -627,10 +647,9 @@ export function App() {
     }
     const result = await window.workflowAPI.run({ version: 1, nodes, edges });
     if (!result.started) {
-      setWorkflowRunNotice({ main: result.message ?? '工作流启动失败', hint: '请检查画布节点是否配置完整' });
+      setWorkflowRunNotice({ main: result.message ?? '工作流启动失败', hint: '已有工作流在执行中，可在控制面板点击「继续」或「停止」' });
     } else {
       setWorkflowRunNotice(null);
-      setDebugPanelOpen(true);
     }
   }, [edges, nodes]);
 
@@ -742,12 +761,7 @@ export function App() {
                   {workflowRunPercent}%
                 </div>
               </div>
-              {workflowRunNotice && (
-                <div className="toolbar-run-card__notice" role="alert">
-                  <div className="toolbar-run-card__notice-main">{workflowRunNotice.main}</div>
-                  {workflowRunNotice.hint && <div className="toolbar-run-card__notice-hint">{workflowRunNotice.hint}</div>}
-                </div>
-              )}
+              
               <div className="toolbar-run-card__actions">
                 <button className="toolbar-run-card__primary" onClick={runWorkflow}>运行</button>
                 <button onClick={pauseWorkflow} disabled={workflowRunState?.status !== 'running'}>暂停</button>
@@ -759,6 +773,7 @@ export function App() {
             <div className="toolbar-tools">
               <div className="toolbar-tools__title">工具配置</div>
               <div className="toolbar-tools__actions">
+                <button onClick={() => setGlobalEnvOpen(true)}>全局环境依赖</button>
                 <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
                 <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
                 <button onClick={() => { setOcrTestPreset(null); setOcrTestOpen(true); }}>OCR 测试台</button>
@@ -976,9 +991,18 @@ export function App() {
             selectedNodeId={selectedNodeId}
             onFocusNode={(nodeId) => setSelectedNodeId(nodeId)}
             onClose={() => setDebugPanelOpen(false)}
+            notice={workflowRunNotice}
+            workflowState={workflowRunState}
+            logs={workflowRunLogs}
           />
         )}
       </div>
+      {globalEnvOpen && (
+        <GlobalEnvModal
+          onClose={() => setGlobalEnvOpen(false)}
+          onChanged={() => setTemplateVersion((version) => version + 1)}
+        />
+      )}
       {templateManagerOpen && (
         <TemplateManagerModal
           onClose={() => setTemplateManagerOpen(false)}

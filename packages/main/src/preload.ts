@@ -32,6 +32,11 @@ contextBridge.exposeInMainWorld('workflowAPI', {
     ipcRenderer.on('workflow:event', listener);
     return () => ipcRenderer.removeListener('workflow:event', listener);
   },
+  onOpenDebugPanel: (cb: () => void): (() => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('workflow:ui:openDebugPanel', listener);
+    return () => ipcRenderer.removeListener('workflow:ui:openDebugPanel', listener);
+  },
 });
 
 contextBridge.exposeInMainWorld('cloudApiAPI', {
@@ -123,6 +128,10 @@ contextBridge.exposeInMainWorld('yoloAPI', {
   setYoloxPath: (path: string) => ipcRenderer.invoke('yolo:setYoloxPath', path),
   pickYoloxPath: () => ipcRenderer.invoke('yolo:pickYoloxPath'),
   installYoloxDeps: () => ipcRenderer.invoke('yolo:installYoloxDeps'),
+  getPipMirror: () => ipcRenderer.invoke('yolo:getPipMirror'),
+  setPipMirror: (url: string | null) => ipcRenderer.invoke('yolo:setPipMirror', url),
+  getGithubProxy: () => ipcRenderer.invoke('yolo:getGithubProxy'),
+  setGithubProxy: (url: string | null) => ipcRenderer.invoke('yolo:setGithubProxy', url),
   getWeightsInfo: () => ipcRenderer.invoke('yolo:getWeightsInfo'),
   downloadWeights: (modelName: string) => ipcRenderer.invoke('yolo:downloadWeights', modelName),
   startTraining: (cfg: YoloTrainConfig, datasetId: string) =>

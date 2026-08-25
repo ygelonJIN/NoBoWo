@@ -113,6 +113,10 @@ declare global {
       setYoloxPath: (path: string) => Promise<void>;
       pickYoloxPath: () => Promise<string | null>;
       installYoloxDeps: () => Promise<{ started: boolean; message?: string }>;
+      getPipMirror: () => Promise<string | null>;
+      setPipMirror: (url: string | null) => Promise<void>;
+      getGithubProxy: () => Promise<string | null>;
+      setGithubProxy: (url: string | null) => Promise<void>;
       getWeightsInfo: () => Promise<{ name: string; present: boolean; sizeBytes: number }[]>;
       downloadWeights: (modelName: string) => Promise<{ started: boolean; message?: string }>;
       startTraining: (cfg: YoloTrainConfig, datasetId: string) => Promise<{ started: boolean; message?: string }>;

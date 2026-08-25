@@ -13,8 +13,11 @@
 """
 import json
 import os
+import subprocess
 import sys
+import time
 import traceback
+from typing import Optional, Tuple
 
 
 def emit(**kw):
@@ -30,7 +33,7 @@ def fail(command, message):
 
 
 def run_check(cfg):
-    info = {"cv2": None, "torch": None, "yolox": None, "cuda": False, "mps": False, "device": "none"}
+    info = {"cv2": None, "torch": None, "yolox": None, "pyautogui": None, "cuda": False, "mps": False, "device": "none"}
     try:
         import cv2
         info["cv2"] = cv2.__version__
@@ -43,6 +46,11 @@ def run_check(cfg):
         mps = getattr(torch.backends, "mps", None)
         info["mps"] = bool(mps is not None and mps.is_available())
         info["device"] = "cuda" if info["cuda"] else ("mps" if info["mps"] else "cpu")
+    except Exception:
+        pass
+    try:
+        import pyautogui
+        info["pyautogui"] = getattr(pyautogui, "__version__", "?")
     except Exception:
         pass
     yolox_path = cfg.get("yoloxPath")
@@ -224,8 +232,173 @@ def run_yolo(cfg):
     return 0
 
 
+def _windows():
+    try:
+        import Quartz
+    except Exception:
+        return []
+    options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    return Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
+
+
+def _window_info(win):
+    import Quartz
+    owner = str(win.get(Quartz.kCGWindowOwnerName, ""))
+    name = str(win.get(Quartz.kCGWindowName, ""))
+    bounds = win.get(Quartz.kCGWindowBounds, {}) or {}
+    return {
+        "id": int(win.get(Quartz.kCGWindowNumber, 0) or 0),
+        "pid": win.get(Quartz.kCGWindowOwnerPID),
+        "owner": owner,
+        "name": name,
+        "title": f"{owner} {name}".strip(),
+        "x": float(bounds.get("X", 0)),
+        "y": float(bounds.get("Y", 0)),
+        "width": float(bounds.get("Width", 0)),
+        "height": float(bounds.get("Height", 0)),
+        "onscreen": bool(win.get("kCGWindowIsOnscreen", False)),
+        "alpha": float(win.get("kCGWindowAlpha", 1.0)),
+        "layer": int(win.get("kCGWindowLayer", 0)),
+    }
+
+
+def _window_info_by_id(window_id):
+    """按 CGWindowNumber 精确定位窗口（与 desktopCapturer 截图同一窗口）"""
+    if window_id is None:
+        return None
+    try:
+        target = int(window_id)
+    except (TypeError, ValueError):
+        return None
+    for win in _windows():
+        num = win.get("kCGWindowNumber", 0) or 0
+        if int(num) == target:
+            return _window_info(win)
+    return None
+
+
+def _window_info_by_hint(hint: str):
+    target = (hint or "").strip().lower()
+    if not target:
+        return None
+    matches = [_window_info(win) for win in _windows()]
+    matches = [
+        item for item in matches
+        if target in item["title"].lower() or target in item["name"].lower()
+    ]
+    if not matches:
+        return None
+    # 优先取不在后台被遮挡、面积最大的窗口
+    matches.sort(key=lambda item: (item["onscreen"], item["layer"], item["width"] * item["height"]), reverse=True)
+    return matches[0]
+
+
+def _activate_window(info) -> bool:
+    if not info or not info.get("pid"):
+        return False
+    pid = int(info["pid"])
+    title = str(info.get("title") or info.get("name") or info.get("owner") or "")
+    activated = False
+
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true',
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        activated = True
+    except Exception:
+        pass
+
+    try:
+        import AppKit
+        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app is not None:
+            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+            activated = True
+    except Exception:
+        pass
+
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                f'tell application "{title}" to activate',
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    return activated
+
+
+def _display_bounds(display_id):
+    """取指定显示器的 Quartz 全局坐标边界（与 CGEvent 点击同一坐标系）"""
+    try:
+        import Quartz
+    except Exception:
+        return None
+    try:
+        did = int(float(str(display_id)))
+    except (TypeError, ValueError):
+        did = Quartz.CGMainDisplayID()
+    bounds = Quartz.CGDisplayBounds(did)
+    return {
+        "x": float(bounds.origin.x),
+        "y": float(bounds.origin.y),
+        "width": float(bounds.size.width),
+        "height": float(bounds.size.height),
+    }
+
+
+def _mouse_down_up(x, y, button="left"):
+    try:
+        import Quartz
+    except Exception:
+        return False
+    btn_map = {
+        "left": Quartz.kCGMouseButtonLeft,
+        "right": Quartz.kCGMouseButtonRight,
+        "middle": Quartz.kCGMouseButtonCenter,
+    }
+    ev_down_map = {
+        "left": Quartz.kCGEventLeftMouseDown,
+        "right": Quartz.kCGEventRightMouseDown,
+        "middle": Quartz.kCGEventOtherMouseDown,
+    }
+    ev_up_map = {
+        "left": Quartz.kCGEventLeftMouseUp,
+        "right": Quartz.kCGEventRightMouseUp,
+        "middle": Quartz.kCGEventOtherMouseUp,
+    }
+    btn = btn_map.get(button, Quartz.kCGMouseButtonLeft)
+    down = Quartz.CGEventCreateMouseEvent(None, ev_down_map.get(button, Quartz.kCGEventLeftMouseDown), (x, y), btn)
+    up = Quartz.CGEventCreateMouseEvent(None, ev_up_map.get(button, Quartz.kCGEventLeftMouseUp), (x, y), btn)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+    return True
+
+
+def _mouse_position():
+    try:
+        import Quartz
+    except Exception:
+        return None
+    pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+    return {"x": float(pos.x), "y": float(pos.y)}
+
+
 def run_input(cfg):
-    """键鼠输入：click / type / key / scroll / move（pyautogui）"""
+    """键鼠输入：click / click_window / type / key / scroll / move（pyautogui）"""
     try:
         import pyautogui
     except Exception as exc:
@@ -236,7 +409,67 @@ def run_input(cfg):
     action = cfg.get("action", "")
 
     try:
-        if action == "click":
+        if action == "click_window":
+            window_id = cfg.get("windowId")
+            hint = str(cfg.get("windowHint", ""))
+            # 优先按窗口 ID 精确定位（与截图同一窗口），再退回标题关键字
+            matched_by = "id"
+            info = _window_info_by_id(window_id)
+            if not info:
+                matched_by = "hint"
+                info = _window_info_by_hint(hint)
+            if not info:
+                return fail("input", "未找到目标窗口或窗口不在前台可见状态")
+            if not _activate_window(info):
+                return fail("input", "无法激活目标窗口，请确认已授予辅助功能权限")
+            time.sleep(0.4)
+            rel_x = float(cfg.get("relX", 0.5))
+            rel_y = float(cfg.get("relY", 0.5))
+            x = info["x"] + info["width"] * rel_x
+            y = info["y"] + info["height"] * rel_y
+            button = cfg.get("button", "left")
+            clicks = int(cfg.get("clicks", 1))
+            duration = float(cfg.get("duration", 0))
+            # 输出坐标换算过程，方便排查坐标系是否错位
+            try:
+                size = pyautogui.size()
+                screen_w, screen_h = int(size.width), int(size.height)
+            except Exception:
+                screen_w, screen_h = 0, 0
+            emit(
+                t="done", command="input", ok=True, action=action,
+                window=info, matchedBy=matched_by, windowId=info["id"],
+                rel={"x": rel_x, "y": rel_y},
+                target={"x": x, "y": y},
+                screenSize={"width": screen_w, "height": screen_h},
+                message="窗口已激活并计算点击坐标",
+            )
+            if not _mouse_down_up(x, y, button=button):
+                return fail("input", "Quartz 鼠标事件发送失败")
+            # 回读鼠标实际落点，验证坐标系是否一致
+            actual = _mouse_position()
+            emit(
+                t="done", command="input", ok=True, action=action,
+                window=info, matchedBy=matched_by, windowId=info["id"],
+                target={"x": x, "y": y}, actual=actual,
+                message="点击完成，实际鼠标位置 {0}".format(actual),
+            )
+            return 0
+        elif action == "click_screen":
+            db = _display_bounds(cfg.get("displayId"))
+            if not db or db["width"] <= 0 or db["height"] <= 0:
+                return fail("input", "无法获取显示器边界，请确认屏幕录制权限已授权")
+            rel_x = float(cfg.get("relX", 0.5))
+            rel_y = float(cfg.get("relY", 0.5))
+            x = db["x"] + db["width"] * rel_x
+            y = db["y"] + db["height"] * rel_y
+            button = cfg.get("button", "left")
+            clicks = int(cfg.get("clicks", 1))
+            duration = float(cfg.get("duration", 0))
+            emit(t="done", command="input", ok=True, action=action, display=db, target={"x": x, "y": y}, message="屏幕点击坐标已计算")
+            pyautogui.click(x, y, clicks=clicks, interval=0.05, button=button, duration=duration)
+            return 0
+        elif action == "click":
             x = float(cfg["x"]) if "x" in cfg else None
             y = float(cfg["y"]) if "y" in cfg else None
             button = cfg.get("button", "left")
@@ -274,7 +507,7 @@ def run_input(cfg):
             pyautogui.moveTo(x, y, duration=float(cfg.get("duration", 0.2)))
         else:
             return fail("input", "未知动作：{0}".format(action))
-    except Exception as exc:
+    except Exception:
         return fail("input", "输入执行失败：{0}".format(traceback.format_exc()))
 
     emit(t="done", command="input", ok=True, action=action, message="输入执行完成")

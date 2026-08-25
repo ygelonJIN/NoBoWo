@@ -1,5 +1,6 @@
-import { app, desktopCapturer } from 'electron';
+import { app, desktopCapturer, screen } from 'electron';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -138,6 +139,18 @@ async function ensureOcrLangData(): Promise<{ langPath: string; gzip: boolean }>
 type RunContext = {
   lastFrame: string | null;
   lastRecognize: { x: number; y: number; nodeId: string; strategy?: RecognizeStrategyKey } | null;
+  lastCapture: {
+    source: 'screen' | 'window' | 'stream';
+    originX: number;
+    originY: number;
+    width: number;
+    height: number;
+    scaleX: number;
+    scaleY: number;
+    windowHint?: string;
+    windowId?: number;
+    displayId?: string;
+  } | null;
 };
 
 type EvalContext = {
@@ -176,6 +189,60 @@ type CloudApiStrategyConfig = {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+function parseBounds(raw: string): { x: number; y: number; width: number; height: number } | null {
+  const nums = raw.match(/-?\d+(?:\.\d+)?/g);
+  if (!nums || nums.length < 4) return null;
+  const [x, y, width, height] = nums.slice(-4).map(Number);
+  if ([x, y, width, height].some((n) => !Number.isFinite(n))) return null;
+  return { x, y, width, height };
+}
+
+function getMacWindowBoundsByHint(hint?: string): { x: number; y: number; width: number; height: number } | null {
+  const search = hint?.trim();
+  if (!search) return null;
+  const script = `set targetHint to ${JSON.stringify(search)}
+ tell application "System Events"
+   repeat with p in application processes
+     repeat with w in windows of p
+       try
+         set wn to name of w
+         if wn contains targetHint then
+           set pos to position of w
+           set sz to size of w
+           return (item 1 of pos as text) & "," & (item 2 of pos as text) & "," & (item 1 of sz as text) & "," & (item 2 of sz as text)
+         end if
+       end try
+     end repeat
+   end repeat
+ end tell`;
+  const res = spawnSync('osascript', ['-e', script], { encoding: 'utf8' });
+  if (res.status !== 0) return null;
+  const out = String(res.stdout ?? '').trim();
+  return parseBounds(out);
+}
+
+function activateMacWindowByHint(hint?: string): boolean {
+  const search = hint?.trim();
+  if (!search) return false;
+  const script = `set targetHint to ${JSON.stringify(search)}
+ tell application "System Events"
+   repeat with p in application processes
+     repeat with w in windows of p
+       try
+         set wn to name of w
+         if wn contains targetHint then
+           tell p to set frontmost to true
+           perform action "AXRaise" of w
+           return "ok"
+         end if
+       end try
+     end repeat
+   end repeat
+ end tell`;
+  const res = spawnSync('osascript', ['-e', script], { encoding: 'utf8' });
+  return res.status === 0 && String(res.stdout ?? '').includes('ok');
+}
+
 export class WorkflowExecutor {
   private workflow: WorkflowDocument | null = null;
   private runId: string | null = null;
@@ -184,9 +251,10 @@ export class WorkflowExecutor {
   private paused: 'none' | 'user' | 'fail' = 'none';
   private stopped = false;
   private resumeRetry = false;
+  private runGeneration = 0;
   private pauseWaiters: Array<() => void> = [];
   private currentNodeId: string | null = null;
-  private context: RunContext = { lastFrame: null, lastRecognize: null };
+  private context: RunContext = { lastFrame: null, lastRecognize: null, lastCapture: null };
   private nodeStates: Record<string, NodeRunStatus> = {};
   private nodeResults: Record<string, NodeRunResult> = {};
   private onEventCallback: ((event: WorkflowRunEvent) => void) | null = null;
@@ -210,11 +278,20 @@ export class WorkflowExecutor {
   }
 
   async run(workflow: WorkflowDocument): Promise<WorkflowRunHandle> {
-    if (this.status === 'running' || this.status === 'paused') {
-      return { started: false, message: '已有工作流正在运行或暂停中' };
-    }
     if (!Array.isArray(workflow?.nodes) || workflow.nodes.length === 0) {
       return { started: false, message: '工作流为空，请先添加节点' };
+    }
+    // 点击运行 = 重新开始：先终止任何进行中的旧运行
+    this.runGeneration += 1;
+    const generation = this.runGeneration;
+    if (this.status === 'running' || this.status === 'paused') {
+      const oldRunId = this.runId;
+      this.stopped = true;
+      this.paused = 'none';
+      const waiters = this.pauseWaiters.splice(0);
+      for (const resolve of waiters) resolve();
+      this.status = 'stopped';
+      this.emit({ t: 'stopped', runId: oldRunId!, message: '已由新的运行替代' });
     }
     this.workflow = workflow;
     this.runId = randomUUID();
@@ -225,12 +302,12 @@ export class WorkflowExecutor {
     this.resumeRetry = false;
     this.pauseWaiters = [];
     this.currentNodeId = null;
-    this.context = { lastFrame: null, lastRecognize: null };
+    this.context = { lastFrame: null, lastRecognize: null, lastCapture: null };
     this.nodeStates = {};
     this.nodeResults = {};
 
     this.emit({ t: 'start', runId: this.runId, nodeCount: workflow.nodes.filter((n) => n.enabled !== false).length });
-    void this.execute();
+    void this.execute(generation);
     return { started: true, runId: this.runId };
   }
 
@@ -267,10 +344,11 @@ export class WorkflowExecutor {
 
   // ===== 主循环 =====
 
-  private async execute(): Promise<void> {
+  private async execute(generation: number): Promise<void> {
     const runId = this.runId!;
     const workflow = this.workflow!;
     const startedAt = this.startedAt ?? Date.now();
+    const isCurrent = () => this.runGeneration === generation && !this.stopped;
 
     try {
       const hasIncoming = new Set(workflow.edges.map((edge) => edge.target));
@@ -279,10 +357,11 @@ export class WorkflowExecutor {
         entries.length > 0 ? entries : [workflow.nodes[0]];
 
       for (const entry of orderedEntries) {
-        if (this.stopped || this.status !== 'running') break;
-        await this.executeChain(entry.id, null);
+        if (!isCurrent()) break;
+        await this.executeChain(entry.id, null, generation);
       }
     } catch (err) {
+      if (this.runGeneration !== generation) return;
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ t: 'log', runId, level: 'error', message: `工作流执行出错：${message}` });
       this.status = 'error';
@@ -302,6 +381,7 @@ export class WorkflowExecutor {
       return;
     }
 
+    if (this.runGeneration !== generation) return;
     if (this.stopped || this.status === 'stopped') {
       this.status = 'stopped';
       this.emit({ t: 'stopped', runId, message: '工作流已停止' });
@@ -329,27 +409,32 @@ export class WorkflowExecutor {
   }
 
   /** 暂停检查点：用户暂停时在此等待，返回 false 表示应当停止 */
-  private async checkpoint(): Promise<boolean> {
-    if (this.stopped) return false;
-    while (this.paused === 'user' && !this.stopped) {
+  private async checkpoint(generation: number): Promise<boolean> {
+    if (this.runGeneration !== generation || this.stopped) return false;
+    while (this.paused === 'user' && !this.stopped && this.runGeneration === generation) {
       await new Promise<void>((resolve) => this.pauseWaiters.push(resolve));
     }
-    return !this.stopped;
+    return this.runGeneration === generation && !this.stopped;
   }
 
-  private async waitForResumeOrStop(): Promise<void> {
-    while ((this.paused === 'user' || this.paused === 'fail') && !this.stopped) {
+  private async waitForResumeOrStop(generation: number): Promise<void> {
+    while (
+      (this.paused === 'user' || this.paused === 'fail') &&
+      !this.stopped &&
+      this.runGeneration === generation
+    ) {
       await new Promise<void>((resolve) => this.pauseWaiters.push(resolve));
     }
   }
 
   /** 沿单链执行：loopBackId 指回循环节点时表示一次循环体迭代结束 */
-  private async executeChain(startNodeId: string, loopBackId: string | null): Promise<void> {
+  private async executeChain(startNodeId: string, loopBackId: string | null, generation: number): Promise<void> {
     const runId = this.runId!;
+    const isCurrent = () => this.runGeneration === generation && !this.stopped;
     let current = startNodeId;
 
-    while (current && !this.stopped) {
-      if (!(await this.checkpoint())) return;
+    while (current && isCurrent()) {
+      if (!(await this.checkpoint(generation))) return;
       const node = this.workflow!.nodes.find((item) => item.id === current);
       if (!node) {
         this.emit({ t: 'log', runId, level: 'warn', message: `找不到节点：${current}` });
@@ -376,7 +461,7 @@ export class WorkflowExecutor {
       const startedAt = Date.now();
       let result: NodeRunResult;
       try {
-        result = await this.executeNode(node);
+        result = await this.executeNode(node, generation);
       } catch (err) {
         result = { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
       }
@@ -390,8 +475,8 @@ export class WorkflowExecutor {
         this.paused = 'fail';
         this.status = 'paused';
         this.emit({ t: 'pause', runId, nodeId: node.id, message: result.message ?? '节点执行失败' });
-        await this.waitForResumeOrStop();
-        if (this.stopped) return;
+        await this.waitForResumeOrStop(generation);
+        if (!isCurrent()) return;
         if (this.resumeRetry) {
           current = node.id;
           continue;
@@ -425,7 +510,7 @@ export class WorkflowExecutor {
 
   // ===== 节点执行 =====
 
-  private async executeNode(node: WorkflowNode): Promise<NodeRunResult> {
+  private async executeNode(node: WorkflowNode, generation: number): Promise<NodeRunResult> {
     const runId = this.runId!;
     const log = (level: 'info' | 'warn' | 'error', message: string) =>
       this.emit({ t: 'log', runId, level, message, nodeId: node.id });
@@ -436,10 +521,54 @@ export class WorkflowExecutor {
         if (!rec) {
           return { nodeId: node.id, status: 'fail', message: '没有可用的识别坐标，请先执行一个 recognize 节点' };
         }
-        log('info', `点击 (${rec.x}, ${rec.y})`);
-        const res = await runVisionEngine('input', { action: 'click', x: rec.x, y: rec.y }, 30000);
+        const capture = this.context.lastCapture;
+        if (!capture) {
+          return { nodeId: node.id, status: 'fail', message: '没有可用的截图上下文，请先执行 screenshot 节点' };
+        }
+        const relX = capture.width > 0 ? Math.min(1, Math.max(0, rec.x / capture.width)) : 0.5;
+        const relY = capture.height > 0 ? Math.min(1, Math.max(0, rec.y / capture.height)) : 0.5;
+
+        if (capture.windowId || capture.windowHint) {
+          const res = await runVisionEngine(
+            'input',
+            {
+              action: 'click_window',
+              windowId: capture.windowId,
+              windowHint: capture.windowHint,
+              relX,
+              relY,
+            },
+            30000,
+          );
+          if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
+          const win = res.window as Record<string, unknown> | undefined;
+          const target = res.target as Record<string, unknown> | undefined;
+          const actual = res.actual as Record<string, unknown> | undefined;
+          const screenSize = res.screenSize as Record<string, unknown> | undefined;
+          const matchedBy = res.matchedBy === 'hint' ? '标题回退' : res.matchedBy === 'id' ? '窗口ID精确' : '?';
+          const winLabel = win ? `${(win.title as string) ?? '?'} #${(win.id as number) ?? '?'} (${win.x as number},${win.y as number} ${win.width as number}×${win.height as number})` : '?';
+          const coordLabel = target ? `(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : `(${relX.toFixed(3)}, ${relY.toFixed(3)})`;
+          const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
+          log('info', `已前置并点击窗口 "${winLabel}" → ${coordLabel}${actualLabel}（匹配方式：${matchedBy}）`);
+          return { nodeId: node.id, status: 'ok', hitCoords: { x: rec.x, y: rec.y }, message: `点击窗口 ${winLabel} → ${coordLabel}${actualLabel}（匹配方式：${matchedBy}）` };
+        }
+
+        if (capture.displayId) {
+          const res = await runVisionEngine(
+            'input',
+            { action: 'click_screen', displayId: capture.displayId, relX, relY },
+            30000,
+          );
+          if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
+          return { nodeId: node.id, status: 'ok', hitCoords: { x: rec.x, y: rec.y }, message: `点击屏幕 (${relX.toFixed(3)}, ${relY.toFixed(3)})` };
+        }
+
+        const absX = Math.round(capture.originX + rec.x * capture.scaleX);
+        const absY = Math.round(capture.originY + rec.y * capture.scaleY);
+        log('info', `点击屏幕坐标 (${absX}, ${absY})`);
+        const res = await runVisionEngine('input', { action: 'click', x: absX, y: absY }, 30000);
         if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
-        return { nodeId: node.id, status: 'ok', hitCoords: rec, message: `点击 (${rec.x}, ${rec.y})` };
+        return { nodeId: node.id, status: 'ok', hitCoords: { x: absX, y: absY }, message: `点击 (${absX}, ${absY})` };
       }
 
       case 'input': {
@@ -465,7 +594,7 @@ export class WorkflowExecutor {
           const deadline = Date.now() + 60000;
           log('info', `条件等待：${expr}`);
           while (Date.now() < deadline) {
-            if (this.stopped) break;
+            if (this.stopped || this.runGeneration !== generation) break;
             if (this.evalExpression(expr)) {
               return { nodeId: node.id, status: 'ok', message: `条件满足：${expr}` };
             }
@@ -483,11 +612,25 @@ export class WorkflowExecutor {
         const captured = await this.captureNodeImage(node);
         if (!captured.ok) return { nodeId: node.id, status: 'fail', message: captured.message };
         this.context.lastFrame = captured.frame!;
+        this.context.lastCapture = {
+          source: node.data.source,
+          originX: captured.originX ?? 0,
+          originY: captured.originY ?? 0,
+          width: captured.width ?? 0,
+          height: captured.height ?? 0,
+          scaleX: captured.scaleX ?? 1,
+          scaleY: captured.scaleY ?? 1,
+          windowHint: node.data.windowHint,
+          windowId: captured.windowId,
+          displayId: captured.displayId,
+        };
         log('info', `截图成功（${captured.width}×${captured.height}）`);
         return {
           nodeId: node.id,
           status: 'ok',
           frame: captured.frame,
+          width: captured.width,
+          height: captured.height,
           message: `截图成功（${captured.width}×${captured.height}）`,
         };
       }
@@ -555,14 +698,14 @@ export class WorkflowExecutor {
       const count = Math.max(0, node.data.count ?? 1);
       this.emit({ t: 'log', runId, level: 'info', message: `开始循环 ${count} 次`, nodeId: node.id });
       for (let i = 0; i < count; i++) {
-        if (this.stopped) break;
-        if (!(await this.checkpoint())) break;
+        if (this.stopped || this.runGeneration !== 0) break;
+        if (!(await this.checkpoint(0))) break;
         if (bodyStart) {
           this.emit({ t: 'log', runId, level: 'debug', message: `第 ${i + 1}/${count} 次迭代`, nodeId: node.id });
-          await this.executeChain(bodyStart, node.id);
+          await this.executeChain(bodyStart, node.id, 0);
         }
         executed++;
-        if (this.stopped) break;
+        if (this.stopped || this.runGeneration !== 0) break;
       }
       return {
         nodeId: node.id,
@@ -576,8 +719,8 @@ export class WorkflowExecutor {
     const expr = node.data.conditionText?.trim() || 'false';
     this.emit({ t: 'log', runId, level: 'info', message: `开始条件循环：${expr}`, nodeId: node.id });
     let safety = 0;
-    while (!this.stopped) {
-      if (!(await this.checkpoint())) break;
+    while (this.runGeneration === 0 && !this.stopped) {
+      if (!(await this.checkpoint(0))) break;
       let condition = false;
       try {
         condition = this.evalExpression(expr);
@@ -591,7 +734,7 @@ export class WorkflowExecutor {
       if (!condition) break;
       if (bodyStart) {
         this.emit({ t: 'log', runId, level: 'debug', message: `第 ${executed + 1} 次迭代`, nodeId: node.id });
-        await this.executeChain(bodyStart, node.id);
+        await this.executeChain(bodyStart, node.id, 0);
       }
       executed++;
       if (++safety >= 10000) {
@@ -646,11 +789,13 @@ export class WorkflowExecutor {
       const label = STRATEGY_NAMES[run.key];
       const statusText =
         run.status === 'hit' ? '命中' : run.status === 'miss' ? '未命中' : run.status === 'error' ? '出错' : '跳过';
+      const coordText =
+        run.status === 'hit' && run.x !== undefined && run.y !== undefined ? ` @(${Math.round(run.x)}, ${Math.round(run.y)})` : '';
       this.emit({
         t: 'log',
         runId: this.runId!,
         level: run.status === 'hit' ? 'info' : run.status === 'miss' ? 'warn' : 'error',
-        message: `${label}：${statusText}${run.confidence !== undefined ? ` ${run.confidence}%` : ''}${run.message ? `（${run.message}）` : ''}`,
+        message: `${label}：${statusText}${coordText}${run.confidence !== undefined ? ` ${run.confidence}%` : ''}${run.message ? `（${run.message}）` : ''}`,
         nodeId: node.id,
       });
     };
@@ -941,7 +1086,7 @@ export class WorkflowExecutor {
 
   private async captureNodeImage(
     node: ScreenshotNode,
-  ): Promise<{ ok: boolean; frame?: string; width?: number; height?: number; message?: string }> {
+  ): Promise<{ ok: boolean; frame?: string; width?: number; height?: number; originX?: number; originY?: number; scaleX?: number; scaleY?: number; displayId?: string; windowId?: number; message?: string }> {
     const thumbnailSize = { width: 1920, height: 1080 };
     const captureWindowByHint = async (hintText?: string, label = '串流窗口') => {
       const sources = await desktopCapturer.getSources({
@@ -950,14 +1095,49 @@ export class WorkflowExecutor {
         fetchWindowIcons: false,
       });
       const hint = hintText?.trim().toLowerCase();
-      const windowSource =
-        (hint ? sources.find((item) => item.name.toLowerCase().includes(hint)) : undefined) ??
-        sources.find((item) => !item.name.startsWith('NoBoWo'));
+      if (!hint) {
+        return { ok: false as const, message: `未设置${label}标题关键字，无法定位窗口` };
+      }
+      const windowSource = sources.find((item) => item.name.toLowerCase().includes(hint));
       if (!windowSource || windowSource.thumbnail.isEmpty()) {
-        return { ok: false as const, message: `未找到${label}，请确认窗口已打开、macOS 屏幕录制权限已授权` };
+        return { ok: false as const, message: `未找到${label}，请确认窗口已打开、标题关键字正确、且未最小化` };
       }
       const size = windowSource.thumbnail.getSize();
-      return { ok: true as const, frame: windowSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+      const bounds = getMacWindowBoundsByHint(hintText);
+      // desktopCapturer 的 id 形如 window:<CGWindowID>:<screenID>，用它精确定位同一窗口
+      const windowIdMatch = /^window:(\d+)/.exec(windowSource.id);
+      const windowId = windowIdMatch ? Number(windowIdMatch[1]) : undefined;
+      if (!bounds) {
+        // AppleScript 拿不到边界也不阻塞：点击时 Python 会用 CGWindowID 重新取 Quartz 边界
+        return {
+          ok: true as const,
+          frame: windowSource.thumbnail.toDataURL(),
+          width: size.width,
+          height: size.height,
+          originX: 0,
+          originY: 0,
+          scaleX: 1,
+          scaleY: 1,
+          windowId,
+        };
+      }
+      const display = screen.getDisplayMatching(bounds);
+      const scaleFactor = display.scaleFactor || 1;
+      const originX = bounds.x * scaleFactor;
+      const originY = bounds.y * scaleFactor;
+      const realWidth = bounds.width * scaleFactor;
+      const realHeight = bounds.height * scaleFactor;
+      return {
+        ok: true as const,
+        frame: windowSource.thumbnail.toDataURL(),
+        width: size.width,
+        height: size.height,
+        originX,
+        originY,
+        scaleX: realWidth / Math.max(1, size.width),
+        scaleY: realHeight / Math.max(1, size.height),
+        windowId,
+      };
     };
     const captureScreen = async () => {
       const sources = await desktopCapturer.getSources({
@@ -970,7 +1150,23 @@ export class WorkflowExecutor {
         return { ok: false as const, message: '无法截取本机屏幕，请确认屏幕录制权限已授权' };
       }
       const size = screenSource.thumbnail.getSize();
-      return { ok: true as const, frame: screenSource.thumbnail.toDataURL(), width: size.width, height: size.height };
+      const display = screen.getAllDisplays().find((d) => String(d.id) === String(screenSource.display_id)) ?? screen.getPrimaryDisplay();
+      const scaleFactor = display.scaleFactor || 1;
+      const originX = display.bounds.x * scaleFactor;
+      const originY = display.bounds.y * scaleFactor;
+      const realWidth = display.bounds.width * scaleFactor;
+      const realHeight = display.bounds.height * scaleFactor;
+      return {
+        ok: true as const,
+        frame: screenSource.thumbnail.toDataURL(),
+        width: size.width,
+        height: size.height,
+        originX,
+        originY,
+        scaleX: realWidth / Math.max(1, size.width),
+        scaleY: realHeight / Math.max(1, size.height),
+        displayId: String(screenSource.display_id),
+      };
     };
 
     try {

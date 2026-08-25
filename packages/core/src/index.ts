@@ -289,6 +289,8 @@ export type EngineEnvInfo = {
   torch: string | null;
   /** YOLOX 版本号，未安装为 null */
   yolox: string | null;
+  /** pyautogui 版本号，未安装为 null */
+  pyautogui: string | null;
   cuda: boolean;
   mps: boolean;
   device: string;
@@ -368,6 +370,10 @@ export type NodeRunResult = {
   strategies?: RecognizeStrategyRun[];
   /** screenshot 节点捕获的画面 dataURL */
   frame?: string;
+  /** screenshot 截图宽度（缩略图像素） */
+  width?: number;
+  /** screenshot 截图高度（缩略图像素） */
+  height?: number;
   /** loop 节点实际迭代次数 */
   loopCount?: number;
   /** if 节点走的分支 */
@@ -595,7 +601,9 @@ export type YoloTrainingEvent =
   | { t: 'progress'; epoch: number; percent: number; message: string }
   | { t: 'log'; level: 'info' | 'warn' | 'error' | 'debug'; message: string }
   | { t: 'done'; modelPath: string; sizeBytes: number; metrics: YoloModelMetrics | null; artifacts?: YoloModelArtifacts }
-  | { t: 'error'; message: string };
+  | { t: 'error'; message: string }
+  /** pip 安装的下载进度（yolo:packageOutput 通道） */
+  | { t: 'packageProgress'; percent: number; doneMb: number; totalMb: number; speed: string; eta: string };
 
 export type YoloEnvInfo = {
   pythonAvailable: boolean;
@@ -622,6 +630,23 @@ export const YOLO_CLASS_COLORS = [
   '#5ad5ff', '#ffb86b', '#ff6b9d', '#9fe870', '#8b9dc9',
   '#f0a0a0', '#a0d0f0', '#d0a0f0', '#f0d0a0', '#a0f0d0',
   '#f0a0d0', '#d0f0a0', '#a0d0d0', '#d0a0a0', '#a0a0f0',
+];
+
+/** pip 镜像源选项；value 为空字符串表示官方源（不加 -i 参数） */
+export const PIP_MIRROR_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: '官方源 pypi.org' },
+  { value: 'https://pypi.tuna.tsinghua.edu.cn/simple', label: '清华 TUNA' },
+  { value: 'https://mirrors.aliyun.com/pypi/simple', label: '阿里云' },
+  { value: 'https://pypi.mirrors.ustc.edu.cn/simple', label: '中科大 USTC' },
+  { value: 'https://mirrors.cloud.tencent.com/pypi/simple', label: '腾讯云' },
+];
+
+/** GitHub Releases 下载加速前缀；value 为空字符串表示直连 GitHub */
+export const GITHUB_PROXY_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: '直连 GitHub' },
+  { value: 'https://gh-proxy.com/', label: 'gh-proxy.com' },
+  { value: 'https://ghfast.top/', label: 'ghfast.top' },
+  { value: 'https://gh-proxy.net/', label: 'gh-proxy.net' },
 ];
 
 export const createDefaultNode = (type: WorkflowNode['type'], index = 1): WorkflowNode => {

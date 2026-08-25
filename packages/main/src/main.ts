@@ -1549,24 +1549,32 @@ const yoloWeightsDir = () => join(yoloRootDir(), 'weights');
 type YoloSettings = {
   /** YOLOX 源码目录（绝对路径） */
   yoloxPath: string | null;
+  /** pip 镜像源 URL；null = 官方源 */
+  pipMirror: string | null;
+  /** GitHub Releases 下载加速前缀；null = 直连 */
+  githubProxy: string | null;
 };
 
 async function loadYoloSettings(): Promise<YoloSettings> {
   try {
     const raw = await readFile(yoloSettingsFile(), 'utf8');
     const parsed = JSON.parse(raw) as Partial<YoloSettings>;
-    if (parsed && typeof parsed.yoloxPath === 'string' && parsed.yoloxPath.trim()) {
-      return { yoloxPath: parsed.yoloxPath };
-    }
+    return {
+      yoloxPath: typeof parsed.yoloxPath === 'string' && parsed.yoloxPath.trim() ? parsed.yoloxPath : null,
+      pipMirror: typeof parsed.pipMirror === 'string' && parsed.pipMirror.trim() ? parsed.pipMirror.trim() : null,
+      githubProxy: typeof parsed.githubProxy === 'string' && parsed.githubProxy.trim() ? parsed.githubProxy.trim() : null,
+    };
   } catch {
     // 首次运行或文件损坏
   }
-  return { yoloxPath: null };
+  return { yoloxPath: null, pipMirror: null, githubProxy: null };
 }
 
-async function saveYoloSettings(settings: YoloSettings) {
+async function saveYoloSettings(patch: Partial<YoloSettings>) {
+  const current = await loadYoloSettings();
+  const next = { ...current, ...patch };
   await ensureYoloDirs();
-  await writeFile(yoloSettingsFile(), JSON.stringify(settings, null, 2), 'utf8');
+  await writeFile(yoloSettingsFile(), JSON.stringify(next, null, 2), 'utf8');
 }
 
 /** 解析 YOLOX 源码目录：先用户配置，其次项目内置 third_party/YOLOX */
@@ -1853,6 +1861,14 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
 
 const pythonCommand = () => (process.platform === 'win32' ? 'python' : 'python3');
 
+/** macOS 新版 Xcode clang 会把 pyobjc-core 9.0 的默认初始化告警提升为错误（-Werror），这里在编译时关掉它 */
+const pipEnv = (): NodeJS.ProcessEnv => {
+  if (process.platform !== 'darwin') return process.env;
+  const extra = '-Wno-error=default-const-init-var-unsafe';
+  const existing = process.env.CFLAGS ?? '';
+  return { ...process.env, CFLAGS: existing ? `${existing} ${extra}` : extra };
+};
+
 function runCaptured(cmd: string, args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1888,6 +1904,79 @@ function sanitizeLogLine(line: string): string | null {
   if (/^\s*[\d.]+\s+it\/s/.test(cleaned)) return null;
   if (/^\s*\d+%\|\s*[█▉▊▋▌▍▎▏=>.\s-]*\|/.test(cleaned)) return null;
   return cleaned;
+}
+
+/** 解析 pip 富文本进度行，如 " 45%|████▌     | 21.8/48.3 MB 2.1 MB/s eta 0:00:12"，非进度行返回 null */
+function parsePipProgress(line: string): Extract<YoloTrainingEvent, { t: 'packageProgress' }> | null {
+  const rich =
+    /^\s*(\d+(?:\.\d+)?)%\|\s*[█▉▊▋▌▍▎▏=>.\s-]*\|\s*([\d.]+)\/([\d.]+)\s*(B|KB|MB|GB|K|M|G)(?:\s+([\d.]+)\s*([A-Za-z]+\/s))?(?:\s+eta\s+(\S+))?$/i.exec(
+      line,
+    );
+  const tqdm = rich
+    ? null
+    : /^\s*(\d+(?:\.\d+)?)%\|\s*[█▉▊▋▌▍▎▏=>.\s-]*\|\s*([\d.]+)\/([\d.]+)\s*(B|KB|MB|GB|K|M|G)\s+\[\d+:\d{2}(?::\d{2})?(?:<\d+:\d{2}(?::\d{2})?)?(?:,\s*([\d.]+)\s*([A-Za-z]+\/s))?\]$/i.exec(
+        line,
+      );
+  const m = rich ?? tqdm;
+  if (!m) return null;
+  const [, pct, done, total, unit, speed, speedUnit, eta] = m;
+  const toMb = (v: string, u: string): number => {
+    const n = Number(v);
+    switch (u.toUpperCase()) {
+      case 'B':
+        return n / (1024 * 1024);
+      case 'KB':
+      case 'K':
+        return n / 1024;
+      case 'MB':
+      case 'M':
+        return n;
+      case 'GB':
+      case 'G':
+        return n * 1024;
+      default:
+        return n;
+    }
+  };
+  return {
+    t: 'packageProgress',
+    percent: Math.max(0, Math.min(100, Math.round(Number(pct)))),
+    doneMb: toMb(done, unit),
+    totalMb: toMb(total, unit),
+    speed: speed && speedUnit ? `${speed} ${speedUnit}` : '',
+    eta: eta ?? '',
+  };
+}
+
+/** 把 pip 子进程输出按行拆解：进度条行转为进度事件，其余转为日志事件 */
+function makePipOutputHandler(
+  level: 'info' | 'warn',
+  emit: (ev: YoloTrainingEvent) => void,
+): { push: (chunk: unknown) => void; flush: () => void } {
+  let pending = '';
+  const processLine = (raw: string) => {
+    const line = raw.replace(/\u001b\[[0-9;]*m/g, '').trim();
+    if (!line) return;
+    const progress = parsePipProgress(line);
+    if (progress) {
+      emit(progress);
+      return;
+    }
+    const cleaned = sanitizeLogLine(line);
+    if (cleaned) emit({ t: 'log', level, message: cleaned });
+  };
+  return {
+    push: (chunk: unknown) => {
+      pending += String(chunk);
+      const lines = pending.split(/\r\n|\n|\r/);
+      pending = lines.pop() ?? '';
+      for (const raw of lines) processLine(raw);
+    },
+    flush: () => {
+      if (pending) processLine(pending);
+      pending = '';
+    },
+  };
 }
 
 function registerYoloIpc() {
@@ -2280,6 +2369,18 @@ function registerYoloIpc() {
     return picked;
   });
 
+  ipcMain.handle('yolo:getPipMirror', async (): Promise<string | null> => (await loadYoloSettings()).pipMirror);
+
+  ipcMain.handle('yolo:setPipMirror', async (_event, url: string | null): Promise<void> => {
+    await saveYoloSettings({ pipMirror: typeof url === 'string' && url.trim() ? url.trim() : null });
+  });
+
+  ipcMain.handle('yolo:getGithubProxy', async (): Promise<string | null> => (await loadYoloSettings()).githubProxy);
+
+  ipcMain.handle('yolo:setGithubProxy', async (_event, url: string | null): Promise<void> => {
+    await saveYoloSettings({ githubProxy: typeof url === 'string' && url.trim() ? url.trim() : null });
+  });
+
   ipcMain.handle('yolo:getEnvInfo', async (): Promise<YoloEnvInfo> => {
     const cmd = pythonCommand();
     const yoloxPath = await resolveYoloxPath();
@@ -2339,21 +2440,23 @@ function registerYoloIpc() {
   ipcMain.handle('yolo:installPackage', async (_event, packageName: string): Promise<{ started: boolean; message?: string }> => {
     if (packageChild) return { started: false, message: '已有安装任务在进行中' };
     const cmd = pythonCommand();
-    const child = spawn(cmd, ['-m', 'pip', 'install', '-U', packageName], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const args = ['-m', 'pip', 'install', '--timeout', '120'];
+    const mirror = (await loadYoloSettings()).pipMirror;
+    if (mirror) args.push('-i', mirror);
+    args.push('-U', packageName);
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: pipEnv() });
     packageChild = child;
-    const onData = (level: 'info' | 'warn', chunk: unknown) => {
-      for (const line of String(chunk).split('\n')) {
-        const cleaned = sanitizeLogLine(line);
-        if (cleaned) broadcastPackage({ t: 'log', level, message: cleaned });
-      }
-    };
-    child.stdout?.on('data', (chunk) => onData('info', chunk));
-    child.stderr?.on('data', (chunk) => onData('warn', chunk));
+    const out = makePipOutputHandler('info', (ev) => broadcastPackage(ev));
+    const err = makePipOutputHandler('warn', (ev) => broadcastPackage(ev));
+    child.stdout?.on('data', (chunk) => out.push(chunk));
+    child.stderr?.on('data', (chunk) => err.push(chunk));
     child.on('error', (err) => {
       broadcastPackage({ t: 'log', level: 'error', message: `pip 启动失败：${err.message}` });
       packageChild = null;
     });
     child.on('close', (code) => {
+      out.flush();
+      err.flush();
       broadcastPackage({
         t: 'log',
         level: code === 0 ? 'info' : 'warn',
@@ -2377,21 +2480,23 @@ function registerYoloIpc() {
       return { started: false, message: `未找到 requirements.txt：${reqFile}` };
     }
     const cmd = pythonCommand();
-    const child = spawn(cmd, ['-m', 'pip', 'install', '-r', reqFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const args = ['-m', 'pip', 'install', '--timeout', '120'];
+    const mirror = (await loadYoloSettings()).pipMirror;
+    if (mirror) args.push('-i', mirror);
+    args.push('-r', reqFile);
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: pipEnv() });
     packageChild = child;
-    const onData = (level: 'info' | 'warn', chunk: unknown) => {
-      for (const line of String(chunk).split('\n')) {
-        const cleaned = sanitizeLogLine(line);
-        if (cleaned) broadcastPackage({ t: 'log', level, message: cleaned });
-      }
-    };
-    child.stdout?.on('data', (chunk) => onData('info', chunk));
-    child.stderr?.on('data', (chunk) => onData('warn', chunk));
+    const out = makePipOutputHandler('info', (ev) => broadcastPackage(ev));
+    const err = makePipOutputHandler('warn', (ev) => broadcastPackage(ev));
+    child.stdout?.on('data', (chunk) => out.push(chunk));
+    child.stderr?.on('data', (chunk) => err.push(chunk));
     child.on('error', (err) => {
       broadcastPackage({ t: 'log', level: 'error', message: `pip 启动失败：${err.message}` });
       packageChild = null;
     });
     child.on('close', (code) => {
+      out.flush();
+      err.flush();
       broadcastPackage({
         t: 'log',
         level: code === 0 ? 'info' : 'warn',
@@ -2440,7 +2545,11 @@ function registerYoloIpc() {
         // 不存在则下载
       }
       broadcastPackage({ t: 'log', level: 'info', message: `开始下载 ${name} 预训练权重…` });
-      const response = await fetch(url);
+      const settings = await loadYoloSettings();
+      const proxy = settings.githubProxy;
+      const downloadUrl = proxy ? `${proxy.replace(/\/+$/, '')}/${url}` : url;
+      if (proxy) broadcastPackage({ t: 'log', level: 'info', message: `已启用 GitHub 加速前缀：${proxy}` });
+      const response = await fetch(downloadUrl, { redirect: 'follow' });
       if (!response.ok) {
         broadcastPackage({ t: 'log', level: 'error', message: `下载失败（HTTP ${response.status}），请检查网络后重试` });
         return { started: false, message: `下载失败（HTTP ${response.status}）` };
@@ -2571,12 +2680,13 @@ function registerEngineIpc() {
         cv2: typeof env.cv2 === 'string' ? env.cv2 : null,
         torch: typeof env.torch === 'string' ? env.torch : null,
         yolox: typeof env.yolox === 'string' ? env.yolox : null,
+        pyautogui: typeof env.pyautogui === 'string' ? env.pyautogui : null,
         cuda: Boolean(env.cuda),
         mps: Boolean(env.mps),
         device: typeof env.device === 'string' ? env.device : 'none',
       };
     }
-    return { cv2: null, torch: null, yolox: null, cuda: false, mps: false, device: 'none' };
+    return { cv2: null, torch: null, yolox: null, pyautogui: null, cuda: false, mps: false, device: 'none' };
   });
 
   ipcMain.handle(

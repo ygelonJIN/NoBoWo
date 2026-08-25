@@ -8,13 +8,13 @@
   ],
   "packageManager": "npm@10.8.2",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "sh -c 'unset ELECTRON_RUN_AS_NODE; electron-vite dev'",
     "dev:web": "vite --config vite.config.ts",
     "build": "electron-vite build",
     "build:web": "vite build --config vite.config.ts",
     "preview": "electron-vite preview",
     "typecheck": "tsc -b packages/core packages/main packages/renderer",
-    "electron": "electron-vite dev"
+    "electron": "sh -c 'unset ELECTRON_RUN_AS_NODE; electron-vite dev'"
   },
   "dependencies": {
     "@xyflow/react": "^12.8.5",

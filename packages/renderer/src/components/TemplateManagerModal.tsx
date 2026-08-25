@@ -1,11 +1,36 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClickOffset, TemplateDefinition, TemplateFolder, TemplateRect } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
 import { TemplateCropEditor } from './TemplateCropEditor';
 import { TemplateThumb } from './TemplateThumb';
 import { EnvPanel } from './EnvPanel';
 
-type Props = {
+type GlobalEnvModalProps = {
+  onClose: () => void;
+  onChanged: () => void;
+};
+
+export function GlobalEnvModal({ onClose, onChanged }: GlobalEnvModalProps) {
+  return (
+    <div className="template-modal__overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="template-modal template-modal--wide template-modal--env" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+        <header className="template-modal__header">
+          <div className="template-modal__title">
+            <h2>全局环境依赖</h2>
+            <p>模板匹配、点击输入、YOLO 训练共用的运行环境与安装入口</p>
+          </div>
+          <button className="template-modal__close" onClick={onClose} aria-label="关闭">×</button>
+        </header>
+
+        <div className="template-modal__body template-modal__body--env">
+          <EnvPanel mode="full" onChanged={onChanged} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export type TemplateManagerModalProps = {
   onClose: () => void;
   onChanged: () => void;
 };
@@ -76,6 +101,11 @@ function normalizeTags(text: string) {
   return [...new Set(text.split(/[，,\n]/).map((v) => v.trim()).filter(Boolean))].join('，');
 }
 
+type Props = {
+  onClose: () => void;
+  onChanged: () => void;
+};
+
 export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [folders, setFolders] = useState<TemplateFolder[]>([]);
@@ -91,7 +121,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const [batchReplace, setBatchReplace] = useState(false);
   const [renameFolderId, setRenameFolderId] = useState<string | null>(null);
   const [renameFolderName, setRenameFolderName] = useState('');
-  const [tab, setTab] = useState<'folders' | 'annotate' | 'env'>('folders');
+  const [tab, setTab] = useState<'folders' | 'annotate'>('folders');
   const [tool, setTool] = useState<'draw' | 'move'>('draw');
   const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -397,10 +427,6 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
           <button className={`yolo-modal__tab ${tab === 'annotate' ? 'active' : ''}`} onClick={() => setTab('annotate')}>
             <span className="yolo-modal__tab-label">标注</span>
             <span className="yolo-modal__tab-hint">框选目标并设置属性</span>
-          </button>
-          <button className={`yolo-modal__tab ${tab === 'env' ? 'active' : ''}`} onClick={() => setTab('env')}>
-            <span className="yolo-modal__tab-label">环境</span>
-            <span className="yolo-modal__tab-hint">模板匹配依赖（OpenCV）</span>
           </button>
         </nav>
 
@@ -735,11 +761,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
             </div>
           )}
 
-          {tab === 'env' && (
-            <div className="template-manager__env">
-              <EnvPanel mode="template" onChanged={() => void refreshList()} />
-            </div>
-          )}
+
         </div>
       </div>
       <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={handleFileInput} />
