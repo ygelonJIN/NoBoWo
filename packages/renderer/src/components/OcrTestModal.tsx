@@ -10,11 +10,21 @@ const OCR_ENGINE_OPTIONS: { value: OcrEngine; label: string }[] = [
   { value: 'paddleOcr', label: 'PaddleOCR' },
 ];
 
+type OcrLogLine = { level: 'info' | 'warn' | 'error' | 'debug'; message: string; percent?: number; time: number };
+
 type Props = {
   onClose: () => void;
   initialText?: string;
   initialEngine?: OcrEngine;
 };
+
+type OcrLang = 'auto' | 'eng' | 'chi_sim';
+
+const OCR_LANG_OPTIONS: { value: OcrLang; label: string }[] = [
+  { value: 'auto', label: '自动（按目标文字判断）' },
+  { value: 'eng', label: '英文（eng）' },
+  { value: 'chi_sim', label: '中文（chi_sim，含英文）' },
+];
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -35,11 +45,32 @@ function getImageSize(url: string): Promise<{ width: number; height: number }> {
 }
 
 function clampText(text: string) {
-  return text.trim().replace(/\s+/g, ' ');
+  return text.trim().replace(/\s+/g, ' ').toLowerCase();
 }
+
+function hasChinese(text: string) {
+  return /[\u4e00-\u9fff]/.test(text);
+}
+
+function normalizeForMatch(text: string) {
+  return clampText(text)
+    .normalize('NFKC')
+    .replace(/[·•]/g, ' ')
+    .replace(/[\p{P}\p{S}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findTextMatch(texts: string[], target: string) {
+  const normTarget = normalizeForMatch(target);
+  if (!normTarget) return null;
+  return texts.find((text) => normalizeForMatch(text).includes(normTarget)) ?? null;
+}
+
 
 export function OcrTestModal({ onClose, initialText = '', initialEngine = 'auto' }: Props) {
   const [engine, setEngine] = useState<OcrEngine>(initialEngine);
+  const [lang, setLang] = useState<OcrLang>('auto');
   const [targetText, setTargetText] = useState(initialText);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
@@ -48,9 +79,49 @@ export function OcrTestModal({ onClose, initialText = '', initialEngine = 'auto'
   const [error, setError] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [logs, setLogs] = useState<OcrLogLine[]>([]);
+  const [highlightHint, setHighlightHint] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const logBoxRef = useRef<HTMLDivElement>(null);
+  const previewShellRef = useRef<HTMLDivElement>(null);
+  const [previewBox, setPreviewBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
   const matches = useMemo(() => result?.matches ?? [], [result]);
+  const highlightMatch = useMemo(() => matches.find((m) => m.id === highlightId) ?? null, [matches, highlightId]);
+
+  // 用容器尺寸 + 原图尺寸计算 contain 之后的真实显示区域
+  useEffect(() => {
+    const shell = previewShellRef.current;
+    if (!shell || !imageUrl || !imageSize || imageSize.width <= 0 || imageSize.height <= 0) return;
+    const update = () => {
+      const rect = shell.getBoundingClientRect();
+      const scale = Math.min(rect.width / imageSize.width, rect.height / imageSize.height);
+      const width = imageSize.width * scale;
+      const height = imageSize.height * scale;
+      setPreviewBox({
+        x: (rect.width - width) / 2,
+        y: (rect.height - height) / 2,
+        width,
+        height,
+      });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, [imageUrl, imageSize]);
+
+  useEffect(() => {
+    if (!window.ocrAPI?.onProgress) return;
+    return window.ocrAPI.onProgress((data) => {
+      setLogs((current) => [...current.slice(-199), { level: data.level, message: data.message, percent: data.percent, time: data.timestamp }]);
+    });
+  }, []);
+
+  useEffect(() => {
+    const box = logBoxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [logs]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -74,22 +145,29 @@ export function OcrTestModal({ onClose, initialText = '', initialEngine = 'auto'
     setError(null);
     setResult(null);
     setHighlightId(null);
+    setHighlightHint(null);
   }, []);
 
   const runOcr = async () => {
     if (!window.ocrAPI || !imageUrl || running) return;
     setRunning(true);
     setError(null);
+    setLogs([]);
+    setHighlightHint(null);
+    setHighlightId(null);
     try {
       const res = await window.ocrAPI.run({
         engine,
+        lang: lang === 'auto' ? (hasChinese(targetText) ? 'chi_sim' : 'eng') : lang,
         imageDataUrl: imageUrl,
         targetText: clampText(targetText),
         width: imageSize?.width ?? 0,
         height: imageSize?.height ?? 0,
       });
+      const foundMatch = res.matches.find((m) => normalizeForMatch(m.text).includes(normalizeForMatch(targetText)));
+      setHighlightId(foundMatch?.id ?? null);
+      setHighlightHint(foundMatch ? `已高亮「${foundMatch.text}」` : `未找到「${targetText}」，请检查目标文字或识别结果`);
       setResult(res);
-      setHighlightId(res.matches.find((m) => clampText(m.text).includes(clampText(targetText)))?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -97,11 +175,6 @@ export function OcrTestModal({ onClose, initialText = '', initialEngine = 'auto'
     }
   };
 
-  const searchMatches = () => {
-    if (!targetText.trim()) return;
-    const found = result?.matches.find((m) => clampText(m.text).includes(clampText(targetText)));
-    setHighlightId(found?.id ?? null);
-  };
 
   return (
     <div className="template-modal__overlay ocr-modal__overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -144,8 +217,25 @@ export function OcrTestModal({ onClose, initialText = '', initialEngine = 'auto'
               </button>
             ) : (
               <div className="ocr-modal__preview-panel">
-                <div className="ocr-modal__preview-shell">
+                <div className="ocr-modal__preview-shell" ref={previewShellRef}>
                   <img src={imageUrl} alt="OCR 预览" className="ocr-modal__preview-image" />
+                  {highlightMatch && previewBox && imageSize && (
+                    <div
+                      className="ocr-modal__preview-highlight"
+                      style={{
+                        left: previewBox.x + (highlightMatch.box.x / imageSize.width) * previewBox.width,
+                        top: previewBox.y + (highlightMatch.box.y / imageSize.height) * previewBox.height,
+                        width: Math.max(2, (highlightMatch.box.width / imageSize.width) * previewBox.width),
+                        height: Math.max(2, (highlightMatch.box.height / imageSize.height) * previewBox.height),
+                      }}
+                      title={highlightMatch.text}
+                    />
+                  )}
+                  {highlightHint && (
+                    <div className={`ocr-modal__preview-hint ${highlightMatch ? 'ocr-modal__preview-hint--ok' : ''}`}>
+                      {highlightHint}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -173,60 +263,49 @@ export function OcrTestModal({ onClose, initialText = '', initialEngine = 'auto'
                   maxHeight={240}
                 />
               </div>
+              <div className="template-form__field">
+                <span>识别语言</span>
+                <CustomSelect
+                  value={lang}
+                  options={OCR_LANG_OPTIONS}
+                  onChange={(v) => setLang(v as OcrLang)}
+                  maxHeight={240}
+                />
+              </div>
               <label className="template-form__field">
                 目标文字
                 <input value={targetText} onChange={(e) => setTargetText(e.target.value)} placeholder="例如：同意、提交、搜索" />
               </label>
 
-              <div className={`ocr-modal__status ${error ? 'bad' : result ? 'ok' : 'idle'}`}>
-                {error ? error : result ? `识别完成 · ${result.matches.length} 个文本块` : '尚未运行'}
+              <div className={`ocr-modal__status ${error ? 'bad' : highlightMatch ? 'ok' : 'idle'}`}>
+                {error ? error : highlightHint ?? '尚未运行'}
               </div>
-
-              {result && (
-                <div className="ocr-modal__result-card">
-                  <div className="ocr-modal__result-head">
-                    <span className="template-modal__section-title">识别结果</span>
-                    <span className="ocr-modal__result-badge">{result.engine}</span>
-                  </div>
-                  <pre className="ocr-modal__result-text">{result.text || '未识别到文本'}</pre>
-                </div>
-              )}
 
               <div className="ocr-modal__actions ocr-modal__actions--single-line">
                 <button className="yolo-btn--primary yolo-btn--compact" onClick={() => void runOcr()} disabled={!imageUrl || running}>
                   {running ? '识别中…' : '运行 OCR'}
                 </button>
-                <button className="yolo-btn--ghost yolo-btn--compact" onClick={searchMatches} disabled={!result || !targetText.trim()}>
-                  搜索并高亮
-                </button>
-                <button className="yolo-btn--ghost yolo-btn--compact" onClick={() => setHighlightId(null)} disabled={!highlightId}>
-                  清除高亮
-                </button>
               </div>
             </div>
 
-            <div className="ocr-modal__stack ocr-modal__stack--bottom">
-              <div className="template-modal__step">2 · 文字块与位置</div>
-              <div className="ocr-modal__match-list">
-                {matches.length === 0 ? (
-                  <div className="ocr-modal__empty">识别后，这里会显示每个文字块的位置和坐标。</div>
+            <div className="ocr-modal__debug">
+              <div className="ocr-modal__debug-head">
+                <span>调试信息</span>
+                {running && <span className="ocr-modal__debug-spinner" aria-hidden="true" />}
+              </div>
+              <div className="ocr-modal__debug-body" ref={logBoxRef}>
+                {logs.length === 0 ? (
+                  <div className="ocr-modal__debug-empty">运行 OCR 后，这里会显示引擎进度与错误信息。</div>
                 ) : (
-                  matches.map((match) => {
-                    const active = highlightId === match.id;
-                    return (
-                      <button
-                        key={match.id}
-                        className={`ocr-match ${active ? 'ocr-match--active' : ''}`}
-                        onClick={() => setHighlightId(match.id)}
-                      >
-                        <div className="ocr-match__head">
-                          <span className="ocr-match__text">{match.text}</span>
-                          <span className="ocr-match__score">{typeof match.confidence === 'number' ? `${Math.round(match.confidence * 100)}%` : '—'}</span>
-                        </div>
-                        <div className="ocr-match__meta">x {match.box.x} · y {match.box.y} · {match.box.width} × {match.box.height}</div>
-                      </button>
-                    );
-                  })
+                  logs.map((line, index) => (
+                    <div key={index} className={`ocr-modal__debug-line ocr-modal__debug-line--${line.level}`}>
+                      <span className="ocr-modal__debug-time">{new Date(line.time).toLocaleTimeString()}</span>
+                      <span className="ocr-modal__debug-text">{line.message}</span>
+                      {typeof line.percent === 'number' && (
+                        <span className="ocr-modal__debug-percent">{line.percent}%</span>
+                      )}
+                    </div>
+                  ))
                 )}
               </div>
             </div>

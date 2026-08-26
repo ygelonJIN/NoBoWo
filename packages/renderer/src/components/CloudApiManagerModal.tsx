@@ -158,8 +158,6 @@ export function CloudApiManagerModal({ onClose, onChanged }: Props) {
         lastTestStatus: result.ok ? 'ok' : 'error',
         lastTestMessage: result.message ?? (result.ok ? '连接成功' : '连接失败'),
       }));
-      await refresh();
-      onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

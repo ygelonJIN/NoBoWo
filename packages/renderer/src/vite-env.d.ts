@@ -55,8 +55,11 @@ declare global {
       yoloDetect: (payload: { imageDataUrl: string; modelId?: string; modelPath?: string; threshold?: number }) => Promise<EngineRunResult>;
     };
     ocrAPI?: {
-      run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) => Promise<OcrResult>;
+      run: (payload: { engine: OcrEngine; lang?: string; imageDataUrl: string; targetText?: string; width?: number; height?: number }) => Promise<OcrResult>;
       listEngines: () => Promise<{ available: OcrEngine[]; default: OcrEngine }>;
+      langStatus: () => Promise<{ installed: Record<string, boolean> }>;
+      installLangData: (payload?: { lang?: string }) => Promise<{ ok: boolean; message?: string }>;
+      onProgress: (callback: (data: { level: 'info' | 'warn' | 'error' | 'debug'; message: string; percent?: number; timestamp: number }) => void) => () => void;
     };
     streamAPI?: {
       list: () => Promise<StreamSourceProfile[]>;

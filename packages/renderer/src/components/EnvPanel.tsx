@@ -9,7 +9,7 @@ type Props = {
   onChanged?: () => void;
 };
 
-type DepGroup = 'runtime' | 'template' | 'input' | 'yolo' | 'weights';
+type DepGroup = 'runtime' | 'template' | 'input' | 'yolo' | 'weights' | 'ocr';
 type DepState = 'ok' | 'missing' | 'na' | 'info';
 
 type DepRow = {
@@ -31,6 +31,7 @@ const GROUP_META: Record<DepGroup, { title: string; desc: string }> = {
   input: { title: '点击输入', desc: 'click / input / scroll / keyboard 节点' },
   yolo: { title: 'YOLO 运行环境', desc: '识别节点「YOLO」策略与训练推理依赖' },
   weights: { title: 'YOLO 预训练权重', desc: 'COCO 预训练参数，训练时作为初始权重' },
+  ocr: { title: 'OCR 引擎', desc: 'OCR 测试台、识别节点「OCR」策略' },
 };
 
 const CUSTOM_MIRROR = '__custom__';
@@ -287,6 +288,8 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
   const [weights, setWeights] = useState<{ name: string; present: boolean; sizeBytes: number }[]>([]);
   const [weightsLoading, setWeightsLoading] = useState(false);
   const [downloadingWeight, setDownloadingWeight] = useState<string | null>(null);
+  const [ocrLangInstalled, setOcrLangInstalled] = useState<Record<string, boolean> | null>(null);
+  const [installingOcrLang, setInstallingOcrLang] = useState<string | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
   const [stickBottom, setStickBottom] = useState(true);
   const onChangedRef = useRef(onChanged);
@@ -357,6 +360,32 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
     }
   };
 
+  const refreshOcrLang = useCallback(async () => {
+    if (!window.ocrAPI) return;
+    try {
+      const status = await window.ocrAPI.langStatus();
+      setOcrLangInstalled(status.installed);
+    } catch {
+      setOcrLangInstalled(null);
+    }
+  }, []);
+
+  const installOcrLang = useCallback(async (lang: string) => {
+    if (!window.ocrAPI || installingOcrLang) return;
+    const label = lang === 'chi_sim' ? '中文' : '英文';
+    setInstallingOcrLang(lang);
+    setOutput((prev) => [...prev.slice(-199), { t: 'log', level: 'info', message: `开始下载 Tesseract ${label}语言包…` }]);
+    try {
+      const res = await window.ocrAPI.installLangData({ lang });
+      setOutput((prev) => [...prev.slice(-199), { t: 'log', level: res.ok ? 'info' : 'error', message: res.message ?? (res.ok ? `${label}语言包安装完成` : `${label}语言包安装失败`) }]);
+      setOcrLangInstalled((current) => ({ ...(current ?? {}), [lang]: res.ok }));
+    } catch (err) {
+      setOutput((prev) => [...prev.slice(-199), { t: 'log', level: 'error', message: String(err) }]);
+    } finally {
+      setInstallingOcrLang(null);
+    }
+  }, [installingOcrLang]);
+
   const refreshWeights = useCallback(async () => {
     if (!window.yoloAPI) return;
     setWeightsLoading(true);
@@ -388,12 +417,17 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
     void refreshWeights();
   }, [refreshWeights]);
 
+  useEffect(() => {
+    void refreshOcrLang();
+  }, [refreshOcrLang]);
+
   const rows = useMemo<DepRow[]>(() => {
     const list: DepRow[] = [];
     const push = (row: DepRow) => list.push(row);
     const showTemplateDeps = mode === 'template' || mode === 'yolo' || mode === 'full';
     const showInputDeps = mode === 'input' || mode === 'full';
     const showYoloDeps = mode === 'yolo' || mode === 'full';
+    const showOcrDeps = mode === 'full';
 
     if (!yoloEnv) return list;
 
@@ -573,8 +607,53 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
       });
     }
 
+    if (showOcrDeps) {
+      const langs: { key: string; label: string; sizeHint: string }[] = [
+        { key: 'eng', label: 'Tesseract 英文语言包', sizeHint: '约 4 MB' },
+        { key: 'chi_sim', label: 'Tesseract 中文语言包', sizeHint: '约 13 MB，含英文' },
+      ];
+      for (const lang of langs) {
+        const installed = ocrLangInstalled?.[lang.key] ?? null;
+        if (installed === true) {
+          push({ id: `ocrLang-${lang.key}`, label: lang.label, group: 'ocr', usedBy: 'Tesseract OCR 识别', state: 'ok', value: `${lang.key}.traineddata 已就绪` });
+        } else {
+          push({
+            id: `ocrLang-${lang.key}`,
+            label: lang.label,
+            group: 'ocr',
+            usedBy: 'Tesseract OCR 识别',
+            state: 'missing',
+            value: installed === null ? '未检测' : '未下载',
+            hint: `Tesseract ${lang.key === 'chi_sim' ? '中文' : '英文'}识别需要 ${lang.key}.traineddata 语言包（${lang.sizeHint}）。可在「OCR 测试台」识别时按需自动下载，或在这里手动下载。`,
+            installLabel: '下载语言包',
+            installAction: async () => {
+              await installOcrLang(lang.key);
+              return { started: true, message: '语言包下载任务已启动' };
+            },
+          });
+        }
+      }
+      const paddle = engineEnv?.paddleocr ?? null;
+      if (paddle) {
+        push({ id: 'paddleocr', label: 'PaddleOCR', group: 'ocr', usedBy: 'PaddleOCR 识别', state: 'ok', value: `v${paddle}` });
+      } else {
+        push({
+          id: 'paddleocr',
+          label: 'PaddleOCR',
+          group: 'ocr',
+          usedBy: 'PaddleOCR 识别',
+          state: 'missing',
+          value: '未安装',
+          hint: 'PaddleOCR 是百度开源的 OCR 引擎，适合中文识别；体积较大，按需安装。',
+          commands: ['python3 -m pip install paddleocr paddlepaddle'],
+          installLabel: '安装 PaddleOCR',
+          installAction: () => (window.yoloAPI?.installPackage('paddleocr paddlepaddle') ?? Promise.resolve({ started: false, message: '当前环境不可用' })),
+        });
+      }
+    }
+
     return list;
-  }, [engineEnv, yoloEnv, mode]);
+  }, [engineEnv, yoloEnv, mode, ocrLangInstalled, installOcrLang]);
 
   const grouped = useMemo(() => {
     const map = new Map<DepGroup, DepRow[]>();

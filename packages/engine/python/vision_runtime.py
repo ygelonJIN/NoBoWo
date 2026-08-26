@@ -54,6 +54,16 @@ def run_check(cfg):
         info["pyautogui"] = getattr(pyautogui, "__version__", "?")
     except Exception:
         pass
+    try:
+        from importlib.util import find_spec
+        if find_spec("paddleocr") is not None:
+            try:
+                import paddleocr
+                info["paddleocr"] = getattr(paddleocr, "__version__", "已安装")
+            except Exception:
+                info["paddleocr"] = "已安装"
+    except Exception:
+        pass
     yolox_path = cfg.get("yoloxPath")
     if yolox_path and os.path.isdir(yolox_path):
         sys.path.insert(0, yolox_path)

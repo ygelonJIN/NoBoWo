@@ -53,8 +53,19 @@ contextBridge.exposeInMainWorld('cloudApiAPI', {
 
 contextBridge.exposeInMainWorld('ocrAPI', {
   listEngines: () => ipcRenderer.invoke('ocr:listEngines'),
-  run: (payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number }) =>
+  run: (payload: { engine: OcrEngine; lang?: string; imageDataUrl: string; targetText?: string; width?: number; height?: number }) =>
     ipcRenderer.invoke('ocr:run', payload),
+  langStatus: () => ipcRenderer.invoke('ocr:langStatus'),
+  installLangData: (payload?: { lang?: string }) => ipcRenderer.invoke('ocr:installLangData', payload),
+  onProgress: (callback: (data: { level: 'info' | 'warn' | 'error' | 'debug'; message: string; percent?: number; timestamp: number }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, data: { level: 'info' | 'warn' | 'error' | 'debug'; message: string; percent?: number; timestamp: number }) => {
+      callback(data);
+    };
+    ipcRenderer.on('ocr:progress', listener);
+    return () => {
+      ipcRenderer.removeListener('ocr:progress', listener);
+    };
+  },
 });
 
 contextBridge.exposeInMainWorld('streamAPI', {

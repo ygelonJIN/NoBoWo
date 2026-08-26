@@ -293,6 +293,8 @@ export type EngineEnvInfo = {
   yolox: string | null;
   /** pyautogui 版本号，未安装为 null */
   pyautogui: string | null;
+  /** PaddleOCR 版本号，未安装为 null */
+  paddleocr: string | null;
   cuda: boolean;
   mps: boolean;
   device: string;

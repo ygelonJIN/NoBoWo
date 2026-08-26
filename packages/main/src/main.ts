@@ -1,5 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell } from 'electron';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { connect as tcpConnect } from 'node:net';
@@ -237,17 +238,45 @@ function registerCloudApiIpc() {
       if (!baseUrl) return { ok: false, message: 'Base URL 不能为空', lastTestAt: Date.now() };
       const normalized = baseUrl.replace(/\/+$/, '');
       const now = Date.now();
-      try {
-        const response = await fetch(`${normalized}`,
-          {
-            method: 'GET',
-            headers: payload.apiKey ? { Authorization: `Bearer ${payload.apiKey}` } : undefined,
-          },
-        );
-        if (response.ok || response.status < 500) {
-          return { ok: true, message: `${payload.name ?? '配置'} 连接成功（HTTP ${response.status}）`, lastTestAt: now };
+      const headers: Record<string, string> | undefined = payload.apiKey ? { Authorization: `Bearer ${payload.apiKey}` } : undefined;
+      const fetchWithTimeout = async (url: string) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+          return await fetch(url, { method: 'GET', headers, signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
         }
-        return { ok: false, message: `服务端返回 HTTP ${response.status}`, lastTestAt: now };
+      };
+      try {
+        // OpenAI 兼容服务：GET 根路径（如 /v1）通常返回 404，标准探测端点是 GET {base}/models。
+        // 依次尝试 /models 与根路径，任一个 2xx 即视为连接成功。
+        const candidates = [`${normalized}/models`, normalized];
+        for (const url of candidates) {
+          try {
+            const response = await fetchWithTimeout(url);
+            if (response.ok) {
+              return { ok: true, message: `${payload.name ?? '配置'} 连接成功（HTTP ${response.status}）`, lastTestAt: now };
+            }
+          } catch {
+            // 尝试下一个候选端点
+          }
+        }
+        let lastStatus: number | null = null;
+        let lastError: string | null = null;
+        for (const url of candidates) {
+          try {
+            const response = await fetchWithTimeout(url);
+            lastStatus = response.status;
+          } catch (err) {
+            lastError = err instanceof Error ? err.message : String(err);
+          }
+        }
+        const statusText = lastStatus ? `HTTP ${lastStatus}` : (lastError ? '连接失败' : '请求超时或网络不可达');
+        const hint = lastStatus === 404 || lastStatus === 405
+          ? '。已尝试 GET {Base URL}/models 与 GET {Base URL} 均未通过，请确认 Base URL 填的是服务根地址（如 https://xxx.com/v1）且服务支持 OpenAI 兼容接口'
+          : '。请检查网络、Base URL 与 API Key 是否正确';
+        return { ok: false, message: `连接失败（${statusText}）${hint}`, lastTestAt: now };
       } catch (err) {
         return { ok: false, message: err instanceof Error ? err.message : String(err), lastTestAt: now };
       }
@@ -629,86 +658,349 @@ function registerOcrIpc() {
   }));
 
   const ocrDataDir = () => join(app.getPath('userData'), 'ocr');
+  type OcrProgressLevel = 'info' | 'warn' | 'error' | 'debug';
+  type OcrProgressFn = (level: OcrProgressLevel, message: string, percent?: number) => void;
 
-  async function ensureOcrLangData(): Promise<{ langPath: string; gzip: boolean }> {
+  /** 支持的语言包：key 为 tesseract 语言代码 */
+  const OCR_LANG_META: Record<string, { label: string }> = {
+    eng: { label: '英文（eng）' },
+    chi_sim: { label: '中文（chi_sim）' },
+  };
+
+  /** 各语言包镜像源：主源不可用时自动切换备用源 */
+  const LANG_DATA_MIRRORS: Record<string, string[]> = {
+    eng: [
+      'https://tessdata.projectnaptha.com/4.0.0/eng.traineddata.gz',
+      'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/eng.traineddata.gz',
+      'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0/eng.traineddata.gz',
+    ],
+    chi_sim: [
+      'https://tessdata.projectnaptha.com/4.0.0/chi_sim.traineddata.gz',
+      'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata.gz',
+      'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0/chi_sim.traineddata.gz',
+    ],
+  };
+
+  async function ensureOcrLangData(langs: string[], progress: OcrProgressFn): Promise<{ langPath: string; gzip: boolean }> {
     const dir = ocrDataDir();
     await mkdir(dir, { recursive: true });
-    const gzPath = join(dir, 'eng.traineddata.gz');
-    const rawPath = join(dir, 'eng.traineddata');
-    try {
-      await stat(gzPath);
-      return { langPath: dir, gzip: true };
-    } catch {
-      // continue
+    let allGzip = true;
+    for (const lang of langs) {
+      const label = OCR_LANG_META[lang]?.label ?? lang;
+      const gzPath = join(dir, `${lang}.traineddata.gz`);
+      const rawPath = join(dir, `${lang}.traineddata`);
+      let state: 'gz' | 'raw' | null = null;
+      try {
+        await stat(gzPath);
+        state = 'gz';
+      } catch {
+        try {
+          await stat(rawPath);
+          state = 'raw';
+        } catch {
+          // 未安装
+        }
+      }
+      if (state === 'gz') {
+        progress('info', `语言包已就绪（${lang}.traineddata.gz）`);
+        continue;
+      }
+      if (state === 'raw') {
+        allGzip = false;
+        progress('info', `语言包已就绪（${lang}.traineddata）`);
+        continue;
+      }
+      const mirrors = LANG_DATA_MIRRORS[lang] ?? [];
+      let lastError: string | null = null;
+      let downloaded = false;
+      for (const url of mirrors) {
+        progress('info', `需要下载 ${label}语言包，开始下载（${new URL(url).hostname}）…`);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60000);
+        try {
+          const response = await fetch(url, { signal: controller.signal });
+          if (!response.ok) {
+            lastError = `HTTP ${response.status}`;
+            progress('warn', `镜像下载失败（HTTP ${response.status}），尝试下一个镜像…`);
+            continue;
+          }
+          const total = Number(response.headers.get('content-length')) || 0;
+          const body = response.body;
+          if (!body) {
+            const buffer = Buffer.from(await response.arrayBuffer());
+            await writeFile(gzPath, buffer);
+          } else {
+            const reader = body.getReader();
+            const chunks: Uint8Array[] = [];
+            let received = 0;
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) {
+                chunks.push(value);
+                received += value.length;
+              }
+              if (total > 0) {
+                progress('info', `语言包下载中 ${(received / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB`, Math.min(100, Math.round((received / total) * 100)));
+              }
+            }
+            await writeFile(gzPath, Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+          }
+          progress('info', `${label}语言包下载完成`);
+          downloaded = true;
+          break;
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          progress('warn', `镜像下载失败：${lastError}，尝试下一个镜像…`);
+          continue;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      if (!downloaded) {
+        throw new Error(`${label}语言包下载失败（${lastError ?? '未知错误'}），请检查网络后在「全局环境依赖 → OCR 引擎」中重新下载`);
+      }
     }
-    try {
-      await stat(rawPath);
-      return { langPath: dir, gzip: false };
-    } catch {
-      // continue
-    }
-    const response = await fetch('https://tessdata.projectnaptha.com/4.0.0/eng.traineddata.gz');
-    if (!response.ok) {
-      throw new Error(`首次使用需要下载 OCR 语言包（HTTP ${response.status}），请检查网络后重试`);
-    }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    await writeFile(gzPath, buffer);
-    return { langPath: dir, gzip: true };
+    return { langPath: dir, gzip: allGzip };
   }
+
+  /** 解析 macOS Vision OCR 脚本路径（dev / 打包） */
+  function resolveVisionOcrScript(): string | null {
+    const candidates = [
+      join(app.getAppPath(), 'packages', 'engine', 'macos', 'vision_ocr.js'),
+      join(process.resourcesPath, 'engine', 'macos', 'vision_ocr.js'),
+      join(app.getAppPath(), 'engine', 'macos', 'vision_ocr.js'),
+    ];
+    return candidates.find((path) => existsSync(path)) ?? null;
+  }
+
+  type VisionBlock = { text: string; confidence: number; box: { x: number; y: number; width: number; height: number } };
+  type VisionResult = { error: string } | { width: number; height: number; blocks: VisionBlock[] };
+
+  /** 通过 osascript 调用 macOS 系统 Vision 框架进行 OCR */
+  function runMacosVisionOcr(imagePath: string, languages: string[]): Promise<VisionResult> {
+    return new Promise((resolve) => {
+      const scriptPath = resolveVisionOcrScript();
+      if (!scriptPath) {
+        resolve({ error: '未找到 macOS Vision 脚本（engine/macos/vision_ocr.js）' });
+        return;
+      }
+      let stdout = '';
+      let stderr = '';
+      const child = spawn('osascript', ['-l', 'JavaScript', scriptPath, imagePath, languages.join(',')]);
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          // 进程可能已退出
+        }
+      }, 30000);
+      child.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      child.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        resolve({ error: err.message });
+      });
+      child.on('close', () => {
+        clearTimeout(timer);
+        try {
+          const parsed = JSON.parse(stdout) as VisionResult;
+          resolve(parsed);
+        } catch {
+          resolve({ error: stderr.trim() || 'Vision OCR 输出解析失败' });
+        }
+      });
+    });
+  }
+
+  ipcMain.handle('ocr:langStatus', async (): Promise<{ installed: Record<string, boolean> }> => {
+    const dir = ocrDataDir();
+    const installed: Record<string, boolean> = {};
+    for (const lang of Object.keys(OCR_LANG_META)) {
+      try {
+        await stat(join(dir, `${lang}.traineddata.gz`));
+        installed[lang] = true;
+        continue;
+      } catch {
+        // continue
+      }
+      try {
+        await stat(join(dir, `${lang}.traineddata`));
+        installed[lang] = true;
+        continue;
+      } catch {
+        // continue
+      }
+      installed[lang] = false;
+    }
+    return { installed };
+  });
+
+  ipcMain.handle('ocr:installLangData', async (event, payload: { lang?: string } = {}): Promise<{ ok: boolean; message?: string }> => {
+    const send: OcrProgressFn = (level, message, percent) => {
+      try {
+        event.sender.send('ocr:progress', { level, message, percent, timestamp: Date.now() });
+      } catch {
+        // 窗口可能已关闭
+      }
+    };
+    const langs = payload.lang ? [payload.lang] : Object.keys(OCR_LANG_META);
+    try {
+      await ensureOcrLangData(langs, send);
+      return { ok: true, message: 'Tesseract 语言包安装完成' };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      send('error', `语言包安装失败：${message}`);
+      return { ok: false, message };
+    }
+  });
 
   ipcMain.handle(
     'ocr:run',
     async (
-      _event,
-      payload: { engine: OcrEngine; imageDataUrl: string; targetText?: string; width?: number; height?: number },
+      event,
+      payload: { engine: OcrEngine; lang?: string; imageDataUrl: string; targetText?: string; width?: number; height?: number },
     ): Promise<OcrResult> => {
-      const { createWorker } = await import('tesseract.js');
-      const { langPath, gzip } = await ensureOcrLangData();
-      const worker = await createWorker('eng', undefined, { langPath, gzip, cachePath: ocrDataDir() });
+      const send: OcrProgressFn = (level, message, percent) => {
+        try {
+          event.sender.send('ocr:progress', { level, message, percent, timestamp: Date.now() });
+        } catch {
+          // 窗口可能已关闭
+        }
+      };
+      const langLabel = payload.lang === 'chi_sim' ? '中文' : '英文';
+      send('info', `开始 OCR（引擎：${payload.engine} · 语言：${langLabel}）`);
+
+      // macOS 上「系统自动」与「macOS Vision」优先调用系统 Vision 框架（原生支持中文）
+      const isMac = process.platform === 'darwin';
+      const useVision = isMac && (payload.engine === 'macosVision' || payload.engine === 'auto');
+      if (useVision) {
+        const visionLangs = payload.lang === 'chi_sim' ? ['zh-Hans', 'en-US'] : ['en-US'];
+        let imagePath: string | null = null;
+        try {
+          imagePath = await writeImageToTemp(payload.imageDataUrl);
+          if (!imagePath) throw new Error('无法写入临时图片');
+          send('info', '使用 macOS 系统 Vision 引擎识别…');
+          const visionResult = await runMacosVisionOcr(imagePath, visionLangs);
+          if (!('error' in visionResult)) {
+            send('info', `macOS Vision 识别完成，共 ${visionResult.blocks.length} 个文字块`);
+            return {
+              engine: payload.engine,
+              width: visionResult.width,
+              height: visionResult.height,
+              text: visionResult.blocks.map((block) => block.text).join('\n'),
+              matches: visionResult.blocks.map((block, index) => ({
+                id: `vision-${index}-${block.box.x}-${block.box.y}`,
+                text: block.text,
+                box: block.box,
+                confidence: block.confidence,
+              })),
+              message: payload.targetText?.trim() ? `已搜索：${payload.targetText.trim()}` : undefined,
+            };
+          }
+          send('warn', `macOS Vision 不可用（${visionResult.error}），回退到 Tesseract 引擎`);
+        } catch (err) {
+          send('warn', `macOS Vision 识别失败（${err instanceof Error ? err.message : String(err)}），回退到 Tesseract 引擎`);
+        } finally {
+          if (imagePath) {
+            void rm(imagePath, { force: true }).catch(() => {});
+          }
+        }
+      }
+
+      if (payload.engine === 'macosVision' || payload.engine === 'windowsOcr' || payload.engine === 'paddleOcr') {
+        send('warn', `「${payload.engine}」引擎当前未内置，使用 Tesseract 引擎识别`);
+      }
       try {
-        const recognition = await worker.recognize(payload.imageDataUrl, undefined, { blocks: true });
-        const data = recognition.data as {
-          text?: string;
-          blocks?: Array<{
-            paragraphs?: Array<{
-              lines?: Array<{
-                words?: Array<{
-                  text?: string;
-                  confidence?: number;
-                  bbox?: { x0?: number; y0?: number; x1?: number; y1?: number };
+        const tesseractLangs = payload.lang === 'chi_sim' ? ['eng', 'chi_sim'] : ['eng'];
+        const tesseractLangArg = payload.lang === 'chi_sim' ? 'eng+chi_sim' : 'eng';
+        const { langPath, gzip } = await ensureOcrLangData(tesseractLangs, send);
+        const { createWorker } = await import('tesseract.js');
+        // Node 端 tesseract.js 使用本地 worker 脚本与本地 core（tesseract.js-core），
+        // 不指定 workerPath/corePath，避免加载浏览器版脚本或从 CDN 拉取导致卡住。
+        let lastLoggerAt = 0;
+        const workerOptions: Record<string, unknown> = {
+          langPath,
+          gzip,
+          cachePath: ocrDataDir(),
+          logger: (m: { status?: string; progress?: number }) => {
+            if (m && typeof m.status === 'string' && typeof m.progress === 'number') {
+              const now = Date.now();
+              if (now - lastLoggerAt >= 250) {
+                lastLoggerAt = now;
+                send('debug', `识别进度：${m.status} ${Math.round(m.progress * 100)}%`, Math.round(m.progress * 100));
+              }
+            }
+          },
+        };
+        send('info', '正在加载识别引擎与语言模型（首次约需 5-10 秒）…');
+        let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
+        try {
+          worker = await Promise.race([
+            createWorker(tesseractLangArg, undefined, workerOptions),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('识别引擎加载超时（45 秒）')), 45000);
+            }),
+          ]);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Error(`识别引擎加载失败：${message}。请确认应用目录包含 tesseract.js 依赖后重试`);
+        }
+        try {
+          send('info', '开始识别…');
+          const recognition = await worker.recognize(payload.imageDataUrl, undefined, { blocks: true });
+          const data = recognition.data as {
+            text?: string;
+            blocks?: Array<{
+              paragraphs?: Array<{
+                lines?: Array<{
+                  words?: Array<{
+                    text?: string;
+                    confidence?: number;
+                    bbox?: { x0?: number; y0?: number; x1?: number; y1?: number };
+                  }>;
                 }>;
               }>;
             }>;
-          }>;
-        };
-        const words = (data.blocks ?? [])
-          .flatMap((block) => block.paragraphs ?? [])
-          .flatMap((paragraph) => paragraph.lines ?? [])
-          .flatMap((line) => line.words ?? []);
-        const matches = words
-          .filter((word) => word.text?.trim())
-          .map((word, index) => ({
-            id: `ocr-${index}-${word.bbox?.x0 ?? 0}-${word.bbox?.y0 ?? 0}`,
-            text: word.text?.trim() ?? '',
-            box: {
-              x: word.bbox?.x0 ?? 0,
-              y: word.bbox?.y0 ?? 0,
-              width: Math.max(0, (word.bbox?.x1 ?? 0) - (word.bbox?.x0 ?? 0)),
-              height: Math.max(0, (word.bbox?.y1 ?? 0) - (word.bbox?.y0 ?? 0)),
-            },
-            confidence: typeof word.confidence === 'number' ? word.confidence / 100 : undefined,
-          }))
-          .filter((match) => match.text.length > 0);
-        return {
-          engine: payload.engine,
-          width: payload.width ?? 0,
-          height: payload.height ?? 0,
-          text: data.text?.trim() ?? '',
-          matches,
-          message: payload.targetText?.trim() ? `已搜索：${payload.targetText.trim()}` : undefined,
-        };
-      } finally {
-        await worker.terminate();
+          };
+          const words = (data.blocks ?? [])
+            .flatMap((block) => block.paragraphs ?? [])
+            .flatMap((paragraph) => paragraph.lines ?? [])
+            .flatMap((line) => line.words ?? []);
+          const matches = words
+            .filter((word) => word.text?.trim())
+            .map((word, index) => ({
+              id: `ocr-${index}-${word.bbox?.x0 ?? 0}-${word.bbox?.y0 ?? 0}`,
+              text: word.text?.trim() ?? '',
+              box: {
+                x: word.bbox?.x0 ?? 0,
+                y: word.bbox?.y0 ?? 0,
+                width: Math.max(0, (word.bbox?.x1 ?? 0) - (word.bbox?.x0 ?? 0)),
+                height: Math.max(0, (word.bbox?.y1 ?? 0) - (word.bbox?.y0 ?? 0)),
+              },
+              confidence: typeof word.confidence === 'number' ? word.confidence / 100 : undefined,
+            }))
+            .filter((match) => match.text.length > 0);
+          send('info', `识别完成，共 ${matches.length} 个文字块`);
+          return {
+            engine: payload.engine,
+            width: payload.width ?? 0,
+            height: payload.height ?? 0,
+            text: data.text?.trim() ?? '',
+            matches,
+            message: payload.targetText?.trim() ? `已搜索：${payload.targetText.trim()}` : undefined,
+          };
+        } finally {
+          await worker.terminate();
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send('error', `OCR 失败：${message}`);
+        throw err;
       }
     },
   );
@@ -2681,12 +2973,13 @@ function registerEngineIpc() {
         torch: typeof env.torch === 'string' ? env.torch : null,
         yolox: typeof env.yolox === 'string' ? env.yolox : null,
         pyautogui: typeof env.pyautogui === 'string' ? env.pyautogui : null,
+        paddleocr: typeof env.paddleocr === 'string' ? env.paddleocr : null,
         cuda: Boolean(env.cuda),
         mps: Boolean(env.mps),
         device: typeof env.device === 'string' ? env.device : 'none',
       };
     }
-    return { cv2: null, torch: null, yolox: null, pyautogui: null, cuda: false, mps: false, device: 'none' };
+    return { cv2: null, torch: null, yolox: null, pyautogui: null, paddleocr: null, cuda: false, mps: false, device: 'none' };
   });
 
   ipcMain.handle(
