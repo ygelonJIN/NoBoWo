@@ -6658,6 +6658,79 @@ pre::-webkit-scrollbar-thumb:hover {
   font-size: 13px;
   font-weight: 600;
 }
+.debug-panel__summary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.debug-panel__summary-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(155, 180, 220, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.debug-panel__summary-row--done {
+  border-color: rgba(106, 227, 161, 0.18);
+}
+.debug-panel__summary-row--failed {
+  border-color: rgba(255, 143, 143, 0.28);
+}
+.debug-panel__summary-row--running {
+  border-color: rgba(120, 169, 255, 0.3);
+}
+.debug-panel__summary-index {
+  flex: 0 0 22px;
+  height: 22px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(120, 169, 255, 0.12);
+  color: rgba(231, 236, 243, 0.7);
+  font-size: 11px;
+  font-weight: 700;
+}
+.debug-panel__summary-main {
+  min-width: 0;
+  flex: 1;
+}
+.debug-panel__summary-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.debug-panel__summary-title strong {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.debug-panel__summary-type,
+.debug-panel__summary-detail,
+.debug-panel__summary-time {
+  color: rgba(231, 236, 243, 0.45);
+  font-size: 10px;
+}
+.debug-panel__summary-message {
+  margin-top: 4px;
+  color: rgba(231, 236, 243, 0.72);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.debug-panel__summary-detail {
+  margin-top: 3px;
+}
+.debug-panel__summary-time {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
 .debug-panel__shots {
   flex-shrink: 0;
   padding: 0 16px 10px;
@@ -6666,32 +6739,75 @@ pre::-webkit-scrollbar-thumb:hover {
 .debug-panel__shots .debug-panel__section-title {
   padding-bottom: 6px;
 }
-.debug-panel__shot-row {
+.debug-panel__shot-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
-.debug-panel__shot {
+.debug-panel__shot-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(155, 180, 220, 0.18);
+  background: rgba(255, 255, 255, 0.03);
+  color: #e7ecf3;
+  cursor: pointer;
+  overflow: hidden;
+  min-height: 180px;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.debug-panel__shot-card:hover {
+  border-color: rgba(120, 169, 255, 0.45);
+  background: rgba(120, 169, 255, 0.06);
+  transform: translateY(-1px);
+}
+.debug-panel__shot-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(231, 236, 243, 0.8);
+  text-align: left;
+}
+.debug-panel__shot-card-img {
+  width: 100%;
+  display: block;
   border-radius: 10px;
-  border: 1px dashed rgba(155, 180, 220, 0.22);
-  background: rgba(255, 255, 255, 0.02);
-  min-height: 58px;
+  object-fit: contain;
+  background: #000;
+}
+.debug-panel__shot-card-stack,
+.debug-panel__shot-card-diff-col {
+  position: relative;
+  width: 100%;
+}
+.debug-panel__shot-card-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.debug-panel__shot-card-marker {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  margin-top: -6px;
+  border-radius: 50%;
+  border: 2px solid #ffffff;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+}
+.debug-panel__shot-card-empty {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(231, 236, 243, 0.35);
-  font-size: 11.5px;
-  text-align: center;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-.debug-panel__shot:hover {
-  border-color: rgba(120, 169, 255, 0.4);
-  background: rgba(120, 169, 255, 0.05);
-  color: rgba(231, 236, 243, 0.6);
-}
-.debug-panel__shot-label {
-  pointer-events: none;
+  min-height: 130px;
+  border-radius: 10px;
+  border: 1px dashed rgba(155, 180, 220, 0.18);
+  color: rgba(231, 236, 243, 0.4);
+  font-size: 12px;
 }
 .debug-panel__shot-viewer {
   position: absolute;
@@ -6711,6 +6827,9 @@ pre::-webkit-scrollbar-thumb:hover {
   background: rgba(13, 18, 26, 0.98);
   overflow: hidden;
 }
+.debug-panel__shot-viewer-inner--large {
+  max-width: min(92vw, 1100px);
+}
 .debug-panel__shot-viewer-head {
   display: flex;
   align-items: center;
@@ -6727,6 +6846,54 @@ pre::-webkit-scrollbar-thumb:hover {
   justify-content: center;
   color: rgba(231, 236, 243, 0.35);
   font-size: 13px;
+}
+.debug-panel__shot-viewer-canvas--large {
+  height: auto;
+  max-height: 80vh;
+  padding: 14px;
+  overflow: auto;
+}
+.debug-panel__shot-viewer-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+.debug-panel__shot-viewer-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+}
+.debug-panel__shot-viewer-marker {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin-left: -9px;
+  margin-top: -9px;
+  border-radius: 50%;
+  border: 2px solid #ff4466;
+  background: rgba(255, 68, 102, 0.2);
+  box-shadow: 0 0 10px rgba(255, 68, 102, 0.6);
+}
+.debug-panel__shot-viewer-diff {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+.debug-panel__shot-viewer-diff-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: rgba(231, 236, 243, 0.8);
+  font-size: 12px;
+}
+.debug-panel__shot-viewer-diff-col small {
+  color: rgba(231, 236, 243, 0.45);
+}
+.debug-panel__shot-viewer-empty {
+  padding: 24px;
+  color: rgba(231, 236, 243, 0.45);
 }
 
 /* 命中点标记 */

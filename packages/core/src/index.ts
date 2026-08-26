@@ -357,6 +357,7 @@ export type RecognizeStrategyRun = {
   x?: number;
   y?: number;
   elapsedMs?: number;
+  debugImagePath?: string;
 };
 
 export type NodeRunResult = {
@@ -380,6 +381,8 @@ export type NodeRunResult = {
   branch?: 'true' | 'false';
   /** 命中使用的策略 key */
   strategy?: RecognizeStrategyKey;
+  /** 调试图路径（仅用于模板等策略的可视化调试） */
+  debugImagePath?: string;
 };
 
 export type WorkflowRunEvent =

@@ -73,6 +73,7 @@ def run_template(cfg):
 
     image_path = cfg.get("imagePath")
     template_path = cfg.get("templatePath")
+    debug_image_path = cfg.get("debugImagePath")
     if not image_path or not template_path:
         return fail("template", "缺少图片或模板路径")
     threshold = float(cfg.get("threshold", 60))
@@ -124,6 +125,19 @@ def run_template(cfg):
         click_x += int(offset.get("x", 0))
         click_y += int(offset.get("y", 0))
 
+    if debug_image_path:
+        try:
+            dbg = img.copy()
+            cv2.rectangle(dbg, (x, y), (x + w, y + h), (0, 0, 255), 2)
+            cv2.circle(dbg, (click_x, click_y), 6, (0, 255, 0), -1)
+            cv2.line(dbg, (click_x - 12, click_y), (click_x + 12, click_y), (0, 255, 0), 2)
+            cv2.line(dbg, (click_x, click_y - 12), (click_x, click_y + 12), (0, 255, 0), 2)
+            label = "{0:.1f}% {1}".format(confidence_pct, "hit" if ok else "miss")
+            cv2.putText(dbg, label, (max(0, x), max(0, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.imwrite(debug_image_path, dbg)
+        except Exception:
+            pass
+
     emit(
         t="done",
         command="template",
@@ -135,6 +149,7 @@ def run_template(cfg):
         confidence=confidence_pct,
         clickX=click_x,
         clickY=click_y,
+        debugImagePath=debug_image_path,
         message="匹配成功" if ok else "低于阈值（{0}% < {1}%）".format(confidence_pct, threshold),
     )
     return 0
@@ -423,10 +438,18 @@ def run_input(cfg):
             if not _activate_window(info):
                 return fail("input", "无法激活目标窗口，请确认已授予辅助功能权限")
             time.sleep(0.4)
-            rel_x = float(cfg.get("relX", 0.5))
-            rel_y = float(cfg.get("relY", 0.5))
-            x = info["x"] + info["width"] * rel_x
-            y = info["y"] + info["height"] * rel_y
+            x = cfg.get("x")
+            y = cfg.get("y")
+            if x is None or y is None:
+                rel_x = float(cfg.get("relX", 0.5))
+                rel_y = float(cfg.get("relY", 0.5))
+                x = info["x"] + info["width"] * rel_x
+                y = info["y"] + info["height"] * rel_y
+            else:
+                x = float(x)
+                y = float(y)
+                rel_x = (x - info["x"]) / info["width"] if info["width"] else 0.5
+                rel_y = (y - info["y"]) / info["height"] if info["height"] else 0.5
             button = cfg.get("button", "left")
             clicks = int(cfg.get("clicks", 1))
             duration = float(cfg.get("duration", 0))
@@ -459,15 +482,23 @@ def run_input(cfg):
             db = _display_bounds(cfg.get("displayId"))
             if not db or db["width"] <= 0 or db["height"] <= 0:
                 return fail("input", "无法获取显示器边界，请确认屏幕录制权限已授权")
-            rel_x = float(cfg.get("relX", 0.5))
-            rel_y = float(cfg.get("relY", 0.5))
-            x = db["x"] + db["width"] * rel_x
-            y = db["y"] + db["height"] * rel_y
+            x = cfg.get("x")
+            y = cfg.get("y")
+            if x is None or y is None:
+                rel_x = float(cfg.get("relX", 0.5))
+                rel_y = float(cfg.get("relY", 0.5))
+                x = db["x"] + db["width"] * rel_x
+                y = db["y"] + db["height"] * rel_y
+            else:
+                x = float(x)
+                y = float(y)
             button = cfg.get("button", "left")
             clicks = int(cfg.get("clicks", 1))
             duration = float(cfg.get("duration", 0))
             emit(t="done", command="input", ok=True, action=action, display=db, target={"x": x, "y": y}, message="屏幕点击坐标已计算")
             pyautogui.click(x, y, clicks=clicks, interval=0.05, button=button, duration=duration)
+            actual = _mouse_position()
+            emit(t="done", command="input", ok=True, action=action, display=db, target={"x": x, "y": y}, actual=actual, message="屏幕点击完成")
             return 0
         elif action == "click":
             x = float(cfg["x"]) if "x" in cfg else None

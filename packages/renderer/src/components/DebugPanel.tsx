@@ -1,6 +1,24 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { WorkflowEdge, WorkflowNode, WorkflowRunSnapshot } from '@nobowo/core';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { NodeRunResult, WorkflowEdge, WorkflowNode, WorkflowRunSnapshot } from '@nobowo/core';
 
+const NODE_TYPE_LABELS: Record<string, string> = {
+  screenshot: '截图',
+  recognize: '识别',
+  click: '点击',
+  input: '输入',
+  wait: '等待',
+  scroll: '滚动',
+  keyboard: '按键',
+  if: '条件',
+  loop: '循环',
+};
+const STATUS_LABELS: Record<string, string> = {
+  pending: '待执行',
+  running: '执行中',
+  done: '已完成',
+  failed: '失败',
+  skipped: '已跳过',
+};
 const STRATEGY_LABELS: Record<string, string> = {
   coords: '坐标回放',
   template: '模板匹配',
@@ -10,18 +28,42 @@ const STRATEGY_LABELS: Record<string, string> = {
 };
 const STRATEGY_ORDER = ['coords', 'template', 'yolo', 'ocr', 'cloudApi'] as const;
 
+function resultSummary(node: WorkflowNode, result?: NodeRunResult): string {
+  if (!result) return '尚未执行';
+  if (result.message) return result.message;
+  if (node.type === 'recognize' && result.hitCoords) return `命中 (${result.hitCoords.x}, ${result.hitCoords.y})`;
+  return STATUS_LABELS[mapNodeStatus(result.status)] ?? result.status;
+}
+
+function resultDetail(node: WorkflowNode, result?: NodeRunResult): string | null {
+  if (!result) return null;
+  if (node.type === 'recognize' && result.strategies) {
+    const hit = result.strategies.find((item) => item.status === 'hit');
+    if (hit) return `${STRATEGY_LABELS[hit.key] ?? hit.key}${hit.confidence !== undefined ? ` · ${hit.confidence}%` : ''}`;
+  }
+  if (node.type === 'click' && result.hitCoords) return `点击坐标 (${result.hitCoords.x}, ${result.hitCoords.y})`;
+  if (node.type === 'screenshot' && result.frame) return `${result.width ?? 0} × ${result.height ?? 0}`;
+  return null;
+}
+
+function mapNodeStatus(s: string): 'pending' | 'running' | 'done' | 'failed' | 'skipped' {
+  if (s === 'ok') return 'done';
+  if (s === 'fail') return 'failed';
+  if (s === 'skipped') return 'skipped';
+  if (s === 'running') return 'running';
+  return 'pending';
+}
+
 type Props = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
-  selectedNodeId: string | null;
-  onFocusNode: (nodeId: string | null) => void;
   onClose: () => void;
   notice?: { main: string; hint?: string } | null;
   workflowState?: WorkflowRunSnapshot | null;
   logs: string[];
 };
 
-type ShotKey = 'before' | 'after' | 'diff';
+type ShotKey = 'before' | 'during' | 'after';
 
 function orderWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -70,14 +112,6 @@ function getNodeLabel(node: WorkflowNode): string {
   }
 }
 
-function mapNodeStatus(s: string): 'pending' | 'running' | 'done' | 'failed' | 'skipped' {
-  if (s === 'ok') return 'done';
-  if (s === 'fail') return 'failed';
-  if (s === 'skipped') return 'skipped';
-  if (s === 'running') return 'running';
-  return 'pending';
-}
-
 function mapRunStatus(s: string): 'idle' | 'running' | 'paused' | 'done' {
   if (s === 'running' || s === 'resumed') return 'running';
   if (s === 'paused') return 'paused';
@@ -100,13 +134,11 @@ function buildFallbackLogs(workflowState: WorkflowRunSnapshot | null | undefined
   return lines;
 }
 
-export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose, notice, workflowState, logs }: Props) {
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs }: Props) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [expandedShot, setExpandedShot] = useState<ShotKey | null>(null);
 
   const steps = useMemo(() => orderWorkflow(nodes, edges), [nodes, edges]);
-  const selectedStep = steps.find((n) => n.id === selectedStepId) ?? null;
 
   // Derive ALL display state from real workflowState
   const status = mapRunStatus(workflowState?.status ?? 'idle');
@@ -121,6 +153,47 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
   }, [workflowState?.nodeStates]);
 
   const runResults = workflowState?.nodeResults ?? {};
+  const screenshotRecords = useMemo(() => {
+    return steps.flatMap((node, index) => {
+      const result = runResults[node.id];
+      return node.type === 'screenshot' && result?.frame ? [{ node, result, index }] : [];
+    });
+  }, [runResults, steps]);
+  const screenshotBefore = screenshotRecords[0] ?? null;
+  const screenshotAfter = screenshotRecords.length > 1 ? screenshotRecords[screenshotRecords.length - 1] : null;
+  const screenshotEvidence = useMemo(() => {
+    return screenshotRecords.map((shot, shotIndex) => {
+      const nextIndex = screenshotRecords[shotIndex + 1]?.index ?? steps.length;
+      const relatedNodes = steps.slice(shot.index + 1, nextIndex).filter((node) => node.type === 'recognize' || node.type === 'click');
+      const markers = relatedNodes.flatMap((node) => {
+        const result = runResults[node.id];
+        return result?.hitCoords ? [{ x: result.hitCoords.x, y: result.hitCoords.y, label: `${node.title} · ${NODE_TYPE_LABELS[node.type] ?? node.type}` }] : [];
+      });
+      return { ...shot, relatedNodes, markers };
+    });
+  }, [runResults, screenshotRecords, steps]);
+  const recognizeEntries = useMemo(() => {
+    return steps.flatMap((node, index) => {
+      const result = runResults[node.id];
+      return node.type === 'recognize' && result ? [{ node, result, index }] : [];
+    });
+  }, [runResults, steps]);
+  const clickEntries = useMemo(() => {
+    return steps.flatMap((node, index) => {
+      const result = runResults[node.id];
+      return node.type === 'click' && result ? [{ node, result, index }] : [];
+    });
+  }, [runResults, steps]);
+  const executionMarkers = useMemo(() => {
+    const markers: Array<{ x: number; y: number; label: string; kind: 'recognize' | 'click' }> = [];
+    for (const entry of recognizeEntries) {
+      if (entry.result.hitCoords) markers.push({ x: entry.result.hitCoords.x, y: entry.result.hitCoords.y, label: `${entry.node.title} · 识别`, kind: 'recognize' });
+    }
+    for (const entry of clickEntries) {
+      if (entry.result.hitCoords) markers.push({ x: entry.result.hitCoords.x, y: entry.result.hitCoords.y, label: `${entry.node.title} · 点击`, kind: 'click' });
+    }
+    return markers;
+  }, [clickEntries, recognizeEntries]);
   const currentStepId = useMemo(() => {
     if (!workflowState) return null;
     const runningId = steps.find((n) => workflowState.nodeStates[n.id] === 'running')?.id ?? null;
@@ -135,18 +208,6 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
   const currentStep = steps.find((n) => n.id === currentStepId) ?? null;
 
   const timelineRef = useRef<HTMLDivElement | null>(null);
-
-  // Sync selectedStepId from canvas node selection
-  useEffect(() => {
-    if (selectedNodeId && selectedNodeId !== selectedStepId) {
-      setSelectedStepId(selectedNodeId);
-    }
-  }, [selectedNodeId]);
-
-  // Auto-select first step
-  useEffect(() => {
-    setSelectedStepId((current) => current ?? steps[0]?.id ?? null);
-  }, [steps]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -166,10 +227,6 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [currentStepId]);
 
-  const handleStepClick = useCallback((nodeId: string) => {
-    setSelectedStepId(nodeId);
-    onFocusNode(nodeId);
-  }, [onFocusNode]);
 
   const doneCount = Object.values(stepStates).filter((s) => s === 'done' || s === 'skipped').length;
   const totalCount = steps.length;
@@ -195,9 +252,27 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
 
   const shotLabels: Record<ShotKey, string> = {
     before: '执行前',
+    during: '执行中',
     after: '执行后',
-    diff: '变化对比',
   };
+
+  const beforeFrame = screenshotBefore?.result.frame ?? null;
+  const afterFrame = screenshotAfter?.result.frame ?? null;
+  const beforeSize = screenshotBefore ? { width: screenshotBefore.result.width ?? 0, height: screenshotBefore.result.height ?? 0 } : null;
+  const afterSize = screenshotAfter ? { width: screenshotAfter.result.width ?? 0, height: screenshotAfter.result.height ?? 0 } : null;
+  const summaryRows = steps.map((node, index) => {
+    const result = runResults[node.id];
+    const state = stepStates[node.id] ?? 'pending';
+    return {
+      node,
+      index,
+      state,
+      result,
+      summary: resultSummary(node, result),
+      detail: resultDetail(node, result),
+    };
+  });
+  const duringMarkers = executionMarkers;
 
   return (
     <div
@@ -256,15 +331,13 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
         <div className="debug-panel__step-list">
           {steps.map((node, index) => {
             const state = stepStates[node.id] ?? 'pending';
-            const active = node.id === selectedStepId;
             const isCurrent = node.id === currentStepId;
             const result = runResults[node.id];
             return (
-              <button
+              <div
                 key={node.id}
                 data-step={node.id}
-                className={`debug-panel__step ${active ? 'debug-panel__step--active' : ''} ${isCurrent ? 'debug-panel__step--current' : ''} ${state === 'failed' ? 'debug-panel__step--failed' : ''} ${!node.enabled ? 'debug-panel__step--node-disabled' : ''}`}
-                onClick={() => handleStepClick(node.id)}
+                className={`debug-panel__step ${isCurrent ? 'debug-panel__step--current' : ''} ${state === 'failed' ? 'debug-panel__step--failed' : ''} ${!node.enabled ? 'debug-panel__step--node-disabled' : ''}`}
               >
                 <span className={`debug-panel__step-dot debug-panel__step-dot--${state}`} aria-hidden="true" />
                 <span className="debug-panel__step-index">{index + 1}</span>
@@ -281,7 +354,7 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
                 <span className={`debug-panel__step-status debug-panel__step-status--${state}`}>
                   {stepStatusLabel[state]}
                 </span>
-              </button>
+              </div>
             );
           })}
           {steps.length === 0 && <div className="debug-panel__empty">画布还没有节点</div>}
@@ -291,134 +364,54 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
       {/* Detail */}
       <section className="debug-panel__detail">
         <div className="debug-panel__section-title">步骤摘要</div>
-        {selectedStep ? (
-          <>
-            <div className="debug-panel__detail-head">
-              <h3>{selectedStep.title}</h3>
-              <span className="debug-panel__type-badge">{selectedStep.type}</span>
-              <span className={`debug-panel__step-status debug-panel__step-status--${stepStates[selectedStep.id] ?? 'pending'}`}>
-                {stepStatusLabel[stepStates[selectedStep.id] ?? 'pending']}
-              </span>
-            </div>
-            <p className="debug-panel__detail-desc">{getNodeLabel(selectedStep)}</p>
-
-            <div className="debug-panel__summary-grid">
-              <div className="debug-panel__summary-card">
-                <span className="debug-panel__summary-label">执行状态</span>
-                <strong>{stepStatusLabel[stepStates[selectedStep.id] ?? 'pending']}</strong>
-              </div>
-              <div className="debug-panel__summary-card">
-                <span className="debug-panel__summary-label">节点类型</span>
-                <strong>{selectedStep.type}</strong>
-              </div>
-              <div className="debug-panel__summary-card">
-                <span className="debug-panel__summary-label">启用</span>
-                <strong>{selectedStep.enabled !== false ? '是' : '否'}</strong>
-              </div>
-            </div>
-
-            {selectedStep.type === 'recognize' && (
-              <div className="debug-panel__strategy-chips">
-                <span className="debug-panel__summary-label">策略栈</span>
-                <div className="debug-panel__chips">
-                  {(selectedStep.data.strategyOrder ?? STRATEGY_ORDER).map((key, i) => {
-                    const strategy = (selectedStep.data.strategies as Record<string, { enabled: boolean; threshold?: number }>)[key];
-                    if (!strategy) return null;
-                    const runResult = (runResults[selectedStep.id]?.strategies as Array<{ key: string; label?: string; status: string; confidence?: number }>)?.find((s) => s.key === key);
-                    const chipClass = runResult
-                      ? `debug-panel__chip debug-panel__chip--${runResult.status}`
-                      : strategy.enabled
-                        ? 'debug-panel__chip debug-panel__chip--enabled'
-                        : 'debug-panel__chip debug-panel__chip--disabled';
-                    const label = `${i + 1}. ${STRATEGY_LABELS[key] ?? key}`;
-                    const detail = runResult
-                      ? runResult.status === 'hit'
-                        ? `命中 ${runResult.confidence}%`
-                        : runResult.status === 'miss'
-                          ? `未命中 ${runResult.confidence}%`
-                          : '已停用'
-                      : strategy.enabled
-                        ? `阈值 ${strategy.threshold ?? 60}%`
-                        : '已停用';
-                    return (
-                      <span key={key} className={chipClass} title={detail}>
-                        {label}
-                        {runResult?.status === 'hit' && ` ✓${runResult.confidence}%`}
-                        {runResult?.status === 'miss' && ` ✗${runResult.confidence}%`}
-                      </span>
-                    );
-                  })}
+        <div className="debug-panel__summary-list">
+          {summaryRows.map(({ node, index, state, result, summary, detail }) => (
+            <div key={node.id} className={`debug-panel__summary-row debug-panel__summary-row--${state}`}>
+              <span className="debug-panel__summary-index">{index + 1}</span>
+              <div className="debug-panel__summary-main">
+                <div className="debug-panel__summary-title">
+                  <strong>{node.title}</strong>
+                  <span className="debug-panel__summary-type">{NODE_TYPE_LABELS[node.type] ?? node.type}</span>
+                  <span className={`debug-panel__step-status debug-panel__step-status--${state}`}>{STATUS_LABELS[state]}</span>
                 </div>
+                <div className="debug-panel__summary-message">{summary}</div>
+                {detail && <div className="debug-panel__summary-detail">{detail}</div>}
               </div>
-            )}
-
-            {selectedStep.type === 'recognize' && runResults[selectedStep.id]?.hitCoords && (
-              <div className="debug-panel__hit-coords">
-                命中坐标 ({runResults[selectedStep.id].hitCoords!.x}, {runResults[selectedStep.id].hitCoords!.y})
-              </div>
-            )}
-
-            {runResults[selectedStep.id] && (
-              <div className="debug-panel__summary-grid">
-                <div className="debug-panel__summary-card">
-                  <span className="debug-panel__summary-label">耗时</span>
-                  <strong>{(runResults[selectedStep.id] as { elapsedMs?: number }).elapsedMs ?? 0}ms</strong>
-                </div>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="debug-panel__empty">选择一个步骤查看摘要</div>
-        )}
+              {result?.elapsedMs !== undefined && <span className="debug-panel__summary-time">{result.elapsedMs}ms</span>}
+            </div>
+          ))}
+          {summaryRows.length === 0 && <div className="debug-panel__empty">画布还没有节点</div>}
+        </div>
       </section>
 
-      {/* Screenshot evidence */}
       <div className="debug-panel__shots">
-        <div className="debug-panel__section-title">截图对比</div>
-        <div className="debug-panel__shot-row">
-          {(['before', 'after', 'diff'] as ShotKey[]).map((key) => (
-            <button
-              key={key}
-              className="debug-panel__shot"
-              onClick={() => setExpandedShot(key)}
-              title="点击查看大图"
-            >
-              <span className="debug-panel__shot-label">{shotLabels[key]}</span>
+        <div className="debug-panel__section-title">截图证据</div>
+        <div className="debug-panel__shot-grid">
+          {screenshotEvidence.map((shot, index) => (
+            <button className="debug-panel__shot-card" key={shot.node.id} onClick={() => setExpandedShot(index === 0 ? 'before' : index === screenshotEvidence.length - 1 ? 'after' : 'during')} title="点击放大">
+              <div className="debug-panel__shot-card-title">{shot.node.title}</div>
+              <div className="debug-panel__shot-card-stack">
+                <img src={shot.result.frame} alt={`${shot.node.title}截图`} className="debug-panel__shot-card-img" />
+                {shot.markers.length > 0 && (
+                  <div className="debug-panel__shot-card-overlay">
+                    {shot.markers.map((m, markerIndex) => (
+                      <span
+                        key={markerIndex}
+                        className="debug-panel__shot-card-marker"
+                        style={{ left: `${m.x / Math.max(shot.result.width ?? 1, 1) * 100}%`, top: `${m.y / Math.max(shot.result.height ?? 1, 1) * 100}%` }}
+                        title={m.label}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+              {shot.markers.length > 0 && <div className="debug-panel__shot-card-meta">{shot.markers.length} 个识别/点击标记</div>}
             </button>
           ))}
+          {screenshotEvidence.length === 0 && <div className="debug-panel__shot-card-empty">暂无截图证据</div>}
         </div>
       </div>
 
-      {/* Hit point overlay on screenshot */}
-      {(() => {
-        // 找最近的截图节点，获取 frame
-        const screenshotStep = [...steps].reverse().find((n) => n.type === 'screenshot' && runResults[n.id]?.frame);
-        const frame = screenshotStep ? runResults[screenshotStep.id]!.frame : null;
-        // 找当前选中步骤的命中点（缩略图坐标）
-        const hit = selectedStep ? runResults[selectedStep.id]?.hitCoords : null;
-        // 找截图节点本身的尺寸
-        const shotW = screenshotStep ? (runResults[screenshotStep.id] as { width?: number })?.width : null;
-        const shotH = screenshotStep ? (runResults[screenshotStep.id] as { height?: number })?.height : null;
-        return frame && hit ? (
-          <div className="debug-panel__shot-marker">
-            <div className="debug-panel__section-title">命中点</div>
-            <div className="debug-panel__shot-marker-frame">
-              <img src={frame} alt="截图" className="debug-panel__shot-img" />
-              <div
-                className="debug-panel__shot-marker-dot"
-                style={{
-                  left: `${(hit.x / (shotW ?? 1)) * 100}%`,
-                  top: `${(hit.y / (shotH ?? 1)) * 100}%`,
-                }}
-                title={`命中点 (${hit.x}, ${hit.y})`}
-              />
-            </div>
-            <div className="debug-panel__shot-marker-coords">
-              命中点 ({hit.x}, {hit.y}) / 截图 {shotW}×{shotH}
-            </div>
-          </div>
-        ) : null;
-      })()}
 
       {/* Engine logs */}
       <div className="debug-panel__logs">
@@ -444,15 +437,39 @@ export function DebugPanel({ nodes, edges, selectedNodeId, onFocusNode, onClose,
       {/* Shot viewer */}
       {expandedShot && (
         <div className="debug-panel__shot-viewer" onClick={() => setExpandedShot(null)}>
-          <div className="debug-panel__shot-viewer-inner" onClick={(e) => e.stopPropagation()}>
+          <div className="debug-panel__shot-viewer-inner debug-panel__shot-viewer-inner--large" onClick={(e) => e.stopPropagation()}>
             <div className="debug-panel__shot-viewer-head">
               <span>{shotLabels[expandedShot]}</span>
               <button className="template-modal__close" onClick={() => setExpandedShot(null)} aria-label="关闭">×</button>
             </div>
-            <div className="debug-panel__shot-viewer-canvas">截图将在这里展示</div>
+            <div className="debug-panel__shot-viewer-canvas debug-panel__shot-viewer-canvas--large">
+              {expandedShot === 'before' && beforeFrame && (
+                <img src={beforeFrame} alt="执行前截图" className="debug-panel__shot-viewer-img" />
+              )}
+              {expandedShot === 'during' && beforeFrame && (
+                <div className="debug-panel__shot-viewer-stage">
+                  <img src={beforeFrame} alt="执行前截图" className="debug-panel__shot-viewer-img" />
+                  {executionMarkers.map((m, index) => (
+                    <div
+                      key={index}
+                      className="debug-panel__shot-viewer-marker"
+                      style={{ left: `${m.x / Math.max(beforeSize?.width ?? 1, 1) * 100}%`, top: `${m.y / Math.max(beforeSize?.height ?? 1, 1) * 100}%` }}
+                      title={m.label}
+                    />
+                  ))}
+                </div>
+              )}
+              {expandedShot === 'after' && afterFrame && (
+                <img src={afterFrame} alt="执行后截图" className="debug-panel__shot-viewer-img" />
+              )}
+              {(expandedShot === 'during' && !beforeFrame) || (expandedShot === 'after' && !afterFrame) ? (
+                <div className="debug-panel__shot-viewer-empty">暂无截图</div>
+              ) : null}
+            </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }

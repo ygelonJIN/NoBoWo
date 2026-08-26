@@ -197,6 +197,40 @@ function parseBounds(raw: string): { x: number; y: number; width: number; height
   return { x, y, width, height };
 }
 
+function getMacWindowBoundsById(windowId?: number): { x: number; y: number; width: number; height: number } | null {
+  if (!windowId) return null;
+  const script = `import json
+try:
+    import Quartz
+except Exception:
+    print(json.dumps(None))
+    raise SystemExit(0)
+window_id = int(${JSON.stringify(windowId)})
+options = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+windows = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
+for win in windows:
+    if int(win.get(Quartz.kCGWindowNumber, 0) or 0) == window_id:
+        bounds = win.get(Quartz.kCGWindowBounds, {}) or {}
+        print(json.dumps({
+            "x": float(bounds.get("X", 0)),
+            "y": float(bounds.get("Y", 0)),
+            "width": float(bounds.get("Width", 0)),
+            "height": float(bounds.get("Height", 0)),
+        }))
+        raise SystemExit(0)
+print(json.dumps(None))`;
+  const res = spawnSync('python3', ['-c', script], { encoding: 'utf8' });
+  if (res.status !== 0) return null;
+  try {
+    const out = JSON.parse(String(res.stdout ?? '').trim() || 'null') as { x: number; y: number; width: number; height: number } | null;
+    if (!out) return null;
+    if ([out.x, out.y, out.width, out.height].some((n) => !Number.isFinite(n))) return null;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 function getMacWindowBoundsByHint(hint?: string): { x: number; y: number; width: number; height: number } | null {
   const search = hint?.trim();
   if (!search) return null;
@@ -525,50 +559,88 @@ export class WorkflowExecutor {
         if (!capture) {
           return { nodeId: node.id, status: 'fail', message: '没有可用的截图上下文，请先执行 screenshot 节点' };
         }
-        const relX = capture.width > 0 ? Math.min(1, Math.max(0, rec.x / capture.width)) : 0.5;
-        const relY = capture.height > 0 ? Math.min(1, Math.max(0, rec.y / capture.height)) : 0.5;
+        const captureLabel = `capture=${capture.width}×${capture.height} origin=(${capture.originX.toFixed(0)}, ${capture.originY.toFixed(0)}) scale=(${capture.scaleX.toFixed(4)}, ${capture.scaleY.toFixed(4)})`;
+        const recognizeLabel = `recognize=(${rec.x.toFixed(1)}, ${rec.y.toFixed(1)})`;
+        const relX = capture.width > 0 ? rec.x / capture.width : 0.5;
+        const relY = capture.height > 0 ? rec.y / capture.height : 0.5;
+        const relLabel = `rel=(${relX.toFixed(4)}, ${relY.toFixed(4)})`;
+        const absX = Math.round(capture.originX + rec.x * capture.scaleX);
+        const absY = Math.round(capture.originY + rec.y * capture.scaleY);
+        const absLabel = `abs=(${absX}, ${absY})`;
+        log('info', `${captureLabel} · ${recognizeLabel} · ${relLabel} · ${absLabel}`);
 
         if (capture.windowId || capture.windowHint) {
-          const res = await runVisionEngine(
-            'input',
-            {
-              action: 'click_window',
-              windowId: capture.windowId,
-              windowHint: capture.windowHint,
-              relX,
-              relY,
-            },
-            30000,
-          );
+          const boundsById = capture.windowId ? getMacWindowBoundsById(capture.windowId) : null;
+          const boundsByHint = !boundsById && capture.windowHint ? getMacWindowBoundsByHint(capture.windowHint) : null;
+          const bounds = boundsById ?? boundsByHint;
+          const boundsSource = boundsById ? 'id' : boundsByHint ? 'hint' : 'none';
+
+          if (!bounds || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) || !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height) || bounds.width <= 0 || bounds.height <= 0) {
+            log('error', [
+              '窗口边界解析失败',
+              `windowId=${capture.windowId ?? 'null'}`,
+              `windowHint=${capture.windowHint ?? 'null'}`,
+              `recognize=(${rec.x.toFixed(1)}, ${rec.y.toFixed(1)})`,
+              `capture=(${capture.width}×${capture.height})`,
+              `origin=(${capture.originX.toFixed(0)}, ${capture.originY.toFixed(0)})`,
+              `scale=(${capture.scaleX.toFixed(4)}, ${capture.scaleY.toFixed(4)})`,
+              `boundsSource=${boundsSource}`,
+              '已中止本次点击，避免点到错误位置',
+            ].join(' · '));
+            return { nodeId: node.id, status: 'fail', message: '窗口边界解析失败，无法安全点击；请查看调试日志中的 windowId / windowHint / boundsSource' };
+          }
+
+          const hitX = Math.round(bounds.x + bounds.width * relX);
+          const hitY = Math.round(bounds.y + bounds.height * relY);
+          const hitLabel = `(${hitX}, ${hitY})`;
+          const relToBoundsX = bounds.width > 0 ? (hitX - bounds.x) / bounds.width : 0;
+          const relToBoundsY = bounds.height > 0 ? (hitY - bounds.y) / bounds.height : 0;
+          const screenAtPoint = screen.getDisplayNearestPoint({ x: hitX, y: hitY });
+          const displays = screen.getAllDisplays().map((d) => ({
+            id: String(d.id),
+            bounds: { x: d.bounds.x, y: d.bounds.y, width: d.bounds.width, height: d.bounds.height },
+            workArea: { x: d.workArea.x, y: d.workArea.y, width: d.workArea.width, height: d.workArea.height },
+            scaleFactor: d.scaleFactor,
+          }));
+          const windowInDisplayX = hitX - screenAtPoint.bounds.x;
+          const windowInDisplayY = hitY - screenAtPoint.bounds.y;
+          const windowInDisplayRelX = screenAtPoint.bounds.width > 0 ? windowInDisplayX / screenAtPoint.bounds.width : 0;
+          const windowInDisplayRelY = screenAtPoint.bounds.height > 0 ? windowInDisplayY / screenAtPoint.bounds.height : 0;
+          const res = await runVisionEngine('input', { action: 'click', x: hitX, y: hitY }, 30000);
           if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
-          const win = res.window as Record<string, unknown> | undefined;
           const target = res.target as Record<string, unknown> | undefined;
           const actual = res.actual as Record<string, unknown> | undefined;
-          const screenSize = res.screenSize as Record<string, unknown> | undefined;
-          const matchedBy = res.matchedBy === 'hint' ? '标题回退' : res.matchedBy === 'id' ? '窗口ID精确' : '?';
-          const winLabel = win ? `${(win.title as string) ?? '?'} #${(win.id as number) ?? '?'} (${win.x as number},${win.y as number} ${win.width as number}×${win.height as number})` : '?';
-          const coordLabel = target ? `(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : `(${relX.toFixed(3)}, ${relY.toFixed(3)})`;
           const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
-          log('info', `已前置并点击窗口 "${winLabel}" → ${coordLabel}${actualLabel}（匹配方式：${matchedBy}）`);
-          return { nodeId: node.id, status: 'ok', hitCoords: { x: rec.x, y: rec.y }, message: `点击窗口 ${winLabel} → ${coordLabel}${actualLabel}（匹配方式：${matchedBy}）` };
+          const targetLabel = target ? ` target=(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : '';
+          log('info', `窗口边界[${boundsSource}]=${JSON.stringify(bounds)} · relInCapture=${relX.toFixed(4)},${relY.toFixed(4)} · relInBounds=${relToBoundsX.toFixed(4)},${relToBoundsY.toFixed(4)} · hit=${hitLabel}${targetLabel}${actualLabel}`);
+          log('info', `displayAtPoint=${JSON.stringify({ id: String(screenAtPoint.id), bounds: screenAtPoint.bounds, workArea: screenAtPoint.workArea, scaleFactor: screenAtPoint.scaleFactor })} · windowInDisplay=(${windowInDisplayX.toFixed(0)}, ${windowInDisplayY.toFixed(0)}) · relInDisplay=${windowInDisplayRelX.toFixed(4)},${windowInDisplayRelY.toFixed(4)}`);
+          log('info', `allDisplays=${JSON.stringify(displays)}`);
+          return { nodeId: node.id, status: 'ok', hitCoords: { x: hitX, y: hitY }, message: `点击窗口 ${hitLabel}${actualLabel}` };
         }
 
         if (capture.displayId) {
-          const res = await runVisionEngine(
-            'input',
-            { action: 'click_screen', displayId: capture.displayId, relX, relY },
-            30000,
-          );
+          const display = screen.getAllDisplays().find((d) => String(d.id) === String(capture.displayId)) ?? screen.getPrimaryDisplay();
+          const displayInfo = { id: String(display.id), bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor };
+          const nearest = screen.getDisplayNearestPoint({ x: absX, y: absY });
+          const nearestInfo = { id: String(nearest.id), bounds: nearest.bounds, workArea: nearest.workArea, scaleFactor: nearest.scaleFactor };
+          const res = await runVisionEngine('input', { action: 'click', x: absX, y: absY }, 30000);
           if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
-          return { nodeId: node.id, status: 'ok', hitCoords: { x: rec.x, y: rec.y }, message: `点击屏幕 (${relX.toFixed(3)}, ${relY.toFixed(3)})` };
+          const target = res.target as Record<string, unknown> | undefined;
+          const actual = res.actual as Record<string, unknown> | undefined;
+          const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
+          const targetLabel = target ? ` target=(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : '';
+          log('info', `已点击屏幕坐标 ${absLabel}${targetLabel}${actualLabel} · display=${JSON.stringify(displayInfo)} · nearest=${JSON.stringify(nearestInfo)}`);
+          return { nodeId: node.id, status: 'ok', hitCoords: { x: absX, y: absY }, message: `点击屏幕 ${absLabel}${targetLabel}${actualLabel}` };
         }
 
-        const absX = Math.round(capture.originX + rec.x * capture.scaleX);
-        const absY = Math.round(capture.originY + rec.y * capture.scaleY);
-        log('info', `点击屏幕坐标 (${absX}, ${absY})`);
         const res = await runVisionEngine('input', { action: 'click', x: absX, y: absY }, 30000);
         if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
-        return { nodeId: node.id, status: 'ok', hitCoords: { x: absX, y: absY }, message: `点击 (${absX}, ${absY})` };
+        const target = res.target as Record<string, unknown> | undefined;
+        const actual = res.actual as Record<string, unknown> | undefined;
+        const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
+        const targetLabel = target ? ` target=(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : '';
+        log('info', `点击完成 ${absLabel}${targetLabel}${actualLabel}`);
+        return { nodeId: node.id, status: 'ok', hitCoords: { x: absX, y: absY }, message: `点击 ${absLabel}${targetLabel}${actualLabel}` };
       }
 
       case 'input': {
@@ -863,24 +935,60 @@ export class WorkflowExecutor {
     }
     const imagePath = await writeImageToTemp(frame);
     if (!imagePath) return { status: 'error', message: '无法保存待匹配画面' };
+    const sourceRect = template?.sourceRect;
+    const hotspot = template?.matchHotspot;
+    const clickOffset = template?.clickOffset;
+    const templateSize = (() => {
+      const width = sourceRect ? Math.max(0, Number(sourceRect.width ?? 0)) : null;
+      const height = sourceRect ? Math.max(0, Number(sourceRect.height ?? 0)) : null;
+      return width !== null && height !== null ? { width, height } : null;
+    })();
+    const debugTemplate = [
+      `templateId=${template?.id ?? 'manual'}`,
+      `templatePath=${templatePath}`,
+      `threshold=${strategy.threshold ?? 60}`,
+      `sourceRect=${sourceRect ? JSON.stringify(sourceRect) : 'null'}`,
+      `hotspot=${hotspot ? JSON.stringify(hotspot) : 'null'}`,
+      `clickOffset=${clickOffset ? JSON.stringify(clickOffset) : 'null'}`,
+      `templateSize=${templateSize ? JSON.stringify(templateSize) : 'unknown'}`,
+      `frameSize=${this.context.lastCapture ? `${this.context.lastCapture.width}x${this.context.lastCapture.height}` : 'unknown'}`,
+    ].join(' · ');
+    this.emit({ t: 'log', runId: this.runId!, level: 'info', message: `模板调试：${debugTemplate}`, nodeId: undefined });
     const res = await runVisionEngine(
       'template',
       {
         imagePath,
         templatePath,
         threshold: strategy.threshold ?? 60,
-        sourceRect: template?.sourceRect,
-        hotspot: template?.matchHotspot,
-        clickOffset: template?.clickOffset,
+        sourceRect,
+        hotspot,
+        clickOffset,
+        debugImagePath: process.env.NODE_ENV === 'development' ? join(app.getPath('userData'), 'last-template-debug.png') : undefined,
       },
       30000,
     );
-    if (!res.ok) return { status: 'miss', message: res.message ?? '模板匹配失败' };
+    if (!res.ok) {
+      return { status: 'miss', message: res.message ?? '模板匹配失败' };
+    }
+    const box = typeof res.x === 'number' && typeof res.y === 'number' && typeof res.width === 'number' && typeof res.height === 'number'
+      ? { x: res.x, y: res.y, width: res.width, height: res.height }
+      : null;
+    const click = typeof res.clickX === 'number' && typeof res.clickY === 'number'
+      ? { x: res.clickX, y: res.clickY }
+      : null;
+    this.emit({
+      t: 'log',
+      runId: this.runId!,
+      level: 'info',
+      message: `模板命中详情：box=${box ? JSON.stringify(box) : 'null'} · click=${click ? JSON.stringify(click) : 'null'} · confidence=${typeof res.confidence === 'number' ? res.confidence : 'null'} · message=${res.message ?? '模板匹配成功'}`,
+      nodeId: undefined,
+    });
     return {
       status: 'hit',
       confidence: typeof res.confidence === 'number' ? res.confidence : undefined,
       x: typeof res.clickX === 'number' ? res.clickX : undefined,
       y: typeof res.clickY === 'number' ? res.clickY : undefined,
+      debugImagePath: typeof res.debugImagePath === 'string' ? res.debugImagePath : undefined,
       message: res.message ?? '模板匹配成功',
     };
   }
@@ -1103,12 +1211,12 @@ export class WorkflowExecutor {
         return { ok: false as const, message: `未找到${label}，请确认窗口已打开、标题关键字正确、且未最小化` };
       }
       const size = windowSource.thumbnail.getSize();
-      const bounds = getMacWindowBoundsByHint(hintText);
-      // desktopCapturer 的 id 形如 window:<CGWindowID>:<screenID>，用它精确定位同一窗口
       const windowIdMatch = /^window:(\d+)/.exec(windowSource.id);
       const windowId = windowIdMatch ? Number(windowIdMatch[1]) : undefined;
+      const bounds = getMacWindowBoundsById(windowId) ?? getMacWindowBoundsByHint(hintText);
+      // desktopCapturer 的 id 形如 window:<CGWindowID>:<screenID>，用它精确定位同一窗口
       if (!bounds) {
-        // AppleScript 拿不到边界也不阻塞：点击时 Python 会用 CGWindowID 重新取 Quartz 边界
+        // 边界拿不到就只保留截图尺寸，点击阶段会输出完整诊断并拒绝盲点
         return {
           ok: true as const,
           frame: windowSource.thumbnail.toDataURL(),
@@ -1121,21 +1229,15 @@ export class WorkflowExecutor {
           windowId,
         };
       }
-      const display = screen.getDisplayMatching(bounds);
-      const scaleFactor = display.scaleFactor || 1;
-      const originX = bounds.x * scaleFactor;
-      const originY = bounds.y * scaleFactor;
-      const realWidth = bounds.width * scaleFactor;
-      const realHeight = bounds.height * scaleFactor;
       return {
         ok: true as const,
         frame: windowSource.thumbnail.toDataURL(),
         width: size.width,
         height: size.height,
-        originX,
-        originY,
-        scaleX: realWidth / Math.max(1, size.width),
-        scaleY: realHeight / Math.max(1, size.height),
+        originX: bounds.x,
+        originY: bounds.y,
+        scaleX: bounds.width / Math.max(1, size.width),
+        scaleY: bounds.height / Math.max(1, size.height),
         windowId,
       };
     };
@@ -1151,20 +1253,15 @@ export class WorkflowExecutor {
       }
       const size = screenSource.thumbnail.getSize();
       const display = screen.getAllDisplays().find((d) => String(d.id) === String(screenSource.display_id)) ?? screen.getPrimaryDisplay();
-      const scaleFactor = display.scaleFactor || 1;
-      const originX = display.bounds.x * scaleFactor;
-      const originY = display.bounds.y * scaleFactor;
-      const realWidth = display.bounds.width * scaleFactor;
-      const realHeight = display.bounds.height * scaleFactor;
       return {
         ok: true as const,
         frame: screenSource.thumbnail.toDataURL(),
         width: size.width,
         height: size.height,
-        originX,
-        originY,
-        scaleX: realWidth / Math.max(1, size.width),
-        scaleY: realHeight / Math.max(1, size.height),
+        originX: display.bounds.x,
+        originY: display.bounds.y,
+        scaleX: display.bounds.width / Math.max(1, size.width),
+        scaleY: display.bounds.height / Math.max(1, size.height),
         displayId: String(screenSource.display_id),
       };
     };
