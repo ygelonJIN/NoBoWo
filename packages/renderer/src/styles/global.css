@@ -87,6 +87,11 @@ textarea {
   gap: 10px;
   align-items: flex-start;
   max-width: calc(100% - 48px);
+  /* 空白区域不拦截鼠标，拖动空白处可平移画布 */
+  pointer-events: none;
+}
+.toolbar-left > * {
+  pointer-events: auto;
 }
 .toolbar-row {
   display: flex;
@@ -495,6 +500,90 @@ textarea {
     0 0 0 1px rgba(247, 201, 72, 0.28),
     0 16px 34px rgba(0, 0, 0, 0.3);
 }
+/* ===== 运行状态 ===== */
+.workflow-node--run-running {
+  border-color: #78a9ff;
+  box-shadow:
+    0 0 0 3px rgba(120, 169, 255, 0.45),
+    0 0 28px rgba(120, 169, 255, 0.35),
+    0 16px 34px rgba(0, 0, 0, 0.32);
+  filter: saturate(1.12) brightness(1.05);
+  animation: workflow-node-running-pulse 1.4s ease-in-out infinite;
+}
+.workflow-node--run-running .workflow-node__title::after {
+  content: '运行中';
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #d7e6ff;
+  background: rgba(120, 169, 255, 0.18);
+  border: 1px solid rgba(120, 169, 255, 0.4);
+  vertical-align: middle;
+}
+@keyframes workflow-node-running-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(120, 169, 255, 0.45),
+      0 0 18px rgba(120, 169, 255, 0.28),
+      0 16px 34px rgba(0, 0, 0, 0.32);
+  }
+  50% {
+    box-shadow:
+      0 0 0 4px rgba(120, 169, 255, 0.55),
+      0 0 34px rgba(120, 169, 255, 0.42),
+      0 16px 34px rgba(0, 0, 0, 0.32);
+  }
+}
+.workflow-node--run-ok {
+  border-color: rgba(106, 227, 161, 0.85);
+  box-shadow:
+    0 0 0 3px rgba(106, 227, 161, 0.35),
+    0 0 20px rgba(106, 227, 161, 0.25),
+    0 16px 34px rgba(0, 0, 0, 0.3);
+}
+.workflow-node--run-ok .workflow-node__title::after {
+  content: '完成';
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #b8f5d2;
+  background: rgba(106, 227, 161, 0.16);
+  border: 1px solid rgba(106, 227, 161, 0.45);
+  vertical-align: middle;
+}
+.workflow-node--run-ok:hover {
+  border-color: #6ae3a1;
+  box-shadow:
+    0 0 0 4px rgba(106, 227, 161, 0.45),
+    0 0 26px rgba(106, 227, 161, 0.32),
+    0 16px 34px rgba(0, 0, 0, 0.3);
+}
+.workflow-node--run-fail {
+  border-color: rgba(255, 107, 107, 0.7);
+  box-shadow:
+    0 0 0 2px rgba(255, 107, 107, 0.3),
+    0 16px 34px rgba(0, 0, 0, 0.3);
+}
+.workflow-node--run-fail .workflow-node__title::after {
+  content: '失败';
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffb3b3;
+  background: rgba(255, 107, 107, 0.14);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  vertical-align: middle;
+}
 .workflow-edge {
   fill: none;
   stroke: rgba(137, 169, 220, 0.8);
@@ -615,24 +704,7 @@ textarea {
   position: absolute;
   inset: 0;
 }
-.workflow-node--click {
-  border-color: rgba(104, 169, 255, 0.35);
-}
-.workflow-node--input {
-  border-color: rgba(106, 227, 161, 0.35);
-}
-.workflow-node--wait {
-  border-color: rgba(255, 208, 97, 0.35);
-}
-.workflow-node--screenshot {
-  border-color: rgba(197, 133, 255, 0.35);
-}
-.workflow-node--if {
-  border-color: rgba(255, 133, 133, 0.35);
-}
-.workflow-node--loop {
-  border-color: rgba(90, 213, 255, 0.35);
-}
+/* 各类型节点初始状态统一使用同一套边框，类型差异通过标题和图标区分 */
 .context-menu {
   position: fixed;
   z-index: 50;

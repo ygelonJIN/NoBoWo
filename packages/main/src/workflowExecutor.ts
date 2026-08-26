@@ -782,8 +782,17 @@ export class WorkflowExecutor {
       case 'keyboard': {
         const { keys, mode } = node.data;
         if (!keys) return { nodeId: node.id, status: 'fail', message: '按键内容为空' };
-        log('info', `按键：${keys}（${mode}）`);
-        const res = await runVisionEngine('input', { action: 'key', keys, mode }, 15000);
+        log('info', `按键：${keys}（${mode}${mode === 'type' ? ` · 间隔 ${node.data.interval ?? 200}ms` : ''}）`);
+        const res = await runVisionEngine(
+          'input',
+          {
+            action: 'key',
+            keys,
+            mode,
+            interval: mode === 'type' ? (node.data.interval ?? 200) : undefined,
+          },
+          15000,
+        );
         if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '按键失败' };
         return { nodeId: node.id, status: 'ok', message: `按键：${keys}（${mode}）` };
       }

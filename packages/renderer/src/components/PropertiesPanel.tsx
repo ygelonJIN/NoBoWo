@@ -634,7 +634,7 @@ export function PropertiesPanel({
               按键
               <input
                 value={node.data.keys}
-                placeholder="例如：enter / ctrl+shift+a / F5"
+                placeholder="例如：enter / ctrl+shift+a / F5，连续输入直接输入文本"
                 onChange={(e) => onChangeNode(updateNodeData(node, { keys: e.target.value }))}
               />
             </label>
@@ -645,11 +645,28 @@ export function PropertiesPanel({
                 options={[
                   { value: 'tap', label: '点击（按下并松开）' },
                   { value: 'hold', label: '按住（长按）' },
+                  { value: 'type', label: '连续输入（逐字符输入）' },
                 ]}
-                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'tap' | 'hold' }))}
+                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'tap' | 'hold' | 'type' }))}
               />
             </label>
-            <p className="properties-panel__hint">多个按键用 + 连接，如 ctrl+shift+a</p>
+            {node.data.mode === 'type' && (
+              <label>
+                输入间隔（毫秒）
+                <input
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={node.data.interval ?? 200}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { interval: Math.max(0, Number(e.target.value) || 0) }))}
+                />
+              </label>
+            )}
+            <p className="properties-panel__hint">
+              {node.data.mode === 'type'
+                ? '连续输入会逐字符输入，{enter}、{tab}、{esc} 等表示特殊按键'
+                : '多个按键用 + 连接，如 ctrl+shift+a'}
+            </p>
           </section>
         )}
 

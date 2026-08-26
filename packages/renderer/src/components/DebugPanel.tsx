@@ -66,6 +66,8 @@ type Props = {
   notice?: { main: string; hint?: string } | null;
   workflowState?: WorkflowRunSnapshot | null;
   logs: string[];
+  selectedNodeId?: string | null;
+  onFocusNode?: (nodeId: string) => void;
 };
 
 type ScreenshotEvidence = {

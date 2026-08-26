@@ -604,12 +604,28 @@ def run_input(cfg):
         elif action == "key":
             keys = str(cfg.get("keys", ""))
             mode = cfg.get("mode", "tap")
+            interval = max(0, float(cfg.get("interval", 0.2)))
             if not keys:
                 return fail("input", "按键内容为空")
             if mode == "hold":
                 pyautogui.keyDown(keys)
             elif mode == "release":
                 pyautogui.keyUp(keys)
+            elif mode == "type":
+                # 连续输入：逐字符输入，{enter}、{tab} 等花括号写法表示特殊按键
+                import re
+                tokens = re.split(r"(\{[^}]+\})", keys)
+                for token in tokens:
+                    if not token:
+                        continue
+                    if token.startswith("{") and token.endswith("}"):
+                        name = token[1:-1].strip().lower()
+                        if name:
+                            pyautogui.press(name)
+                            if interval > 0:
+                                time.sleep(interval / 1000.0)
+                    else:
+                        pyautogui.typewrite(token, interval=interval / 1000.0)
             else:
                 pyautogui.press(keys)
         elif action == "scroll":

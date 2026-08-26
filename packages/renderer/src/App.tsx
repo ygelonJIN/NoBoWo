@@ -171,6 +171,9 @@ function getNodeSummary(node: WorkflowNode): string {
     case 'scroll':
       return `滚动${directionLabel(node.data.direction)} ${node.data.amount}px`;
     case 'keyboard':
+      if (node.data.mode === 'type') {
+        return node.data.keys ? `连续输入：${node.data.keys}（间隔 ${node.data.interval ?? 200}ms）` : '空输入';
+      }
       return node.data.keys ? `按键：${node.data.keys}` : '空按键';
     case 'recognize':
       return '';
@@ -190,6 +193,15 @@ function directionLabel(direction: string): string {
     default:
       return direction;
   }
+}
+
+function getCanvasCenter(canvasRef: React.RefObject<HTMLDivElement | null>, viewport: Point, zoom: number): Point {
+  const rect = canvasRef.current?.getBoundingClientRect();
+  const client = {
+    x: (rect?.left ?? 0) + (rect?.width ?? window.innerWidth) / 2,
+    y: (rect?.top ?? 0) + (rect?.height ?? window.innerHeight) / 2,
+  };
+  return clientToCanvas(client, viewport, zoom);
 }
 
 export function App() {
@@ -416,7 +428,9 @@ export function App() {
   const addNode = useCallback(
     (type: WorkflowNode['type'], point?: Point) => {
       const created = createDefaultNode(type, nodes.length + 1);
-      const position = point ? clientToCanvas(point, viewport, zoom) : created.position;
+      const position = point
+        ? clientToCanvas(point, viewport, zoom)
+        : getCanvasCenter(canvasRef, viewport, zoom);
       const nextNode = { ...created, position: { x: position.x - NODE_WIDTH / 2, y: position.y - 30 } };
       setNodes((current) => [...current, nextNode]);
       setSelectedNodeId(nextNode.id);
@@ -600,6 +614,18 @@ export function App() {
     [getLocalPoint, viewport],
   );
 
+  const handleToolbarBlankPointerDown = useCallback(
+    (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('button, input, select, textarea, label')) return;
+      event.stopPropagation();
+      const point = getLocalPoint(event);
+      setPanning({ start: point, viewport });
+    },
+    [getLocalPoint, viewport],
+  );
+
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
       if ((event.target as HTMLElement | null)?.closest('.properties-panel-anchor, .debug-panel')) return;
@@ -745,7 +771,7 @@ export function App() {
         }}
       >
         <div className="toolbar-left" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="toolbar-row">
+          <div className="toolbar-row" onMouseDown={handleToolbarBlankPointerDown}>
             <div className="toolbar-run-card">
               <div className="toolbar-run-card__title-row">
                 <div className="toolbar-run-card__title">控制面板</div>
@@ -782,7 +808,7 @@ export function App() {
               </div>
             </div>
 
-            <div className="toolbar">
+            <div className="toolbar" onMouseDown={handleToolbarBlankPointerDown}>
               <div className="toolbar__top">
                 <div className="toolbar__title">NoBoWo 节点配置</div>
                 <div className="toolbar__status">

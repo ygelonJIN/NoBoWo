@@ -76,7 +76,9 @@ export type ScrollNode = WorkflowNodeBase<'scroll', {
 
 export type KeyboardNode = WorkflowNodeBase<'keyboard', {
   keys: string;
-  mode: 'tap' | 'hold';
+  mode: 'tap' | 'hold' | 'type';
+  /** 连续输入时每个字符之间的间隔（毫秒） */
+  interval?: number;
 }>;
 
 export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
@@ -724,7 +726,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         ...base,
         type,
         title: 'Keyboard',
-        data: { keys: 'enter', mode: 'tap' },
+        data: { keys: 'a', mode: 'tap', interval: 200 },
       };
     case 'recognize':
       return {
