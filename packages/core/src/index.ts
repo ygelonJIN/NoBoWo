@@ -356,6 +356,8 @@ export type RecognizeStrategyRun = {
   message?: string;
   x?: number;
   y?: number;
+  matchBox?: { x: number; y: number; width: number; height: number };
+  matchScale?: number;
   elapsedMs?: number;
   debugImagePath?: string;
 };
@@ -365,8 +367,14 @@ export type NodeRunResult = {
   status: NodeRunStatus;
   elapsedMs?: number;
   message?: string;
-  /** recognize 命中坐标（也用于 click 节点回放） */
+  /** 识别结果在截图像素坐标中的位置 */
   hitCoords?: { x: number; y: number };
+  /** 模板匹配框在截图像素坐标中的位置 */
+  matchBox?: { x: number; y: number; width: number; height: number };
+  /** 模板相对于原模板图的匹配缩放倍率 */
+  matchScale?: number;
+  /** click 节点实际发送给系统的屏幕坐标，仅用于诊断 */
+  actualClickCoords?: { x: number; y: number };
   /** recognize 各策略执行明细 */
   strategies?: RecognizeStrategyRun[];
   /** screenshot 节点捕获的画面 dataURL */

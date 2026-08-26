@@ -561,8 +561,8 @@ export class WorkflowExecutor {
         }
         const captureLabel = `capture=${capture.width}×${capture.height} origin=(${capture.originX.toFixed(0)}, ${capture.originY.toFixed(0)}) scale=(${capture.scaleX.toFixed(4)}, ${capture.scaleY.toFixed(4)})`;
         const recognizeLabel = `recognize=(${rec.x.toFixed(1)}, ${rec.y.toFixed(1)})`;
-        const relX = capture.width > 0 ? rec.x / capture.width : 0.5;
-        const relY = capture.height > 0 ? rec.y / capture.height : 0.5;
+        const relX = capture.width > 0 ? Math.min(1, Math.max(0, rec.x / capture.width)) : 0.5;
+        const relY = capture.height > 0 ? Math.min(1, Math.max(0, rec.y / capture.height)) : 0.5;
         const relLabel = `rel=(${relX.toFixed(4)}, ${relY.toFixed(4)})`;
         const absX = Math.round(capture.originX + rec.x * capture.scaleX);
         const absY = Math.round(capture.originY + rec.y * capture.scaleY);
@@ -606,31 +606,64 @@ export class WorkflowExecutor {
           const windowInDisplayY = hitY - screenAtPoint.bounds.y;
           const windowInDisplayRelX = screenAtPoint.bounds.width > 0 ? windowInDisplayX / screenAtPoint.bounds.width : 0;
           const windowInDisplayRelY = screenAtPoint.bounds.height > 0 ? windowInDisplayY / screenAtPoint.bounds.height : 0;
-          const res = await runVisionEngine('input', { action: 'click', x: hitX, y: hitY }, 30000);
+          // 点击窗口时先激活目标窗口。运行面板可能覆盖在目标窗口上方，
+          // 直接发送全局坐标会把点击交给 NoBoWo 自己，而不是截图对应的窗口。
+          const res = await runVisionEngine(
+            'input',
+            {
+              action: 'click_window',
+              windowId: capture.windowId,
+              windowHint: capture.windowHint,
+              relX,
+              relY,
+            },
+            30000,
+          );
           if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
           const target = res.target as Record<string, unknown> | undefined;
           const actual = res.actual as Record<string, unknown> | undefined;
           const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
           const targetLabel = target ? ` target=(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : '';
-          log('info', `窗口边界[${boundsSource}]=${JSON.stringify(bounds)} · relInCapture=${relX.toFixed(4)},${relY.toFixed(4)} · relInBounds=${relToBoundsX.toFixed(4)},${relToBoundsY.toFixed(4)} · hit=${hitLabel}${targetLabel}${actualLabel}`);
+          const matchedBy = res.matchedBy === 'hint' ? '标题回退' : res.matchedBy === 'id' ? '窗口ID精确' : '?';
+          log('info', `窗口边界[${boundsSource}]=${JSON.stringify(bounds)} · relInCapture=${relX.toFixed(4)},${relY.toFixed(4)} · relInBounds=${relToBoundsX.toFixed(4)},${relToBoundsY.toFixed(4)} · hit=${hitLabel}${targetLabel}${actualLabel} · 激活方式=${matchedBy}`);
           log('info', `displayAtPoint=${JSON.stringify({ id: String(screenAtPoint.id), bounds: screenAtPoint.bounds, workArea: screenAtPoint.workArea, scaleFactor: screenAtPoint.scaleFactor })} · windowInDisplay=(${windowInDisplayX.toFixed(0)}, ${windowInDisplayY.toFixed(0)}) · relInDisplay=${windowInDisplayRelX.toFixed(4)},${windowInDisplayRelY.toFixed(4)}`);
           log('info', `allDisplays=${JSON.stringify(displays)}`);
-          return { nodeId: node.id, status: 'ok', hitCoords: { x: hitX, y: hitY }, message: `点击窗口 ${hitLabel}${actualLabel}` };
+          return {
+            nodeId: node.id,
+            status: 'ok',
+            hitCoords: { x: rec.x, y: rec.y },
+            actualClickCoords: actual && typeof actual.x === 'number' && typeof actual.y === 'number'
+              ? { x: actual.x, y: actual.y }
+              : undefined,
+            message: `点击窗口相对位置 (${relX.toFixed(4)}, ${relY.toFixed(4)})${actualLabel}`,
+          };
         }
 
         if (capture.displayId) {
           const display = screen.getAllDisplays().find((d) => String(d.id) === String(capture.displayId)) ?? screen.getPrimaryDisplay();
           const displayInfo = { id: String(display.id), bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor };
-          const nearest = screen.getDisplayNearestPoint({ x: absX, y: absY });
-          const nearestInfo = { id: String(nearest.id), bounds: nearest.bounds, workArea: nearest.workArea, scaleFactor: nearest.scaleFactor };
-          const res = await runVisionEngine('input', { action: 'click', x: absX, y: absY }, 30000);
+          // 屏幕截图和 CGEvent 点击都在 Quartz 层按同一个 displayId/相对坐标换算，
+          // 避免 Retina 屏幕下 Electron 坐标与鼠标坐标出现比例偏差。
+          const res = await runVisionEngine(
+            'input',
+            { action: 'click_screen', displayId: capture.displayId, relX, relY },
+            30000,
+          );
           if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '点击失败' };
           const target = res.target as Record<string, unknown> | undefined;
           const actual = res.actual as Record<string, unknown> | undefined;
           const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
           const targetLabel = target ? ` target=(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : '';
-          log('info', `已点击屏幕坐标 ${absLabel}${targetLabel}${actualLabel} · display=${JSON.stringify(displayInfo)} · nearest=${JSON.stringify(nearestInfo)}`);
-          return { nodeId: node.id, status: 'ok', hitCoords: { x: absX, y: absY }, message: `点击屏幕 ${absLabel}${targetLabel}${actualLabel}` };
+          log('info', `Quartz 屏幕点击 · relInCapture=(${relX.toFixed(4)}, ${relY.toFixed(4)})${targetLabel}${actualLabel} · display=${JSON.stringify(displayInfo)}`);
+          return {
+            nodeId: node.id,
+            status: 'ok',
+            hitCoords: { x: rec.x, y: rec.y },
+            actualClickCoords: actual && typeof actual.x === 'number' && typeof actual.y === 'number'
+              ? { x: actual.x, y: actual.y }
+              : undefined,
+            message: `点击屏幕相对位置 (${relX.toFixed(4)}, ${relY.toFixed(4)})${actualLabel}`,
+          };
         }
 
         const res = await runVisionEngine('input', { action: 'click', x: absX, y: absY }, 30000);
@@ -640,7 +673,15 @@ export class WorkflowExecutor {
         const actualLabel = actual ? `，鼠标实际落在 (${(actual.x as number).toFixed(0)}, ${(actual.y as number).toFixed(0)})` : '';
         const targetLabel = target ? ` target=(${(target.x as number).toFixed(0)}, ${(target.y as number).toFixed(0)})` : '';
         log('info', `点击完成 ${absLabel}${targetLabel}${actualLabel}`);
-        return { nodeId: node.id, status: 'ok', hitCoords: { x: absX, y: absY }, message: `点击 ${absLabel}${targetLabel}${actualLabel}` };
+        return {
+          nodeId: node.id,
+          status: 'ok',
+          hitCoords: { x: rec.x, y: rec.y },
+          actualClickCoords: actual && typeof actual.x === 'number' && typeof actual.y === 'number'
+            ? { x: actual.x, y: actual.y }
+            : undefined,
+          message: `点击 ${absLabel}${targetLabel}${actualLabel}`,
+        };
       }
 
       case 'input': {
@@ -891,6 +932,12 @@ export class WorkflowExecutor {
         status: 'ok',
         strategies: runs,
         hitCoords: { x: best.x!, y: best.y! },
+        matchBox: best.key === 'template'
+          ? runs.find((run) => run.key === 'template' && run.status === 'hit')?.matchBox
+          : undefined,
+        matchScale: best.key === 'template'
+          ? runs.find((run) => run.key === 'template' && run.status === 'hit')?.matchScale
+          : undefined,
         strategy: best.key,
         message: `并行命中：${STRATEGY_NAMES[best.key]}（${best.confidence ?? 100}%）`,
       };
@@ -908,6 +955,8 @@ export class WorkflowExecutor {
           status: 'ok',
           strategies: runs,
           hitCoords: { x: run.x!, y: run.y! },
+          matchBox: key === 'template' ? run.matchBox : undefined,
+          matchScale: key === 'template' ? run.matchScale : undefined,
           strategy: key,
           message: `命中：${STRATEGY_NAMES[key]}（${run.confidence ?? 100}%）`,
         };
@@ -938,11 +987,6 @@ export class WorkflowExecutor {
     const sourceRect = template?.sourceRect;
     const hotspot = template?.matchHotspot;
     const clickOffset = template?.clickOffset;
-    const templateSize = (() => {
-      const width = sourceRect ? Math.max(0, Number(sourceRect.width ?? 0)) : null;
-      const height = sourceRect ? Math.max(0, Number(sourceRect.height ?? 0)) : null;
-      return width !== null && height !== null ? { width, height } : null;
-    })();
     const debugTemplate = [
       `templateId=${template?.id ?? 'manual'}`,
       `templatePath=${templatePath}`,
@@ -950,7 +994,8 @@ export class WorkflowExecutor {
       `sourceRect=${sourceRect ? JSON.stringify(sourceRect) : 'null'}`,
       `hotspot=${hotspot ? JSON.stringify(hotspot) : 'null'}`,
       `clickOffset=${clickOffset ? JSON.stringify(clickOffset) : 'null'}`,
-      `templateSize=${templateSize ? JSON.stringify(templateSize) : 'unknown'}`,
+      `templateResolution=${template?.resolution ? `${template.resolution.width}x${template.resolution.height}` : 'unknown'}`,
+      `templateScaleFactor=${template?.scaleFactor ?? 'unknown'}`,
       `frameSize=${this.context.lastCapture ? `${this.context.lastCapture.width}x${this.context.lastCapture.height}` : 'unknown'}`,
     ].join(' · ');
     this.emit({ t: 'log', runId: this.runId!, level: 'info', message: `模板调试：${debugTemplate}`, nodeId: undefined });
@@ -980,7 +1025,7 @@ export class WorkflowExecutor {
       t: 'log',
       runId: this.runId!,
       level: 'info',
-      message: `模板命中详情：box=${box ? JSON.stringify(box) : 'null'} · click=${click ? JSON.stringify(click) : 'null'} · confidence=${typeof res.confidence === 'number' ? res.confidence : 'null'} · message=${res.message ?? '模板匹配成功'}`,
+      message: `模板命中详情：box=${box ? JSON.stringify(box) : 'null'} · click=${click ? JSON.stringify(click) : 'null'} · matchScale=${typeof res.matchScale === 'number' ? res.matchScale : 'null'} · confidence=${typeof res.confidence === 'number' ? res.confidence : 'null'} · message=${res.message ?? '模板匹配成功'}`,
       nodeId: undefined,
     });
     return {
@@ -988,6 +1033,8 @@ export class WorkflowExecutor {
       confidence: typeof res.confidence === 'number' ? res.confidence : undefined,
       x: typeof res.clickX === 'number' ? res.clickX : undefined,
       y: typeof res.clickY === 'number' ? res.clickY : undefined,
+      matchBox: box ?? undefined,
+      matchScale: typeof res.matchScale === 'number' ? res.matchScale : undefined,
       debugImagePath: typeof res.debugImagePath === 'string' ? res.debugImagePath : undefined,
       message: res.message ?? '模板匹配成功',
     };

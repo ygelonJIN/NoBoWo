@@ -41,7 +41,12 @@ function resultDetail(node: WorkflowNode, result?: NodeRunResult): string | null
     const hit = result.strategies.find((item) => item.status === 'hit');
     if (hit) return `${STRATEGY_LABELS[hit.key] ?? hit.key}${hit.confidence !== undefined ? ` · ${hit.confidence}%` : ''}`;
   }
-  if (node.type === 'click' && result.hitCoords) return `点击坐标 (${result.hitCoords.x}, ${result.hitCoords.y})`;
+  if (node.type === 'click' && result.hitCoords) {
+    const actual = result.actualClickCoords;
+    return actual
+      ? `截图坐标 (${result.hitCoords.x.toFixed(1)}, ${result.hitCoords.y.toFixed(1)}) · 实际点击 (${actual.x.toFixed(1)}, ${actual.y.toFixed(1)})`
+      : `截图坐标 (${result.hitCoords.x}, ${result.hitCoords.y})`;
+  }
   if (node.type === 'screenshot' && result.frame) return `${result.width ?? 0} × ${result.height ?? 0}`;
   return null;
 }
@@ -63,7 +68,14 @@ type Props = {
   logs: string[];
 };
 
-type ShotKey = 'before' | 'during' | 'after';
+type ScreenshotEvidence = {
+  node: WorkflowNode;
+  result: NodeRunResult;
+  index: number;
+  relatedNodes: WorkflowNode[];
+  markers: Array<{ x: number; y: number; label: string; kind: 'recognize' | 'click' }>;
+  boxes: Array<{ x: number; y: number; width: number; height: number; label: string; scale?: number }>;
+};
 
 function orderWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -136,7 +148,7 @@ function buildFallbackLogs(workflowState: WorkflowRunSnapshot | null | undefined
 
 export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs }: Props) {
   const [logsOpen, setLogsOpen] = useState(false);
-  const [expandedShot, setExpandedShot] = useState<ShotKey | null>(null);
+  const [expandedShotIndex, setExpandedShotIndex] = useState<number | null>(null);
 
   const steps = useMemo(() => orderWorkflow(nodes, edges), [nodes, edges]);
 
@@ -159,17 +171,36 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
       return node.type === 'screenshot' && result?.frame ? [{ node, result, index }] : [];
     });
   }, [runResults, steps]);
-  const screenshotBefore = screenshotRecords[0] ?? null;
-  const screenshotAfter = screenshotRecords.length > 1 ? screenshotRecords[screenshotRecords.length - 1] : null;
   const screenshotEvidence = useMemo(() => {
     return screenshotRecords.map((shot, shotIndex) => {
       const nextIndex = screenshotRecords[shotIndex + 1]?.index ?? steps.length;
       const relatedNodes = steps.slice(shot.index + 1, nextIndex).filter((node) => node.type === 'recognize' || node.type === 'click');
       const markers = relatedNodes.flatMap((node) => {
         const result = runResults[node.id];
-        return result?.hitCoords ? [{ x: result.hitCoords.x, y: result.hitCoords.y, label: `${node.title} · ${NODE_TYPE_LABELS[node.type] ?? node.type}` }] : [];
+        if (!result) return [];
+        const coords = result.hitCoords;
+        return coords
+          ? [{
+              x: coords.x,
+              y: coords.y,
+              label: `${node.title} · ${NODE_TYPE_LABELS[node.type] ?? node.type}`,
+              kind: node.type === 'click' ? 'click' as const : 'recognize' as const,
+            }]
+          : [];
       });
-      return { ...shot, relatedNodes, markers };
+      const boxes = relatedNodes.flatMap((node) => {
+        const result = runResults[node.id];
+        const box = result?.matchBox;
+        const scale = result?.matchScale;
+        return box
+          ? [{
+              ...box,
+              label: `${node.title} · 模板框`,
+              scale,
+            }]
+          : [];
+      });
+      return { ...shot, relatedNodes, markers, boxes } as ScreenshotEvidence;
     });
   }, [runResults, screenshotRecords, steps]);
   const recognizeEntries = useMemo(() => {
@@ -184,16 +215,6 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
       return node.type === 'click' && result ? [{ node, result, index }] : [];
     });
   }, [runResults, steps]);
-  const executionMarkers = useMemo(() => {
-    const markers: Array<{ x: number; y: number; label: string; kind: 'recognize' | 'click' }> = [];
-    for (const entry of recognizeEntries) {
-      if (entry.result.hitCoords) markers.push({ x: entry.result.hitCoords.x, y: entry.result.hitCoords.y, label: `${entry.node.title} · 识别`, kind: 'recognize' });
-    }
-    for (const entry of clickEntries) {
-      if (entry.result.hitCoords) markers.push({ x: entry.result.hitCoords.x, y: entry.result.hitCoords.y, label: `${entry.node.title} · 点击`, kind: 'click' });
-    }
-    return markers;
-  }, [clickEntries, recognizeEntries]);
   const currentStepId = useMemo(() => {
     if (!workflowState) return null;
     const runningId = steps.find((n) => workflowState.nodeStates[n.id] === 'running')?.id ?? null;
@@ -250,16 +271,12 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
     skipped: '已跳过',
   };
 
-  const shotLabels: Record<ShotKey, string> = {
-    before: '执行前',
-    during: '执行中',
-    after: '执行后',
-  };
-
-  const beforeFrame = screenshotBefore?.result.frame ?? null;
-  const afterFrame = screenshotAfter?.result.frame ?? null;
-  const beforeSize = screenshotBefore ? { width: screenshotBefore.result.width ?? 0, height: screenshotBefore.result.height ?? 0 } : null;
-  const afterSize = screenshotAfter ? { width: screenshotAfter.result.width ?? 0, height: screenshotAfter.result.height ?? 0 } : null;
+  const expandedEvidence = expandedShotIndex !== null ? screenshotEvidence[expandedShotIndex] ?? null : null;
+  const shotLabel = expandedEvidence?.node.title ?? '截图';
+  const expandedFrame = expandedEvidence?.result.frame ?? null;
+  const expandedSize = expandedEvidence
+    ? { width: expandedEvidence.result.width ?? 0, height: expandedEvidence.result.height ?? 0 }
+    : null;
   const summaryRows = steps.map((node, index) => {
     const result = runResults[node.id];
     const state = stepStates[node.id] ?? 'pending';
@@ -272,8 +289,6 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
       detail: resultDetail(node, result),
     };
   });
-  const duringMarkers = executionMarkers;
-
   return (
     <div
       className="debug-panel"
@@ -388,24 +403,34 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
         <div className="debug-panel__section-title">截图证据</div>
         <div className="debug-panel__shot-grid">
           {screenshotEvidence.map((shot, index) => (
-            <button className="debug-panel__shot-card" key={shot.node.id} onClick={() => setExpandedShot(index === 0 ? 'before' : index === screenshotEvidence.length - 1 ? 'after' : 'during')} title="点击放大">
+            <button className="debug-panel__shot-card" key={shot.node.id} onClick={() => setExpandedShotIndex(index)} title="点击放大">
               <div className="debug-panel__shot-card-title">{shot.node.title}</div>
               <div className="debug-panel__shot-card-stack">
                 <img src={shot.result.frame} alt={`${shot.node.title}截图`} className="debug-panel__shot-card-img" />
-                {shot.markers.length > 0 && (
-                  <div className="debug-panel__shot-card-overlay">
-                    {shot.markers.map((m, markerIndex) => (
-                      <span
-                        key={markerIndex}
-                        className="debug-panel__shot-card-marker"
-                        style={{ left: `${m.x / Math.max(shot.result.width ?? 1, 1) * 100}%`, top: `${m.y / Math.max(shot.result.height ?? 1, 1) * 100}%` }}
-                        title={m.label}
-                      />
-                    ))}
-                  </div>
-                )}
+                {(shot.markers.length > 0 || shot.boxes.length > 0) && (
+                <div className="debug-panel__shot-card-overlay">
+                  {shot.markers.map((m, markerIndex) => (
+                    <span
+                      key={markerIndex}
+                      className={`debug-panel__shot-card-marker debug-panel__shot-card-marker--${m.kind}`}
+                      style={{
+                        left: `${Math.max(0, Math.min(100, m.x / Math.max(shot.result.width ?? 1, 1) * 100))}%`,
+                        top: `${Math.max(0, Math.min(100, m.y / Math.max(shot.result.height ?? 1, 1) * 100))}%`,
+                      }}
+                      title={`${m.label} (${m.x.toFixed(1)}, ${m.y.toFixed(1)})`}
+                    />
+                  ))}
+                </div>
+              )}
               </div>
-              {shot.markers.length > 0 && <div className="debug-panel__shot-card-meta">{shot.markers.length} 个识别/点击标记</div>}
+              {(shot.markers.length > 0 || shot.boxes.length > 0) && (
+                <div className="debug-panel__shot-card-meta">
+                  {shot.boxes.length} 个匹配框 · {shot.markers.length} 个识别/点击标记
+                  {shot.boxes.length > 0 && shot.boxes[0]?.scale !== undefined && (
+                    <span className="debug-panel__shot-card-scale"> · 匹配倍率 {shot.boxes[0].scale.toFixed(2)}x</span>
+                  )}
+                </div>
+              )}
             </button>
           ))}
           {screenshotEvidence.length === 0 && <div className="debug-panel__shot-card-empty">暂无截图证据</div>}
@@ -435,36 +460,59 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
       </div>
 
       {/* Shot viewer */}
-      {expandedShot && (
-        <div className="debug-panel__shot-viewer" onClick={() => setExpandedShot(null)}>
+      {expandedShotIndex !== null && (
+        <div className="debug-panel__shot-viewer" onClick={() => setExpandedShotIndex(null)}>
           <div className="debug-panel__shot-viewer-inner debug-panel__shot-viewer-inner--large" onClick={(e) => e.stopPropagation()}>
             <div className="debug-panel__shot-viewer-head">
-              <span>{shotLabels[expandedShot]}</span>
-              <button className="template-modal__close" onClick={() => setExpandedShot(null)} aria-label="关闭">×</button>
+              <div className="debug-panel__shot-viewer-head-main">
+                <span className="debug-panel__shot-viewer-head-title">{shotLabel}</span>
+                {expandedEvidence && (
+                  <span className="debug-panel__shot-viewer-head-meta">
+                    {expandedEvidence.boxes.length} 个匹配框 · {expandedEvidence.markers.length} 个识别/点击标记
+                    {expandedEvidence.boxes.length > 0 && expandedEvidence.boxes[0]?.scale !== undefined && (
+                      <span className="debug-panel__shot-viewer-head-scale"> · 匹配倍率 {expandedEvidence.boxes[0].scale.toFixed(2)}x</span>
+                    )}
+                  </span>
+                )}
+              </div>
+              <button className="template-modal__close" onClick={() => setExpandedShotIndex(null)} aria-label="关闭">×</button>
             </div>
             <div className="debug-panel__shot-viewer-canvas debug-panel__shot-viewer-canvas--large">
-              {expandedShot === 'before' && beforeFrame && (
-                <img src={beforeFrame} alt="执行前截图" className="debug-panel__shot-viewer-img" />
-              )}
-              {expandedShot === 'during' && beforeFrame && (
+              {expandedFrame ? (
                 <div className="debug-panel__shot-viewer-stage">
-                  <img src={beforeFrame} alt="执行前截图" className="debug-panel__shot-viewer-img" />
-                  {executionMarkers.map((m, index) => (
+                  <img
+                    src={expandedFrame}
+                    alt={`${expandedEvidence?.node.title ?? '截图'}放大图`}
+                    className="debug-panel__shot-viewer-img"
+                  />
+                  {expandedEvidence?.boxes.map((box, index) => (
                     <div
-                      key={index}
-                      className="debug-panel__shot-viewer-marker"
-                      style={{ left: `${m.x / Math.max(beforeSize?.width ?? 1, 1) * 100}%`, top: `${m.y / Math.max(beforeSize?.height ?? 1, 1) * 100}%` }}
-                      title={m.label}
+                      key={`box-${index}`}
+                      className="debug-panel__shot-viewer-box"
+                      style={{
+                        left: `${box.x / Math.max(expandedSize?.width ?? 1, 1) * 100}%`,
+                        top: `${box.y / Math.max(expandedSize?.height ?? 1, 1) * 100}%`,
+                        width: `${box.width / Math.max(expandedSize?.width ?? 1, 1) * 100}%`,
+                        height: `${box.height / Math.max(expandedSize?.height ?? 1, 1) * 100}%`,
+                      }}
+                      title={`${box.label} · 匹配倍率 ${box.scale !== undefined ? box.scale.toFixed(2) : '1.00'}x`}
+                    />
+                  ))}
+                  {expandedEvidence?.markers.map((m, index) => (
+                    <div
+                      key={`marker-${index}`}
+                      className={`debug-panel__shot-viewer-marker debug-panel__shot-viewer-marker--${m.kind}`}
+                      style={{
+                        left: `${Math.max(0, Math.min(100, m.x / Math.max(expandedSize?.width ?? 1, 1) * 100))}%`,
+                        top: `${Math.max(0, Math.min(100, m.y / Math.max(expandedSize?.height ?? 1, 1) * 100))}%`,
+                      }}
+                      title={`${m.label} (${m.x.toFixed(1)}, ${m.y.toFixed(1)})`}
                     />
                   ))}
                 </div>
-              )}
-              {expandedShot === 'after' && afterFrame && (
-                <img src={afterFrame} alt="执行后截图" className="debug-panel__shot-viewer-img" />
-              )}
-              {(expandedShot === 'during' && !beforeFrame) || (expandedShot === 'after' && !afterFrame) ? (
+              ) : (
                 <div className="debug-panel__shot-viewer-empty">暂无截图</div>
-              ) : null}
+              )}
             </div>
           </div>
         </div>

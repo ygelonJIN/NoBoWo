@@ -6834,10 +6834,31 @@ pre::-webkit-scrollbar-thumb:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 12px 14px;
   font-size: 13px;
   font-weight: 600;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.debug-panel__shot-viewer-head-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.debug-panel__shot-viewer-head-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(231, 236, 243, 0.92);
+}
+.debug-panel__shot-viewer-head-meta {
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.2;
+  color: rgba(231, 236, 243, 0.48);
+}
+.debug-panel__shot-viewer-head-scale {
+  color: rgba(106, 227, 161, 0.9);
 }
 .debug-panel__shot-viewer-canvas {
   height: 300px;
@@ -6863,6 +6884,26 @@ pre::-webkit-scrollbar-thumb:hover {
   max-width: 100%;
   height: auto;
   border-radius: 10px;
+}
+.debug-panel__shot-viewer-box {
+  position: absolute;
+  border: 2px solid #6ae3a1;
+  background: rgba(106, 227, 161, 0.12);
+  box-shadow: 0 0 10px rgba(106, 227, 161, 0.45);
+  pointer-events: none;
+}
+.debug-panel__shot-card-meta {
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.2;
+  color: rgba(231, 236, 243, 0.48);
+  margin-top: 4px;
+}
+.debug-panel__shot-card-scale {
+  color: rgba(106, 227, 161, 0.9);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
 }
 .debug-panel__shot-viewer-marker {
   position: absolute;
