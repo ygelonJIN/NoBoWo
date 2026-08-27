@@ -361,26 +361,6 @@ export function PropertiesPanel({
           </section>
         )}
 
-        {node.type === 'input' && (
-          <section className="properties-panel__group">
-            <h3>输入配置</h3>
-            <label>
-              值
-              <textarea
-                value={node.data.value}
-                onChange={(e) => onChangeNode(updateNodeData(node, { value: e.target.value }))}
-              />
-            </label>
-            <label className="checkbox-row">
-              <span>回车提交</span>
-              <input
-                type="checkbox"
-                checked={node.data.submit ?? false}
-                onChange={(e) => onChangeNode(updateNodeData(node, { submit: e.target.checked }))}
-              />
-            </label>
-          </section>
-        )}
 
         {node.type === 'wait' && (
           <section className="properties-panel__group">
@@ -566,6 +546,7 @@ export function PropertiesPanel({
         {node.type === 'loop' && (
           <section className="properties-panel__group">
             <h3>循环配置</h3>
+            <p className="properties-panel__hint">Loop 通过角色区分：Begin 负责开始循环，Down 负责循环结束后继续。每个节点只有左侧输入点和右侧输出点。</p>
             <label>
               模式
               <CustomSelect
@@ -601,6 +582,7 @@ export function PropertiesPanel({
         {node.type === 'scroll' && (
           <section className="properties-panel__group">
             <h3>滚动配置</h3>
+            <p className="properties-panel__hint">滚动量不是像素值，而是滚轮滚动步数；不同系统和应用的实际效果可能不同。</p>
             <label>
               方向
               <CustomSelect
@@ -615,15 +597,30 @@ export function PropertiesPanel({
               />
             </label>
             <label>
-              滚动距离（px）
-              <input
-                type="number"
-                min={0}
-                value={node.data.amount}
-                onChange={(e) => onChangeNode(updateNodeData(node, { amount: Math.max(0, Number(e.target.value)) }))}
+              滚动档位
+              <CustomSelect
+                value={node.data.preset ?? 'medium'}
+                options={[
+                  { value: 'small', label: '小幅' },
+                  { value: 'medium', label: '中幅' },
+                  { value: 'large', label: '大幅' },
+                  { value: 'custom', label: '自定义' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { preset: v as 'small' | 'medium' | 'large' | 'custom' }))}
               />
             </label>
-            <p className="properties-panel__hint">执行时对当前激活窗口滚动指定像素</p>
+            {(node.data.preset ?? 'medium') === 'custom' && (
+              <label>
+                自定义滚动量
+                <input
+                  type="number"
+                  min={0}
+                  value={node.data.customAmount ?? 300}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { customAmount: Math.max(0, Number(e.target.value)) }))}
+                />
+              </label>
+            )}
+            <p className="properties-panel__hint">建议先用小/中/大幅，只有要精确控制时再切到自定义。</p>
           </section>
         )}
 

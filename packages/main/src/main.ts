@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell } from 'electron';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
@@ -37,6 +37,8 @@ import { YOLO_CLASS_COLORS } from '@nobowo/core';
 import { runVisionEngine, writeImageToTemp } from './engine';
 import { WorkflowExecutor } from './workflowExecutor';
 
+let mainWindow: BrowserWindow | null = null;
+
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 1600,
@@ -49,6 +51,10 @@ const createWindow = () => {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+  mainWindow = win;
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -3059,19 +3065,202 @@ function registerEngineIpc() {
 // ===== 工作流执行引擎 =====
 
 const workflowExecutor = new WorkflowExecutor();
+let controlWindow: BrowserWindow | null = null;
+let controlWindowInteractive = false;
+
+function loadRendererWindow(win: BrowserWindow, hash = '') {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    void win.loadURL(`${process.env.VITE_DEV_SERVER_URL}${hash}`);
+  } else if (process.env.NODE_ENV === 'development') {
+    void win.loadURL(`http://localhost:5173${hash}`);
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined);
+  }
+}
+
+const CONTROL_WINDOW_ACTIVATE_MS = 1000;
+const CONTROL_WINDOW_POLL_MS = 48;
+
+let controlWindowHoverTimer: NodeJS.Timeout | null = null;
+let controlWindowActivationTimer: NodeJS.Timeout | null = null;
+let controlWindowHoverStartedAt = 0;
+
+function setControlWindowInteractive(interactive: boolean) {
+  if (controlWindowInteractive === interactive) return;
+  controlWindowInteractive = interactive;
+  if (controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.setIgnoreMouseEvents(!interactive, { forward: true });
+  }
+}
+
+function broadcastControlWindowHolding(progress: number, activating: boolean) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('workflow:control:holding', { progress, activating });
+  }
+}
+
+function clearControlWindowActivation() {
+  if (controlWindowActivationTimer) {
+    clearTimeout(controlWindowActivationTimer);
+    controlWindowActivationTimer = null;
+  }
+  controlWindowHoverStartedAt = 0;
+}
+
+function startControlWindowHoverPolling(target: BrowserWindow) {
+  if (controlWindowHoverTimer) clearInterval(controlWindowHoverTimer);
+  controlWindowHoverTimer = setInterval(() => {
+    if (!controlWindow || controlWindow.isDestroyed() || target.isDestroyed()) {
+      if (controlWindowHoverTimer) clearInterval(controlWindowHoverTimer);
+      controlWindowHoverTimer = null;
+      clearControlWindowActivation();
+      broadcastControlWindowHolding(0, false);
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const bounds = target.getBounds();
+    const inside =
+      cursor.x >= bounds.x &&
+      cursor.x <= bounds.x + bounds.width &&
+      cursor.y >= bounds.y &&
+      cursor.y <= bounds.y + bounds.height;
+
+    if (inside && !controlWindowInteractive) {
+      if (!controlWindowHoverStartedAt) {
+        controlWindowHoverStartedAt = Date.now();
+        controlWindowActivationTimer = setTimeout(() => {
+          controlWindowActivationTimer = null;
+          controlWindowHoverStartedAt = 0;
+          setControlWindowInteractive(true);
+          broadcastControlWindowHolding(1, false);
+        }, CONTROL_WINDOW_ACTIVATE_MS);
+      }
+      broadcastControlWindowHolding(
+        Math.min(1, (Date.now() - controlWindowHoverStartedAt) / CONTROL_WINDOW_ACTIVATE_MS),
+        true,
+      );
+    } else if (!inside) {
+      clearControlWindowActivation();
+      broadcastControlWindowHolding(0, false);
+      setControlWindowInteractive(false);
+    }
+  }, CONTROL_WINDOW_POLL_MS);
+}
+
+function stopControlWindowHoverPolling() {
+  if (controlWindowHoverTimer) clearInterval(controlWindowHoverTimer);
+  controlWindowHoverTimer = null;
+  clearControlWindowActivation();
+  broadcastControlWindowHolding(0, false);
+  setControlWindowInteractive(false);
+}
+
+function closeControlWindow() {
+  if (controlWindow && !controlWindow.isDestroyed()) controlWindow.close();
+  controlWindow = null;
+  controlWindowInteractive = false;
+  clearControlWindowActivation();
+}
+
+function showMainWindowAndCloseControl() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send('workflow:ui:openDebugPanel');
+  } else {
+    createWindow();
+    mainWindow?.webContents.once('did-finish-load', () => mainWindow?.webContents.send('workflow:ui:openDebugPanel'));
+  }
+  closeControlWindow();
+}
+
+function openControlWindow() {
+  if (controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.show();
+    controlWindow.focus();
+    return;
+  }
+  controlWindow = new BrowserWindow({
+    width: 286,
+    height: 148,
+    minWidth: 286,
+    minHeight: 148,
+    useContentSize: true,
+    transparent: true,
+    hasShadow: false,
+    roundedCorners: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    frame: false,
+    resizable: true,
+    skipTaskbar: false,
+    title: 'NoBoWo 运行控制',
+    webPreferences: {
+      preload: join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  const displays = screen.getAllDisplays();
+  const display = displays[0];
+  const windowWidth = 286;
+  if (display) {
+    controlWindow.setPosition(
+      display.workArea.x + display.workArea.width - windowWidth - 24,
+      display.workArea.y + 24,
+    );
+  }
+  controlWindow.on('closed', () => {
+    controlWindow = null;
+    controlWindowInteractive = false;
+    stopControlWindowHoverPolling();
+  });
+  startControlWindowHoverPolling(controlWindow);
+  controlWindow.on('blur', () => setControlWindowInteractive(false));
+  loadRendererWindow(controlWindow, '#/run-control');
+}
+
+function isLocalWorkflow(workflow: WorkflowDocument): boolean {
+  return workflow.nodes.some((node) => node.type === 'screenshot' && node.data.source !== 'stream');
+}
 
 function registerWorkflowIpc() {
   workflowExecutor.onEvent((event) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send('workflow:event', event);
     }
+
   });
 
   ipcMain.handle('workflow:getState', async () => workflowExecutor.getSnapshot());
-  ipcMain.handle('workflow:run', async (_event, workflow: WorkflowDocument) => workflowExecutor.run(workflow));
+  ipcMain.handle('workflow:run', async (_event, workflow: WorkflowDocument) => {
+    const result = await workflowExecutor.run(workflow);
+    if (result.started && isLocalWorkflow(workflow)) {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+      openControlWindow();
+    }
+    return { ...result, runMode: isLocalWorkflow(workflow) ? 'local' : 'stream' };
+  });
   ipcMain.handle('workflow:pause', async () => workflowExecutor.pause());
   ipcMain.handle('workflow:resume', async (_event, opts?: { retry?: boolean }) => workflowExecutor.resume(opts));
+  ipcMain.handle('workflow:controlWindowInteractive', async (_event, interactive: boolean) => {
+    if (interactive) {
+      clearControlWindowActivation();
+      broadcastControlWindowHolding(1, false);
+      setControlWindowInteractive(true);
+    } else {
+      clearControlWindowActivation();
+      broadcastControlWindowHolding(0, false);
+      setControlWindowInteractive(false);
+    }
+    return { ok: true };
+  });
   ipcMain.handle('workflow:stop', async () => workflowExecutor.stop());
+  ipcMain.handle('workflow:returnToWorkbench', async () => {
+    showMainWindowAndCloseControl();
+    return { ok: true };
+  });
 }
 
 app.whenReady().then(() => {

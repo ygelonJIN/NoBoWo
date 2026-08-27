@@ -288,6 +288,7 @@ export class WorkflowExecutor {
   private runGeneration = 0;
   private pauseWaiters: Array<() => void> = [];
   private currentNodeId: string | null = null;
+  private currentStep = 0;
   private context: RunContext = { lastFrame: null, lastRecognize: null, lastCapture: null };
   private nodeStates: Record<string, NodeRunStatus> = {};
   private nodeResults: Record<string, NodeRunResult> = {};
@@ -336,6 +337,7 @@ export class WorkflowExecutor {
     this.resumeRetry = false;
     this.pauseWaiters = [];
     this.currentNodeId = null;
+    this.currentStep = 0;
     this.context = { lastFrame: null, lastRecognize: null, lastCapture: null };
     this.nodeStates = {};
     this.nodeResults = {};
@@ -442,6 +444,11 @@ export class WorkflowExecutor {
     });
   }
 
+  /** 按节点 id 查找工作流节点。 */
+  private findNode(nodeId: string): WorkflowNode | null {
+    return this.workflow?.nodes.find((node) => node.id === nodeId) ?? null;
+  }
+
   /** 暂停检查点：用户暂停时在此等待，返回 false 表示应当停止 */
   private async checkpoint(generation: number): Promise<boolean> {
     if (this.runGeneration !== generation || this.stopped) return false;
@@ -479,7 +486,8 @@ export class WorkflowExecutor {
         this.nodeStates[node.id] = 'skipped';
         const result: NodeRunResult = { nodeId: node.id, status: 'skipped', message: '节点已停用，跳过' };
         this.nodeResults[node.id] = result;
-        this.emit({ t: 'nodeStart', runId, nodeId: node.id });
+        this.currentStep += 1;
+        this.emit({ t: 'nodeStart', runId, nodeId: node.id, step: this.currentStep, totalSteps: this.workflow?.nodes.length });
         this.emit({ t: 'nodeEnd', runId, nodeId: node.id, result });
         const next = this.resolveNext(node, result);
         if (loopBackId && next === loopBackId) return;
@@ -537,7 +545,7 @@ export class WorkflowExecutor {
 
   private nextOf(nodeId: string, port: string): string | null {
     const edge = this.workflow!.edges.find(
-      (item) => item.source === nodeId && (item.sourcePort ?? 'out') === port,
+      (item) => item.source === nodeId && ((item.sourcePort ?? 'out') === port || (port === 'body' && item.sourcePort === 'begin') || (port === 'done' && item.sourcePort === 'down')),
     );
     return edge?.target ?? null;
   }
@@ -684,23 +692,6 @@ export class WorkflowExecutor {
         };
       }
 
-      case 'input': {
-        const value = node.data.value ?? '';
-        if (!value) return { nodeId: node.id, status: 'fail', message: '输入内容为空' };
-        log('info', `输入：${value.slice(0, 50)}${value.length > 50 ? '…' : ''}`);
-        const res = await runVisionEngine('input', { action: 'type', text: value }, 30000);
-        if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '输入失败' };
-        if (node.data.submit) {
-          const keyRes = await runVisionEngine('input', { action: 'key', keys: 'enter' }, 15000);
-          if (!keyRes.ok) return { nodeId: node.id, status: 'fail', message: keyRes.message ?? '回车失败' };
-        }
-        return {
-          nodeId: node.id,
-          status: 'ok',
-          message: node.data.submit ? `输入并回车：${value.slice(0, 30)}` : `输入：${value.slice(0, 30)}`,
-        };
-      }
-
       case 'wait': {
         if (node.data.mode === 'condition' && node.data.conditionText?.trim()) {
           const expr = node.data.conditionText.trim();
@@ -768,15 +759,21 @@ export class WorkflowExecutor {
         return this.executeLoop(node);
 
       case 'scroll': {
-        const { direction, amount } = node.data;
-        log('info', `滚动：${direction} ${amount}`);
+        const { direction } = node.data;
+        const preset = node.data.preset ?? 'medium';
+        const amount =
+          preset === 'small' ? 1 :
+          preset === 'medium' ? 3 :
+          preset === 'large' ? 6 :
+          Math.max(0, node.data.customAmount ?? 300);
+        log('info', `滚动：${direction} ${preset}${preset === 'custom' ? ` ${amount}` : ''}`);
         const res = await runVisionEngine(
           'input',
           { action: 'scroll', direction, amount },
           15000,
         );
         if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '滚动失败' };
-        return { nodeId: node.id, status: 'ok', message: `滚动：${direction} ${amount}` };
+        return { nodeId: node.id, status: 'ok', message: `滚动：${direction} ${preset}${preset === 'custom' ? ` ${amount}` : ''}` };
       }
 
       case 'keyboard': {
@@ -813,58 +810,75 @@ export class WorkflowExecutor {
 
   private async executeLoop(node: LoopNode): Promise<NodeRunResult> {
     const runId = this.runId!;
-    const bodyStart = this.nextOf(node.id, 'body');
+    const pairId = node.data.pairId;
+    if (!pairId) return { nodeId: node.id, status: 'fail', message: 'Loop 缺少配对标识，请重新添加 Loop Begin/Down' };
+    const pair = this.workflow!.nodes.find((candidate) => candidate.type === 'loop' && candidate.data.pairId === pairId && candidate.id !== node.id) as LoopNode | undefined;
+    if (!pair) return { nodeId: node.id, status: 'fail', message: 'Loop Begin/Down 尚未配对' };
+
+    const begin = node.data.role === 'begin' ? node : pair.data.role === 'begin' ? pair : undefined;
+    const down = node.data.role === 'down' ? node : pair.data.role === 'down' ? pair : undefined;
+    if (!begin || !down) return { nodeId: node.id, status: 'fail', message: 'Loop 必须由一个 Begin 和一个 Down 组成' };
+
+    const beginNext = this.nextOf(begin.id, 'out');
+    const downNext = this.nextOf(down.id, 'out');
+    if (!beginNext) return { nodeId: node.id, status: 'fail', message: 'Loop Begin 没有连接循环体' };
+    if (!downNext) return { nodeId: node.id, status: 'fail', message: 'Loop Down 没有连接后续步骤' };
+
+    const countLimit = begin.data.mode === 'count' ? Math.max(0, begin.data.count ?? 1) : 10000;
+    const condition = begin.data.conditionText?.trim() || 'false';
     let executed = 0;
+    this.emit({ t: 'log', runId, level: 'info', message: begin.data.mode === 'count' ? `开始循环 ${countLimit} 次` : `开始条件循环：${condition}`, nodeId: begin.id });
 
-    if (node.data.mode === 'count') {
-      const count = Math.max(0, node.data.count ?? 1);
-      this.emit({ t: 'log', runId, level: 'info', message: `开始循环 ${count} 次`, nodeId: node.id });
-      for (let i = 0; i < count; i++) {
-        if (this.stopped || this.runGeneration !== 0) break;
-        if (!(await this.checkpoint(0))) break;
-        if (bodyStart) {
-          this.emit({ t: 'log', runId, level: 'debug', message: `第 ${i + 1}/${count} 次迭代`, nodeId: node.id });
-          await this.executeChain(bodyStart, node.id, 0);
-        }
-        executed++;
-        if (this.stopped || this.runGeneration !== 0) break;
-      }
-      return {
-        nodeId: node.id,
-        status: 'ok',
-        loopCount: executed,
-        message: `循环 ${count} 次（实际执行 ${executed} 次）`,
-      };
-    }
-
-    // 条件循环
-    const expr = node.data.conditionText?.trim() || 'false';
-    this.emit({ t: 'log', runId, level: 'info', message: `开始条件循环：${expr}`, nodeId: node.id });
-    let safety = 0;
-    while (this.runGeneration === 0 && !this.stopped) {
+    while (!this.stopped && this.runGeneration === 0 && executed < countLimit) {
       if (!(await this.checkpoint(0))) break;
-      let condition = false;
-      try {
-        condition = this.evalExpression(expr);
-      } catch (err) {
-        return {
-          nodeId: node.id,
-          status: 'fail',
-          message: `循环条件求值失败：${err instanceof Error ? err.message : String(err)}`,
-        };
+      if (begin.data.mode === 'condition') {
+        let shouldContinue = false;
+        try {
+          shouldContinue = this.evalExpression(condition);
+        } catch (err) {
+          return { nodeId: node.id, status: 'fail', message: `循环条件求值失败：${err instanceof Error ? err.message : String(err)}` };
+        }
+        if (!shouldContinue) break;
       }
-      if (!condition) break;
-      if (bodyStart) {
-        this.emit({ t: 'log', runId, level: 'debug', message: `第 ${executed + 1} 次迭代`, nodeId: node.id });
-        await this.executeChain(bodyStart, node.id, 0);
+
+      let current: string | null = beginNext;
+      const visited = new Set<string>();
+      while (current && current !== down.id && !this.stopped && this.runGeneration === 0) {
+        if (visited.has(current)) return { nodeId: node.id, status: 'fail', message: '循环体出现额外回路，请只连接到 Loop Down' };
+        visited.add(current);
+        const currentNode = this.findNode(current);
+        if (!currentNode) return { nodeId: node.id, status: 'fail', message: `循环体节点不存在：${current}` };
+        const result = await this.executeNodeWithEvents(currentNode, 0);
+        if (result.status === 'fail') return { nodeId: node.id, status: 'fail', message: result.message ?? '循环体执行失败' };
+        current = this.resolveNext(currentNode, result) ?? null;
       }
+      if (current !== down.id) return { nodeId: node.id, status: 'fail', message: 'Loop Begin 到 Loop Down 之间没有形成完整循环体' };
       executed++;
-      if (++safety >= 10000) {
-        this.emit({ t: 'log', runId, level: 'warn', message: '条件循环超过 10000 次上限，已自动停止', nodeId: node.id });
-        break;
-      }
+      this.emit({ t: 'log', runId, level: 'debug', message: `循环第 ${executed} 次完成`, nodeId: begin.id });
     }
-    return { nodeId: node.id, status: 'ok', loopCount: executed, message: `条件循环执行 ${executed} 次` };
+
+    this.emit({ t: 'log', runId, level: 'info', message: `Loop Down：循环完成，共 ${executed} 次`, nodeId: down.id });
+    return { nodeId: node.id, status: 'ok', loopCount: executed, message: `循环执行 ${executed} 次，继续 Loop Down 后续步骤` };
+  }
+
+  private async executeNodeWithEvents(node: WorkflowNode, generation: number): Promise<NodeRunResult> {
+    const runId = this.runId!;
+    this.currentNodeId = node.id;
+    this.nodeStates[node.id] = 'running';
+    this.emit({ t: 'nodeStart', runId, nodeId: node.id });
+    const startedAt = Date.now();
+    let result: NodeRunResult;
+    try {
+      result = await this.executeNode(node, generation);
+    } catch (err) {
+      result = { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
+    }
+    result.elapsedMs = Date.now() - startedAt;
+    this.currentNodeId = null;
+    this.nodeStates[node.id] = result.status;
+    this.nodeResults[node.id] = result;
+    this.emit({ t: 'nodeEnd', runId, nodeId: node.id, result });
+    return result;
   }
 
   // ===== recognize 策略栈 =====

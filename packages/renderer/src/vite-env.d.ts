@@ -35,11 +35,15 @@ declare global {
     electronAPI: Record<string, never>;
     workflowAPI?: {
       getState: () => Promise<WorkflowRunSnapshot>;
-      run: (workflow: WorkflowDocument) => Promise<WorkflowRunHandle>;
+      run: (workflow: WorkflowDocument) => Promise<WorkflowRunHandle & { runMode?: 'local' | 'stream' }>;
       pause: () => Promise<{ ok: boolean; message?: string }>;
       resume: (opts?: { retry?: boolean }) => Promise<{ ok: boolean; message?: string }>;
       stop: () => Promise<{ ok: boolean; message?: string }>;
+      setControlWindowInteractive: (interactive: boolean) => Promise<{ ok: boolean }>;
+      returnToWorkbench: () => Promise<{ ok: boolean }>;
       onEvent: (cb: (event: WorkflowRunEvent) => void) => () => void;
+      onOpenDebugPanel: (cb: () => void) => () => void;
+      onControlHolding: (cb: (data: { progress: number; activating: boolean }) => void) => () => void;
     };
     cloudApiAPI?: {
       list: () => Promise<CloudApiProfile[]>;

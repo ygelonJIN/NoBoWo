@@ -31,7 +31,7 @@ const PANEL_GAP = 14;
 type Point = { x: number; y: number };
 type ContextMenu = { x: number; y: number; edgeId?: string };
 
-const defaultSeedNodes: WorkflowNode[] = [createDefaultNode('click', 1), createDefaultNode('input', 2), createDefaultNode('wait', 3)];
+const defaultSeedNodes: WorkflowNode[] = [createDefaultNode('click', 1), createDefaultNode('wait', 2), createDefaultNode('loop', 3)];
 
 function readInitialDocument(): WorkflowDocument {
   if (typeof window === 'undefined') {
@@ -64,17 +64,8 @@ function cloneNode(node: WorkflowNode, offset = 40): WorkflowNode {
   };
 }
 
-function getSourcePoint(node: WorkflowNode, portId?: string): Point {
-  const height = node.height ?? NODE_HEIGHT;
-  let y: number;
-  if (node.type === 'if' && portId === 'true') {
-    y = node.position.y + height * 0.25;
-  } else if (node.type === 'if' && portId === 'false') {
-    y = node.position.y + height * 0.75;
-  } else {
-    y = node.position.y + height / 2;
-  }
-  return { x: node.position.x + (node.width ?? NODE_WIDTH), y };
+function getSourcePoint(node: WorkflowNode): Point {
+  return { x: node.position.x + (node.width ?? NODE_WIDTH), y: node.position.y + (node.height ?? NODE_HEIGHT) / 2 };
 }
 
 function getTargetPoint(node: WorkflowNode): Point {
@@ -150,8 +141,7 @@ function getNodeSummary(node: WorkflowNode): string {
   switch (node.type) {
     case 'click':
       return '点击识别到的目标';
-    case 'input':
-      return node.data.value ? `输入：${node.data.value}` : '空输入';
+
     case 'wait':
       return node.data.mode === 'delay' ? `延时 ${node.data.delayMs ?? 1000}ms` : '条件等待';
     case 'screenshot':
@@ -168,8 +158,10 @@ function getNodeSummary(node: WorkflowNode): string {
       return node.data.expression || '条件判断';
     case 'loop':
       return node.data.mode === 'count' ? `循环 ${node.data.count ?? 3} 次` : '条件循环';
-    case 'scroll':
-      return `滚动${directionLabel(node.data.direction)} ${node.data.amount}px`;
+    case 'scroll': {
+      const presetLabel = node.data.preset === 'small' ? '小幅' : node.data.preset === 'medium' ? '中幅' : node.data.preset === 'large' ? '大幅' : '自定义';
+      return `滚动${directionLabel(node.data.direction)} · ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;
+    }
     case 'keyboard':
       if (node.data.mode === 'type') {
         return node.data.keys ? `连续输入：${node.data.keys}（间隔 ${node.data.interval ?? 200}ms）` : '空输入';
@@ -232,6 +224,15 @@ export function App() {
   const [streamVersion, setStreamVersion] = useState(0);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [workflowRunState, setWorkflowRunState] = useState<WorkflowRunSnapshot | null>(null);
+  const [controlWindowReady, setControlWindowReady] = useState(false);
+  const [holdProgress, setHoldProgress] = useState(0);
+  const [holdingAction, setHoldingAction] = useState<string | null>(null);
+  const [windowActivationProgress, setWindowActivationProgress] = useState(0);
+  const [windowActivating, setWindowActivating] = useState(false);
+  const holdTimerRef = useRef<number | null>(null);
+  const holdStartedRef = useRef<number | null>(null);
+  const [currentRunStep, setCurrentRunStep] = useState(0);
+  const [totalRunSteps, setTotalRunSteps] = useState(0);
   const [workflowRunLogs, setWorkflowRunLogs] = useState<string[]>([]);
   const [workflowRunNotice, setWorkflowRunNotice] = useState<{ main: string; hint?: string } | null>(null);
   const nodesRef = useRef(nodes);
@@ -255,16 +256,42 @@ export function App() {
   const dragStartSnapshotRef = useRef<string | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const isControlWindow = typeof window !== 'undefined' && window.location.hash.includes('run-control');
   const closeDebugPanel = useCallback(() => {
     setDebugPanelOpen(false);
   }, []);
+
+  useEffect(() => {
+    if (isControlWindow) setControlWindowReady(true);
+  }, [isControlWindow]);
 
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
 
   useEffect(() => {
+    const onPauseShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === 'Escape') {
+        event.preventDefault();
+        void window.workflowAPI?.pause();
+      }
+    };
+    window.addEventListener('keydown', onPauseShortcut, true);
+    return () => window.removeEventListener('keydown', onPauseShortcut, true);
+  }, []);
+
+  useEffect(() => {
+    if (!window.workflowAPI?.onControlHolding) return;
+    const off = window.workflowAPI.onControlHolding((data) => {
+      setWindowActivationProgress(data.progress);
+      setWindowActivating(data.activating);
+    });
+    return off;
+  }, []);
+
+  useEffect(() => {
     if (!window.workflowAPI) return;
+    const offOpenDebug = window.workflowAPI.onOpenDebugPanel(() => setDebugPanelOpen(true));
     let active = true;
     window.workflowAPI.getState().then((state) => {
       if (active) setWorkflowRunState(state);
@@ -275,6 +302,8 @@ export function App() {
       } else if (event.t === 'log') {
         setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] ${event.message}`]);
       } else if (event.t === 'nodeStart') {
+        setCurrentRunStep(event.step ?? currentRunStep);
+        setTotalRunSteps(event.totalSteps ?? totalRunSteps);
         const node = nodesRef.current.find((item) => item.id === event.nodeId);
         setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] 执行节点：${node?.title ?? event.nodeId}`]);
       } else if (event.t === 'nodeEnd') {
@@ -285,6 +314,8 @@ export function App() {
       setWorkflowRunState((current) => {
         const base = current ?? { runId: null, status: 'idle', startedAt: null, nodeStates: {}, nodeResults: {} };
         if (event.t === 'start') {
+          setCurrentRunStep(0);
+          setTotalRunSteps(event.nodeCount);
           setWorkflowRunNotice(null);
           return { runId: event.runId, status: 'running', startedAt: Date.now(), nodeStates: {}, nodeResults: {} };
         }
@@ -299,8 +330,8 @@ export function App() {
           };
         }
         if (event.t === 'pause') {
-          setWorkflowRunNotice(null);
-          return { ...base, status: 'paused' };
+          if (event.message) setWorkflowRunNotice({ main: event.message, hint: '可以点击「回到工作台」查看详细调试日志，或点击「重做」重新运行' });
+          return { ...base, status: event.message ? 'error' : 'paused' };
         }
         if (event.t === 'resume') {
           setWorkflowRunNotice(null);
@@ -320,6 +351,7 @@ export function App() {
     return () => {
       active = false;
       off();
+      offOpenDebug();
     };
   }, []);
 
@@ -431,12 +463,24 @@ export function App() {
       const position = point
         ? clientToCanvas(point, viewport, zoom)
         : getCanvasCenter(canvasRef, viewport, zoom);
-      const nextNode = { ...created, position: { x: position.x - NODE_WIDTH / 2, y: position.y - 30 } };
+      const nextNode = {
+        ...created,
+        position: { x: position.x - NODE_WIDTH / 2, y: position.y - 30 },
+        ...(type === 'loop'
+          ? {
+              title: nodes.filter((item) => item.type === 'loop').length % 2 === 0 ? 'Loop Begin' : 'Loop Down',
+              data: {
+                ...created.data,
+                role: nodes.filter((item) => item.type === 'loop').length % 2 === 0 ? 'begin' : 'down',
+              },
+            }
+          : {}),
+      } as WorkflowNode;
       setNodes((current) => [...current, nextNode]);
       setSelectedNodeId(nextNode.id);
       setContextMenu(null);
     },
-    [nodes.length, viewport, zoom],
+    [nodes, viewport, zoom],
   );
 
   const workflowRunPercent = useMemo(() => {
@@ -663,7 +707,6 @@ export function App() {
   }, [edges, nodes]);
 
   const runWorkflow = useCallback(async () => {
-    setDebugPanelOpen(true);
     if (!window.workflowAPI) {
       setWorkflowRunNotice({
         main: '当前环境没有工作流执行器',
@@ -676,6 +719,7 @@ export function App() {
       setWorkflowRunNotice({ main: result.message ?? '工作流启动失败', hint: '已有工作流在执行中，可在控制面板点击「继续」或「停止」' });
     } else {
       setWorkflowRunNotice(null);
+      setDebugPanelOpen(result.runMode !== 'local');
     }
   }, [edges, nodes]);
 
@@ -684,12 +728,44 @@ export function App() {
   }, []);
 
   const resumeWorkflow = useCallback(() => {
+    if (workflowRunState?.status === 'stopped' || workflowRunState?.status === 'done') {
+      void runWorkflow();
+      return;
+    }
     void window.workflowAPI?.resume();
-  }, []);
+  }, [runWorkflow, workflowRunState?.status]);
 
   const stopWorkflow = useCallback(() => {
     void window.workflowAPI?.stop();
   }, []);
+
+  const cancelHold = useCallback(() => {
+    if (holdTimerRef.current !== null) window.clearInterval(holdTimerRef.current);
+    if (isControlWindow) setControlWindowReady(false);
+    holdTimerRef.current = null;
+    holdStartedRef.current = null;
+    setHoldingAction(null);
+    setHoldProgress(0);
+  }, []);
+
+  const finishHold = useCallback((action: string) => {
+    cancelHold();
+    if (action === 'pause') void window.workflowAPI?.pause();
+    else if (action === 'resume') void resumeWorkflow();
+    else if (action === 'stop') void stopWorkflow();
+    else if (action === 'back') void window.workflowAPI?.returnToWorkbench();
+  }, [cancelHold, resumeWorkflow, stopWorkflow]);
+
+  const startHold = useCallback((action: string) => {
+    cancelHold();
+    holdStartedRef.current = performance.now();
+    setHoldingAction(action);
+    holdTimerRef.current = window.setInterval(() => {
+      const progress = Math.min(1, (performance.now() - (holdStartedRef.current ?? performance.now())) / 1000);
+      setHoldProgress(progress);
+      if (progress >= 1) finishHold(action);
+    }, 16);
+  }, [cancelHold, finishHold]);
 
   const importWorkflow = useCallback((file: File) => {
     const reader = new FileReader();
@@ -748,6 +824,57 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [copySelectedNode, deleteSelectedNode, pasteNode, selectedEdgeId]);
 
+  if (isControlWindow) {
+    const pauseShortcut = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘⇧Esc' : 'Ctrl+Shift+Esc';
+    const holdActionButton = (
+      action: string,
+      label: string,
+      disabled: boolean,
+      className?: string,
+    ) => (
+      <button
+        className={className}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          startHold(action);
+        }}
+        onPointerUp={cancelHold}
+        onPointerCancel={cancelHold}
+        disabled={disabled}
+      >
+        <span className="floating-run-panel__action-progress" style={{ '--action-progress': holdingAction === action ? holdProgress : 0 } as CSSProperties} />
+        <span className="floating-run-panel__action-label">{label}</span>
+      </button>
+    );
+    return (
+      <div className="floating-run-panel" style={{ '--activation-progress': windowActivationProgress } as CSSProperties} tabIndex={0}>
+        {windowActivating && <div className="floating-run-panel__activate-bar" style={{ '--activation-progress': windowActivationProgress } as CSSProperties} aria-hidden="true" />}
+        <div className="floating-run-panel__surface" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="floating-run-panel__topbar">
+          <div className="floating-run-panel__identity">
+            <div>
+              <div className="floating-run-panel__eyebrow">暂停 {pauseShortcut}</div>
+              <div className="floating-run-panel__title">NoBoWo 运行控制</div>
+            </div>
+          </div>
+          <span className={`floating-run-panel__status floating-run-panel__status--${workflowRunState?.status ?? 'idle'}`}>
+            {workflowRunState?.status === 'running' ? '运行中' : workflowRunState?.status === 'paused' ? '已暂停' : workflowRunState?.status === 'error' ? '运行失败' : workflowRunState?.status === 'done' ? '已完成' : workflowRunState?.status === 'stopped' ? '已停止' : '待命'}
+          </span>
+        </div>
+        <div className="floating-run-panel__status-row">
+          <div className="floating-run-panel__step">第 {currentRunStep || (workflowRunState?.status === 'done' ? totalRunSteps : 1)}-{totalRunSteps || nodes.length || 0} 步</div>
+          <div className="floating-run-panel__actions">
+            {holdActionButton('pause', '暂停', workflowRunState?.status !== 'running')}
+            {holdActionButton('resume', workflowRunState?.status === 'paused' ? '继续' : '重做', workflowRunState?.status !== 'paused' && workflowRunState?.status !== 'stopped' && workflowRunState?.status !== 'done' && workflowRunState?.status !== 'error')}
+            {holdActionButton('stop', '停止', workflowRunState?.status === 'idle' || workflowRunState?.status === 'done' || workflowRunState?.status === 'stopped', 'floating-run-panel__stop')}
+          </div>
+        </div>
+        {holdActionButton('back', '回到工作台', false, 'floating-run-panel__back')}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`app-shell ${selectedNode ? 'has-panel' : ''}`} tabIndex={0}>
       <div
@@ -793,6 +920,7 @@ export function App() {
                 <button onClick={pauseWorkflow} disabled={workflowRunState?.status !== 'running'}>暂停</button>
                 <button onClick={resumeWorkflow} disabled={workflowRunState?.status !== 'paused'}>继续</button>
                 <button onClick={stopWorkflow} disabled={workflowRunState?.status === 'idle' || workflowRunState?.status === 'done'}>停止</button>
+                <button onClick={() => setDebugPanelOpen((open) => !open)} className={debugPanelOpen ? 'toolbar-run-card__debug--active' : ''}>调试</button>
               </div>
             </div>
 
@@ -815,12 +943,6 @@ export function App() {
                   <span className={`status-dot status-dot--${isAutosaved ? 'saved' : 'saving'}`} />
                   {isAutosaved ? '已自动保存' : '正在保存...'}
                 </div>
-                <button
-                  className={`toolbar__debug-btn ${debugPanelOpen ? 'toolbar__debug-btn--active' : ''}`}
-                  onClick={() => setDebugPanelOpen((open) => !open)}
-                >
-                  调试面板
-                </button>
                 <div className="toolbar__history">
                   <button className="toolbar__icon-button" onClick={zoomOut} aria-label="缩小" title="缩小">−</button>
                   <button className="toolbar__icon-button" onClick={zoomIn} aria-label="放大" title="放大">+</button>
@@ -829,8 +951,8 @@ export function App() {
                 </div>
               </div>
               <div className="toolbar__actions">
-                {(['recognize', 'click', 'input', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
-                  <button key={type} onClick={() => addNode(type)}>{type}</button>
+                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
+                  <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type}</button>
                 ))}
                 <button onClick={exportWorkflow}>导出</button>
                 <button onClick={() => fileInputRef.current?.click()}>导入</button>
@@ -857,7 +979,7 @@ export function App() {
               const source = nodes.find((node) => node.id === edge.source);
               const target = nodes.find((node) => node.id === edge.target);
               if (!source || !target) return null;
-              const start = getSourcePoint(source, edge.sourcePort);
+              const start = getSourcePoint(source);
               const end = getTargetPoint(target);
               const isSelected = selectedEdgeId === edge.id;
               const isDisabled = source.enabled === false || target.enabled === false;
@@ -878,7 +1000,7 @@ export function App() {
             {connecting && (() => {
               const source = nodes.find((node) => node.id === connecting.sourceId);
               if (!source) return null;
-              const start = getSourcePoint(source, connecting.sourceHandleId);
+              const start = getSourcePoint(source);
               const snappedTarget = connecting.snapTargetId ? nodes.find((node) => node.id === connecting.snapTargetId) : null;
               const end = snappedTarget ? getTargetPoint(snappedTarget) : clientToCanvas(connecting.point, viewport, zoom);
               return <path className="workflow-edge workflow-edge--draft" d={`M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`} />;
@@ -909,7 +1031,7 @@ export function App() {
                 setContextMenu(getLocalPoint(event));
               }}
             >
-              <div className="workflow-node__title">{node.title}</div>
+              <div className="workflow-node__title">{node.type === 'loop' ? `Loop ${node.data.role === 'down' ? 'Down' : 'Begin'}` : node.title}</div>
               {node.type === 'recognize' ? (
                 <div className={`workflow-node__strategies workflow-node__strategies--${node.data.executionMode}`}>
                   {(node.data.strategyOrder || ['coords', 'template', 'yolo', 'ocr', 'cloudApi'])

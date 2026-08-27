@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('workflowAPI', {
   resume: (opts?: { retry?: boolean }): Promise<{ ok: boolean; message?: string }> =>
     ipcRenderer.invoke('workflow:resume', opts),
   stop: (): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke('workflow:stop'),
+  setControlWindowInteractive: (interactive: boolean): Promise<{ ok: boolean }> => ipcRenderer.invoke('workflow:controlWindowInteractive', interactive),
+  returnToWorkbench: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('workflow:returnToWorkbench'),
   onEvent: (cb: (event: WorkflowRunEvent) => void): (() => void) => {
     const listener = (_event: unknown, data: WorkflowRunEvent) => cb(data);
     ipcRenderer.on('workflow:event', listener);
@@ -36,6 +38,11 @@ contextBridge.exposeInMainWorld('workflowAPI', {
     const listener = () => cb();
     ipcRenderer.on('workflow:ui:openDebugPanel', listener);
     return () => ipcRenderer.removeListener('workflow:ui:openDebugPanel', listener);
+  },
+  onControlHolding: (cb: (data: { progress: number; activating: boolean }) => void): (() => void) => {
+    const listener = (_event: unknown, data: { progress: number; activating: boolean }) => cb(data);
+    ipcRenderer.on('workflow:control:holding', listener);
+    return () => ipcRenderer.removeListener('workflow:control:holding', listener);
   },
 });
 

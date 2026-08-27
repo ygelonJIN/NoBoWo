@@ -107,8 +107,6 @@ function getNodeLabel(node: WorkflowNode): string {
   switch (node.type) {
     case 'click':
       return '点击识别到的目标';
-    case 'input':
-      return node.data.value ? `输入：${node.data.value}` : '空输入';
     case 'wait':
       return node.data.mode === 'delay' ? `延时 ${node.data.delayMs ?? 1000}ms` : '条件等待';
     case 'screenshot':
@@ -117,8 +115,10 @@ function getNodeLabel(node: WorkflowNode): string {
       return node.data.expression || '条件判断';
     case 'loop':
       return node.data.mode === 'count' ? `循环 ${node.data.count ?? 3} 次` : '条件循环';
-    case 'scroll':
-      return `滚动 ${node.data.amount}px`;
+    case 'scroll': {
+      const presetLabel = node.data.preset === 'small' ? '小幅' : node.data.preset === 'medium' ? '中幅' : node.data.preset === 'large' ? '大幅' : '自定义';
+      return `滚动 ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;
+    }
     case 'keyboard':
       return node.data.keys ? `按键：${node.data.keys}` : '空按键';
     case 'recognize':

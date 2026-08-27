@@ -1,6 +1,5 @@
 export type NodeType =
   | 'click'
-  | 'input'
   | 'wait'
   | 'screenshot'
   | 'if'
@@ -37,10 +36,7 @@ export type ClickNode = WorkflowNodeBase<'click', {
   // click节点完全依赖识别节点的输出，自己不配置策略
 }>;
 
-export type InputNode = WorkflowNodeBase<'input', {
-  value: string;
-  submit?: boolean;
-}>;
+
 
 export type WaitNode = WorkflowNodeBase<'wait', {
   mode: 'delay' | 'condition';
@@ -67,11 +63,16 @@ export type LoopNode = WorkflowNodeBase<'loop', {
   mode: 'count' | 'condition';
   count?: number;
   conditionText?: string;
+  role?: 'begin' | 'down';
+  pairId?: string;
 }>;
+
+export type ScrollPreset = 'small' | 'medium' | 'large' | 'custom';
 
 export type ScrollNode = WorkflowNodeBase<'scroll', {
   direction: 'up' | 'down' | 'left' | 'right';
-  amount: number;
+  preset: ScrollPreset;
+  customAmount?: number;
 }>;
 
 export type KeyboardNode = WorkflowNodeBase<'keyboard', {
@@ -201,7 +202,7 @@ export type RecognizeNode = WorkflowNodeBase<'recognize', {
   strategyOrder: ('coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi')[];
 }>;
 
-export type WorkflowNode = ClickNode | InputNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode | ScrollNode | KeyboardNode;
+export type WorkflowNode = ClickNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode | ScrollNode | KeyboardNode;
 
 export type WorkflowEdge = {
   id: string;
@@ -399,7 +400,7 @@ export type NodeRunResult = {
 
 export type WorkflowRunEvent =
   | { t: 'start'; runId: string; nodeCount: number; message?: string }
-  | { t: 'nodeStart'; runId: string; nodeId: string }
+  | { t: 'nodeStart'; runId: string; nodeId: string; step?: number; totalSteps?: number }
   | { t: 'nodeEnd'; runId: string; nodeId: string; result: NodeRunResult }
   | { t: 'log'; runId: string; level: 'info' | 'warn' | 'error' | 'debug'; message: string; nodeId?: string }
   | { t: 'pause'; runId: string; nodeId?: string; message?: string }
@@ -423,6 +424,7 @@ export type WorkflowRunHandle = {
   started: boolean;
   message?: string;
   runId?: string;
+  runMode?: 'local' | 'stream';
 };
 
 export const defaultWorkflowDocument = (): WorkflowDocument => ({
@@ -438,11 +440,7 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
       ];
-    case 'input':
-      return [
-        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
-        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
-      ];
+
     case 'wait':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
@@ -462,8 +460,7 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
     case 'loop':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
-        { id: 'body', label: 'Body', direction: 'output', dataType: 'flow' },
-        { id: 'done', label: 'Done', direction: 'output', dataType: 'flow' },
+        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
       ];
     case 'recognize':
       return [
@@ -681,13 +678,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         title: 'Click',
         data: { targetStrategy: 'coords', threshold: 60, x: 0, y: 0 },
       };
-    case 'input':
-      return {
-        ...base,
-        type,
-        title: 'Input',
-        data: { value: '', submit: false },
-      };
+
     case 'wait':
       return {
         ...base,
@@ -713,15 +704,15 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
       return {
         ...base,
         type,
-        title: 'Loop',
-        data: { mode: 'count', count: 3 },
+        title: 'Loop Begin',
+        data: { mode: 'count', count: 3, role: 'begin', pairId: `${base.id}-pair` },
       };
     case 'scroll':
       return {
         ...base,
         type,
         title: 'Scroll',
-        data: { direction: 'down', amount: 300 },
+        data: { preset: 'medium', customAmount: 300, direction: 'down' },
       };
     case 'keyboard':
       return {

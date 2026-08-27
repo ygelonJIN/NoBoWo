@@ -1126,6 +1126,162 @@ pre::-webkit-scrollbar-thumb:hover {
   cursor: not-allowed;
   transform: none;
 }
+.toolbar-run-card__debug--active {
+  border-color: rgba(106, 227, 161, 0.42) !important;
+  background: rgba(106, 227, 161, 0.12) !important;
+  color: #b8f5d2 !important;
+}
+.floating-run-panel {
+  position: relative;
+  box-sizing: border-box;
+  min-height: 0;
+  height: 100%;
+  padding: 13px 14px;
+  color: #e7ecf3;
+  background: linear-gradient(180deg, rgba(20, 26, 35, 0.99), rgba(13, 18, 25, 0.99));
+  border: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  border-radius: 18px;
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-app-region: drag;
+}
+.floating-run-panel__surface {
+  position: relative;
+  z-index: 1;
+  opacity: calc(0.62 + 0.38 * var(--activation-progress, 0));
+  transition: opacity 120ms ease;
+}
+.floating-run-panel__activate-bar {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(120, 169, 255, 0.3);
+  transform: scaleX(var(--activation-progress, 0));
+  transform-origin: left center;
+  pointer-events: none;
+  z-index: 4;
+}
+.floating-run-panel__topbar,
+.floating-run-panel__identity,
+.floating-run-panel__meter-label,
+.floating-run-panel__actions {
+  display: flex;
+  align-items: center;
+}
+.floating-run-panel__topbar {
+  justify-content: space-between;
+  gap: 14px;
+}
+.floating-run-panel__identity {
+  gap: 11px;
+}
+
+.floating-run-panel__eyebrow {
+  color: #ff6b6b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-shadow: 0 0 10px rgba(255, 107, 107, 0.35);
+}
+.floating-run-panel__title {
+  margin-top: 3px;
+  font-size: 15px;
+  font-weight: 800;
+}
+.floating-run-panel__status {
+  border: 1px solid rgba(106, 227, 161, 0.3);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #a9efc5;
+  background: rgba(106, 227, 161, 0.1);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.floating-run-panel__status--paused,
+.floating-run-panel__status--error,
+.floating-run-panel__status--done,
+.floating-run-panel__status--stopped { border-color: rgba(155, 180, 220, 0.28); color: rgba(231, 236, 243, 0.72); background: rgba(255, 255, 255, 0.06); }
+.floating-run-panel__status--error { border-color: rgba(255, 143, 143, 0.48); color: #ffc0c0; background: rgba(255, 143, 143, 0.14); }
+.floating-run-panel__status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+.floating-run-panel__step {
+  margin: 0;
+  color: rgba(231, 236, 243, 0.72);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.floating-run-panel__actions {
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+.floating-run-panel__actions button,
+.floating-run-panel__back {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: #e7ecf3;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+.floating-run-panel__action-progress {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(120, 169, 255, 0.3);
+  transform: scaleX(var(--action-progress, 0));
+  transform-origin: left center;
+  pointer-events: none;
+}
+.floating-run-panel__action-label {
+  position: relative;
+  z-index: 1;
+}
+.floating-run-panel__actions button {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+.floating-run-panel__actions button:hover:not(:disabled),
+.floating-run-panel__back:hover {
+  background: rgba(120, 169, 255, 0.12);
+  border-color: rgba(120, 169, 255, 0.3);
+  color: #edf4ff;
+  transform: none;
+}
+.floating-run-panel__actions button:active:not(:disabled),
+.floating-run-panel__back:active {
+  transform: none;
+}
+.floating-run-panel__actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.floating-run-panel__stop { color: #e7ecf3 !important; background: rgba(255, 255, 255, 0.04) !important; }
+.floating-run-panel__stop:hover:not(:disabled) { border-color: rgba(120, 169, 255, 0.3) !important; background: rgba(120, 169, 255, 0.12) !important; color: #edf4ff !important; }
+.floating-run-panel__back {
+  width: 100%;
+  height: 34px;
+  margin-top: 10px;
+  margin-bottom: 13px;
+  color: #c9dcff;
+  font-size: 12px;
+  font-weight: 700;
+  -webkit-app-region: no-drag;
+}
+.floating-run-panel__back:hover { border-color: rgba(120, 169, 255, 0.3); background: rgba(120, 169, 255, 0.12); color: #edf4ff; }
 .toolbar-run-card__primary {
   border: 1px solid rgba(120, 169, 255, 0.42) !important;
   background: linear-gradient(180deg, rgba(120, 169, 255, 0.24), rgba(120, 169, 255, 0.14)) !important;
