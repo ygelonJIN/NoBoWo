@@ -33,6 +33,62 @@ def fail(command, message):
     return 1
 
 
+# 按键别名：把用户常见的写法归一化到 pyautogui 认识的键名。
+# 注意：pyautogui 在 macOS 上认识 command / option / ctrl / alt / shift / caps lock / fn，
+# 但不认识 control / cmd / opt，且不区分大小写字母（大写需用 shift 组合）。
+KEY_ALIASES = {
+    "cmd": "command", "win": "command", "super": "command",
+    "control": "ctrl", "ctl": "ctrl",
+    "opt": "option",
+    "esc": "escape",
+    "del": "delete", "backspace": "backspace",
+    "caps": "capslock", "capslock": "capslock",
+    "enter": "enter", "return": "return",
+    "space": "space", "spacebar": "space",
+    "pgup": "pageup", "pgdn": "pagedown",
+}
+
+
+def _normalize_key(key):
+    k = str(key).strip().lower()
+    if k in KEY_ALIASES:
+        return KEY_ALIASES[k]
+    return k
+
+
+def _parse_combo(keys):
+    """把 'command+left' / 'shift+A' 拆成归一化后的键名列表（单键也返回长度 1）。"""
+    parts = [p.strip() for p in str(keys).split("+") if p.strip()]
+    if not parts:
+        return []
+    names = []
+    for part in parts:
+        if len(part) == 1 and part.isalpha() and part.isupper():
+            # 大写字母 = Shift + 小写字母；若用户已显式写 shift 则不重复
+            if "shift" not in names:
+                names.append("shift")
+            names.append(part.lower())
+        else:
+            names.append(_normalize_key(part))
+    return names
+
+
+def _press_single(pyautogui, name):
+    """按单个键：普通键用 press；大写字母（如 A）用 shift 组合。"""
+    if len(name) == 1 and name.isalpha() and name.isupper():
+        pyautogui.hotkey("shift", name.lower())
+    else:
+        pyautogui.press(name)
+
+
+# 模板匹配：局部峰值收集与位置唯一性检测的常量
+PEAK_MIN_DIST = 25        # 同一尺度下两个峰的最小像素间距（NMS 去重）
+PEAK_TOP_K = 4            # 每个尺度最多收集的峰值数
+ANCHOR_MIN_DIST = 60      # 细扫锚点之间的最小距离（像素）
+MIN_MATCH_PX = 16         # 缩放后的模板最小边长：再小则信息量趋零，跳过该倍率
+MIN_TEMPLATE_DETAIL = 10  # 模板高频细节量下限（Laplacian 方差）：低于此值视为纯色/渐变/模糊
+
+
 def run_check(cfg):
     info = {"cv2": None, "torch": None, "yolox": None, "pyautogui": None, "cuda": False, "mps": False, "device": "none"}
     try:
@@ -79,6 +135,7 @@ def run_check(cfg):
 def run_template(cfg):
     try:
         import cv2
+        import numpy as np
     except Exception as exc:
         return fail("template", "无法加载 OpenCV（cv2），请先安装：pip install opencv-python")
 
@@ -116,56 +173,164 @@ def run_template(cfg):
         if template_w <= 0 or template_h <= 0 or image_w <= 0 or image_h <= 0:
             return fail("template", "模板或截图尺寸非法")
 
+        # 模板细节过少（纯色、线性渐变、模糊）时，归一化相关系数失去意义，
+        # 会与画面中毫不相关的区域打出虚高分数（“高置信度但框错位置”的典型成因）。
+        # 用 Laplacian 方差衡量高频细节量：全局 std 无法区分线性渐变/模糊，
+        # 而它们的高频细节同样接近零。
+        gray_tpl = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY) if tpl.ndim == 3 else tpl
+        tpl_detail = float(cv2.Laplacian(gray_tpl, cv2.CV_64F).var())
+        if tpl_detail < MIN_TEMPLATE_DETAIL:
+            return fail(
+                "template",
+                "模板细节过少（纯色/渐变/模糊，细节量 {0:.1f}），与任意区域都能形成高相关，无法可靠匹配；请重新框选包含文字、图标、边框等细节的区域".format(tpl_detail),
+            )
+
         # 以模板自身尺寸为基准做多尺度搜索，允许模板和目标截图尺度不同。
         # scale 的含义：模板缩放后参与匹配的倍率。
-        scale_candidates = []
-        min_scale = max(0.08, min(image_w / template_w, image_h / template_h) * 0.08)
+        # 采用“粗→精”两级搜索：
+        #  1) 粗扫 24 步覆盖 [min_scale, max_scale]（允许缩到 8%，以支持
+        #     “截图放大很多”得到的大模板；max 到 16×，支持“截图缩小很多”）。
+        #  2) 取粗扫分数最高的 3 个候选，在各自倍率 ±12% 范围内细扫 14 步，
+        #     避免固定 48 步把范围放宽后网格变粗、错过尖锐的真实倍率峰值。
+        # 选择规则：纯按匹配分数（置信度）取最高者，不做中心偏置加成——
+        # 中心偏置会让画面中心的相似纹理被误选成命中位置（框错位置但置信度虚高）。
+        min_scale = 0.08
         max_scale = min(16.0, max(image_w / template_w, image_h / template_h) * 2.5)
         if min_scale >= max_scale:
             min_scale = 0.08
             max_scale = 16.0
 
-        steps = 48
-        log_min = math.log(min_scale)
-        log_max = math.log(max_scale)
-        for i in range(steps + 1):
-            scale = math.exp(log_min + (log_max - log_min) * (i / steps))
-            scale_candidates.append(scale)
-        if 1.0 not in scale_candidates:
-            scale_candidates.append(1.0)
-        scale_candidates = sorted(set(scale_candidates))
+        def scale_points(lo, hi, n):
+            pts = []
+            for i in range(n + 1):
+                pts.append(math.exp(math.log(lo) + (math.log(hi) - math.log(lo)) * (i / n)))
+            return pts
 
-        best = None
-        for scale in scale_candidates:
+        def match_at(scale):
+            """返回该尺度下所有高分局部峰值候选（最多 PEAK_TOP_K 个，NMS 去重）。"""
             scaled_w = max(1, round(template_w * scale))
             scaled_h = max(1, round(template_h * scale))
             if scaled_w > image_w or scaled_h > image_h:
-                continue
+                return []
+            # 缩放后模板过小（信息量趋零）时，模糊色块会与无关纹理乱匹配，
+            # 这类极端倍率的候选直接跳过。
+            if scaled_w < MIN_MATCH_PX or scaled_h < MIN_MATCH_PX:
+                return []
             interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
             scaled_tpl = cv2.resize(tpl, (scaled_w, scaled_h), interpolation=interp)
             scaled_mask = None
             if mask is not None:
                 scaled_mask = cv2.resize(mask, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST)
             matched = cv2.matchTemplate(img, scaled_tpl, method, mask=scaled_mask) if scaled_mask is not None else cv2.matchTemplate(img, scaled_tpl, method)
-            _, candidate_score, _, candidate_loc = cv2.minMaxLoc(matched)
-            candidate_x, candidate_y = int(candidate_loc[0]), int(candidate_loc[1])
-            candidate_center = (candidate_x + scaled_w / 2, candidate_y + scaled_h / 2)
-            # 优先选择相似度高的候选；若相似度接近，则偏向更接近全图中心的候选，减少背景误命中。
-            center_bias = 1.0 - min(1.0, ((candidate_center[0] - image_w / 2) ** 2 + (candidate_center[1] - image_h / 2) ** 2) ** 0.5 / max(image_w, image_h))
-            rank = float(candidate_score) * 0.92 + center_bias * 0.08
-            candidate = {
-                "rank": rank,
-                "score": float(candidate_score),
-                "scale": scale,
-                "x": candidate_x,
-                "y": candidate_y,
-                "tpl": scaled_tpl,
-                "mask": scaled_mask,
-            }
-            if best is None or candidate["rank"] > best["rank"]:
-                best = candidate
+
+            results = []
+            if scaled_mask is not None:
+                # 透明模板（CCORR_NORMED）：只取全局最高位置
+                _, candidate_score, _, candidate_loc = cv2.minMaxLoc(matched)
+                results.append({
+                    "score": float(candidate_score),
+                    "scale": scale,
+                    "x": int(candidate_loc[0]),
+                    "y": int(candidate_loc[1]),
+                    "tpl": scaled_tpl,
+                    "mask": scaled_mask,
+                })
+                return results
+
+            # 普通模板：收集所有高于阈值的局部峰值（NMS 去重），
+            # 用于“位置唯一性”检测——画面中若有几乎相同的目标，必须被发现。
+            floor = max(0.0, min(1.0, threshold / 100.0))
+            kernel = np.ones((21, 21), dtype=np.uint8)
+            dilated = cv2.dilate(matched, kernel)
+            ys, xs = np.where((matched >= floor) & (matched == dilated))
+            if ys.size > 0:
+                picked = []
+                for x, y in sorted(zip(xs.tolist(), ys.tolist()), key=lambda p: -float(matched[p[1], p[0]])):
+                    if all(math.hypot(x - px, y - py) >= PEAK_MIN_DIST for px, py in picked):
+                        picked.append((x, y))
+                        results.append({
+                            "score": float(matched[y, x]),
+                            "scale": scale,
+                            "x": x,
+                            "y": y,
+                            "tpl": scaled_tpl,
+                            "mask": scaled_mask,
+                        })
+                        if len(results) >= PEAK_TOP_K:
+                            break
+            if not results:
+                _, candidate_score, _, candidate_loc = cv2.minMaxLoc(matched)
+                results.append({
+                    "score": float(candidate_score),
+                    "scale": scale,
+                    "x": int(candidate_loc[0]),
+                    "y": int(candidate_loc[1]),
+                    "tpl": scaled_tpl,
+                    "mask": scaled_mask,
+                })
+            return results
+
+        def cand_center(candidate):
+            return (candidate["x"] + candidate["tpl"].shape[1] / 2, candidate["y"] + candidate["tpl"].shape[0] / 2)
+
+        coarse_scales = scale_points(min_scale, max_scale, 24)
+        if 1.0 not in coarse_scales:
+            coarse_scales.append(1.0)
+        coarse = []
+        for scale in coarse_scales:
+            coarse.extend(match_at(scale))
+        if not coarse:
+            return fail("template", "无法在任意尺度下匹配模板")
+        coarse.sort(key=lambda c: c["score"], reverse=True)
+
+        # 取分数最高的 3 个“不同位置”作为细扫锚点，确保重复目标位置也能被精扫
+        anchors = []
+        for candidate in coarse:
+            cx, cy = cand_center(candidate)
+            if all(math.hypot(cx - ax, cy - ay) >= ANCHOR_MIN_DIST for ax, ay, _ in anchors):
+                anchors.append((cx, cy, candidate))
+            if len(anchors) >= 3:
+                break
+
+        candidates = list(coarse)
+        for (_ax, _ay, anchor) in anchors:
+            for scale in scale_points(anchor["scale"] / 1.12, anchor["scale"] * 1.12, 14):
+                candidates.extend(match_at(scale))
+
+        best = max(candidates, key=lambda c: c["score"])
         if best is None:
             return fail("template", "无法在任意尺度下匹配模板")
+
+        # 高分但位置不唯一时禁止盲目点击，避免把相似按钮/纹理误当成目标。
+        # 同一位置的不同倍率候选不算重复位置；只比较空间上明显分开的候选。
+        best_cx, best_cy = cand_center(best)
+        distinct = []
+        for candidate in sorted(candidates, key=lambda c: c["score"], reverse=True):
+            cx = candidate["x"] + candidate["tpl"].shape[1] / 2
+            cy = candidate["y"] + candidate["tpl"].shape[0] / 2
+            distance = math.hypot(cx - best_cx, cy - best_cy)
+            if distance > max(best["tpl"].shape[1], best["tpl"].shape[0]) * 0.75:
+                distinct.append(candidate)
+        if os.environ.get("TMPL_DEBUG"):
+            lines = []
+            for candidate in sorted(candidates, key=lambda c: c["score"], reverse=True)[:8]:
+                lines.append(
+                    "pos=({0},{1}) scale={2:.3f} score={3:.4f}".format(
+                        candidate["x"], candidate["y"], candidate["scale"], candidate["score"]
+                    )
+                )
+            sys.stderr.write("TMPL_DEBUG candidates top8:\n" + "\n".join(lines) + "\n")
+        if distinct:
+            runner_up = distinct[0]
+            score_gap = float(best["score"] - runner_up["score"])
+            threshold_score = max(0.0, min(1.0, threshold / 100.0))
+            if best["score"] >= threshold_score and runner_up["score"] >= threshold_score and score_gap < 0.012:
+                return fail(
+                    "template",
+                    "匹配位置不唯一：候选位置置信度分别为 {0:.1f}% 和 {1:.1f}%，请重新框选包含更多独特特征的模板区域".format(
+                        best["score"] * 100.0, runner_up["score"] * 100.0
+                    ),
+                )
         max_val = float(best["score"])
         match_scale = float(best["scale"])
         x = int(best["x"])
@@ -617,11 +782,7 @@ def run_input(cfg):
             interval = max(0, float(cfg.get("interval", 0.2)))
             if not keys:
                 return fail("input", "按键内容为空")
-            if mode == "hold":
-                pyautogui.keyDown(keys)
-            elif mode == "release":
-                pyautogui.keyUp(keys)
-            elif mode == "type":
+            if mode == "type":
                 # 连续输入：逐字符输入，{enter}、{tab} 等花括号写法表示特殊按键
                 import re
                 tokens = re.split(r"(\{[^}]+\})", keys)
@@ -631,13 +792,27 @@ def run_input(cfg):
                     if token.startswith("{") and token.endswith("}"):
                         name = token[1:-1].strip().lower()
                         if name:
-                            pyautogui.press(name)
+                            pyautogui.press(_normalize_key(name))
                             if interval > 0:
                                 time.sleep(interval / 1000.0)
                     else:
                         pyautogui.typewrite(token, interval=interval / 1000.0)
             else:
-                pyautogui.press(keys)
+                # 组合键：用 + 连接，如 command+left / shift+a / ctrl+option+space。
+                # 也支持大写字母（自动加 Shift），如 A 会按 shift+a。
+                names = _parse_combo(keys)
+                if not names:
+                    return fail("input", "按键内容为空")
+                if mode == "hold":
+                    for name in names:
+                        pyautogui.keyDown(name)
+                elif mode == "release":
+                    for name in reversed(names):
+                        pyautogui.keyUp(name)
+                elif len(names) == 1:
+                    pyautogui.press(names[0])
+                else:
+                    pyautogui.hotkey(*names)
         elif action == "scroll":
             amount = int(cfg.get("amount", 0))
             direction = cfg.get("direction", "down")

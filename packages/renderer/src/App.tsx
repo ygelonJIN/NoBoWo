@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import {
   createDefaultNode,
   defaultWorkflowDocument,
+  type LoopNode,
   type OcrEngine,
   type RecognizeNode,
   type WorkflowDocument,
@@ -56,12 +57,19 @@ function readInitialDocument(): WorkflowDocument {
 }
 
 function cloneNode(node: WorkflowNode, offset = 40): WorkflowNode {
-  return {
+  const cloned: WorkflowNode = {
     ...node,
     id: `${node.type}-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
     position: { x: node.position.x + offset, y: node.position.y + offset },
     title: `${node.title} copy`,
   };
+  if (node.type === 'loop') {
+    cloned.data = {
+      ...node.data,
+      pairId: `${node.type}-${Date.now()}-${Math.floor(Math.random() * 10000)}-pair`,
+    } as LoopNode['data'];
+  }
+  return cloned;
 }
 
 function getSourcePoint(node: WorkflowNode): Point {
@@ -463,19 +471,42 @@ export function App() {
       const position = point
         ? clientToCanvas(point, viewport, zoom)
         : getCanvasCenter(canvasRef, viewport, zoom);
-      const nextNode = {
+      let nextNode = {
         ...created,
         position: { x: position.x - NODE_WIDTH / 2, y: position.y - 30 },
-        ...(type === 'loop'
-          ? {
-              title: nodes.filter((item) => item.type === 'loop').length % 2 === 0 ? 'Loop Begin' : 'Loop Down',
-              data: {
-                ...created.data,
-                role: nodes.filter((item) => item.type === 'loop').length % 2 === 0 ? 'begin' : 'down',
-              },
-            }
-          : {}),
       } as WorkflowNode;
+      if (type === 'loop') {
+        const loopNodes = nodes.filter((item): item is LoopNode => item.type === 'loop');
+        const unpairedBegin = loopNodes.find(
+          (item) =>
+            item.data.role === 'begin' &&
+            !loopNodes.some((other) => other.id !== item.id && other.data.role === 'down' && other.data.pairId === item.data.pairId),
+        );
+        const unpairedDown = loopNodes.find(
+          (item) =>
+            item.data.role === 'down' &&
+            !loopNodes.some((other) => other.id !== item.id && other.data.role === 'begin' && other.data.pairId === item.data.pairId),
+        );
+        if (unpairedBegin) {
+          nextNode = {
+            ...nextNode,
+            title: 'Loop Down',
+            data: { ...created.data, role: 'down', pairId: unpairedBegin.data.pairId },
+          } as WorkflowNode;
+        } else if (unpairedDown) {
+          nextNode = {
+            ...nextNode,
+            title: 'Loop Begin',
+            data: { ...created.data, role: 'begin', pairId: unpairedDown.data.pairId },
+          } as WorkflowNode;
+        } else {
+          nextNode = {
+            ...nextNode,
+            title: 'Loop Begin',
+            data: { ...created.data, role: 'begin' },
+          } as WorkflowNode;
+        }
+      }
       setNodes((current) => [...current, nextNode]);
       setSelectedNodeId(nextNode.id);
       setContextMenu(null);

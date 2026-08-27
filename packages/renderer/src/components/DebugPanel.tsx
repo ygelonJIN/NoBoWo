@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { NodeRunResult, WorkflowEdge, WorkflowNode, WorkflowRunSnapshot } from '@nobowo/core';
+import { TemplateThumb } from './TemplateThumb';
 
 const NODE_TYPE_LABELS: Record<string, string> = {
   screenshot: '截图',
@@ -27,6 +28,13 @@ const STRATEGY_LABELS: Record<string, string> = {
   cloudApi: '云端 API',
 };
 const STRATEGY_ORDER = ['coords', 'template', 'yolo', 'ocr', 'cloudApi'] as const;
+const STRATEGY_STATUS_LABELS: Record<string, string> = {
+  hit: '命中',
+  miss: '未命中',
+  error: '出错',
+  skipped: '跳过',
+};
+const MARKER_COLORS = ['#ff4466', '#78a9ff', '#f7c948', '#6ae3a1', '#ff9f43', '#c58bff', '#4dd0e1', '#ff8f8f'];
 
 function resultSummary(node: WorkflowNode, result?: NodeRunResult): string {
   if (!result) return '尚未执行';
@@ -75,8 +83,8 @@ type ScreenshotEvidence = {
   result: NodeRunResult;
   index: number;
   relatedNodes: WorkflowNode[];
-  markers: Array<{ x: number; y: number; label: string; kind: 'recognize' | 'click' }>;
-  boxes: Array<{ x: number; y: number; width: number; height: number; label: string; scale?: number }>;
+  markers: Array<{ x: number; y: number; label: string; kind: 'recognize' | 'click'; nodeId: string; color: string }>;
+  boxes: Array<{ x: number; y: number; width: number; height: number; label: string; scale?: number; nodeId: string; color: string }>;
 };
 
 function orderWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[] {
@@ -150,7 +158,7 @@ function buildFallbackLogs(workflowState: WorkflowRunSnapshot | null | undefined
 
 export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs }: Props) {
   const [logsOpen, setLogsOpen] = useState(false);
-  const [expandedShotIndex, setExpandedShotIndex] = useState<number | null>(null);
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
 
   const steps = useMemo(() => orderWorkflow(nodes, edges), [nodes, edges]);
 
@@ -187,6 +195,8 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
               y: coords.y,
               label: `${node.title} · ${NODE_TYPE_LABELS[node.type] ?? node.type}`,
               kind: node.type === 'click' ? 'click' as const : 'recognize' as const,
+              nodeId: node.id,
+              color: MARKER_COLORS[relatedNodes.indexOf(node) % MARKER_COLORS.length],
             }]
           : [];
       });
@@ -199,6 +209,8 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
               ...box,
               label: `${node.title} · 模板框`,
               scale,
+              nodeId: node.id,
+              color: MARKER_COLORS[relatedNodes.indexOf(node) % MARKER_COLORS.length],
             }]
           : [];
       });
@@ -230,7 +242,7 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
 
   const currentStep = steps.find((n) => n.id === currentStepId) ?? null;
 
-  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const summaryRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -243,10 +255,10 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [onClose]);
 
-  // Auto-scroll timeline to current step
+  // Auto-scroll summary to current step
   useEffect(() => {
     if (!currentStepId) return;
-    const el = timelineRef.current?.querySelector(`[data-step="${currentStepId}"]`);
+    const el = summaryRef.current?.querySelector(`[data-summary="${currentStepId}"]`);
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [currentStepId]);
 
@@ -273,12 +285,71 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
     skipped: '已跳过',
   };
 
-  const expandedEvidence = expandedShotIndex !== null ? screenshotEvidence[expandedShotIndex] ?? null : null;
-  const shotLabel = expandedEvidence?.node.title ?? '截图';
-  const expandedFrame = expandedEvidence?.result.frame ?? null;
-  const expandedSize = expandedEvidence
-    ? { width: expandedEvidence.result.width ?? 0, height: expandedEvidence.result.height ?? 0 }
-    : null;
+  const selectedStepIndex = useMemo(
+    () => (selectedEvidenceId ? steps.findIndex((n) => n.id === selectedEvidenceId) : -1),
+    [selectedEvidenceId, steps],
+  );
+  const selectedStep = selectedStepIndex >= 0 ? steps[selectedStepIndex] : null;
+
+  // 点击某一步时，找到对应截图证据：本身是截图就用它自己的；否则用它之前最近的一张截图
+  const focusedEvidence = useMemo(() => {
+    if (!selectedEvidenceId || selectedStepIndex < 0) return null;
+    const own = screenshotEvidence.find((e) => e.node.id === selectedEvidenceId) ?? null;
+    if (own) return own;
+    for (let i = screenshotEvidence.length - 1; i >= 0; i--) {
+      if (screenshotEvidence[i].index < selectedStepIndex) return screenshotEvidence[i];
+    }
+    return null;
+  }, [selectedEvidenceId, screenshotEvidence, selectedStepIndex]);
+
+  const evidenceIndexForNode = useCallback(
+    (nodeId: string): number | null => {
+      const nodeIndex = steps.findIndex((n) => n.id === nodeId);
+      if (nodeIndex < 0) return null;
+      const ownIndex = screenshotEvidence.findIndex((e) => e.node.id === nodeId);
+      if (ownIndex >= 0) return ownIndex;
+      for (let i = screenshotEvidence.length - 1; i >= 0; i--) {
+        if (screenshotEvidence[i].index < nodeIndex) return i;
+      }
+      return null;
+    },
+    [screenshotEvidence, steps],
+  );
+
+  const renderNodeDetails = (node: WorkflowNode, result?: NodeRunResult): ReactNode => {
+    if (!result) return null;
+    if (node.type === 'recognize') {
+      if (!result.strategies || result.strategies.length === 0) {
+        return <div className="debug-panel__shot-detail-line">{result.message ?? '识别节点未返回策略明细'}</div>;
+      }
+      return result.strategies.map((run, index) => (
+        <div key={`${node.id}-run-${index}`} className={`debug-panel__strategy-run debug-panel__strategy-run--${run.status}`}>
+          <span className="debug-panel__strategy-name">{STRATEGY_LABELS[run.key] ?? run.key}</span>
+          <span className="debug-panel__strategy-status">{STRATEGY_STATUS_LABELS[run.status] ?? run.status}</span>
+          {run.confidence !== undefined && <span className="debug-panel__strategy-conf">置信度 {run.confidence}%</span>}
+          {run.matchScale !== undefined && <span className="debug-panel__strategy-scale">匹配倍率 {run.matchScale.toFixed(2)}x</span>}
+          {run.matchBox && (
+            <span className="debug-panel__strategy-box">
+              框 {Math.round(run.matchBox.width)}×{Math.round(run.matchBox.height)} @ ({Math.round(run.matchBox.x)}, {Math.round(run.matchBox.y)})
+            </span>
+          )}
+          {run.elapsedMs !== undefined && <span className="debug-panel__strategy-ms">{run.elapsedMs}ms</span>}
+          {run.message && <span className="debug-panel__strategy-msg">{run.message}</span>}
+        </div>
+      ));
+    }
+    if (node.type === 'click') {
+      const parts: string[] = [];
+      if (result.hitCoords) parts.push(`截图坐标 (${result.hitCoords.x.toFixed(1)}, ${result.hitCoords.y.toFixed(1)})`);
+      if (result.actualClickCoords) parts.push(`实际点击 (${result.actualClickCoords.x.toFixed(1)}, ${result.actualClickCoords.y.toFixed(1)})`);
+      if (result.matchScale !== undefined) parts.push(`匹配倍率 ${result.matchScale.toFixed(2)}x`);
+      if (result.matchBox) parts.push(`框 ${Math.round(result.matchBox.width)}×${Math.round(result.matchBox.height)}`);
+      if (result.message && parts.length > 0) parts.push(result.message);
+      const line = parts.length > 0 ? parts.join(' · ') : result.message ?? '';
+      return line ? <div className="debug-panel__shot-detail-line">{line}</div> : null;
+    }
+    return result.message ? <div className="debug-panel__shot-detail-line">{result.message}</div> : null;
+  };
   const summaryRows = steps.map((node, index) => {
     const result = runResults[node.id];
     const state = stepStates[node.id] ?? 'pending';
@@ -291,6 +362,20 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
       detail: resultDetail(node, result),
     };
   });
+  // 截图证据只对识别节点有意义：展示它当时基于的画面、匹配框和使用的模板
+  const canViewEvidence = useCallback(
+    (nodeId: string): boolean => {
+      const node = steps.find((n) => n.id === nodeId);
+      if (!node || node.type !== 'recognize') return false;
+      return evidenceIndexForNode(nodeId) !== null;
+    },
+    [evidenceIndexForNode, steps],
+  );
+  const selectedTemplateId = useMemo(() => {
+    if (!selectedStep || selectedStep.type !== 'recognize') return undefined;
+    const tpl = selectedStep.data.strategies?.template;
+    return tpl?.enabled ? tpl.templateId : undefined;
+  }, [selectedStep]);
   return (
     <div
       className="debug-panel"
@@ -342,103 +427,49 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
         {runningCount > 0 && <span className="debug-panel__running-indicator" aria-hidden="true" />}
       </div>
 
-      {/* Timeline */}
-      <div className="debug-panel__timeline" ref={timelineRef}>
-        <div className="debug-panel__section-title">步骤</div>
-        <div className="debug-panel__step-list">
-          {steps.map((node, index) => {
-            const state = stepStates[node.id] ?? 'pending';
-            const isCurrent = node.id === currentStepId;
-            const result = runResults[node.id];
+      {/* Detail */}
+      <section className="debug-panel__detail" ref={summaryRef}>
+        <div className="debug-panel__section-title">步骤摘要</div>
+        <div className="debug-panel__summary-list">
+          {summaryRows.map(({ node, index, state, result, summary, detail }) => {
+            const hasEvidence = canViewEvidence(node.id);
             return (
               <div
                 key={node.id}
-                data-step={node.id}
-                className={`debug-panel__step ${isCurrent ? 'debug-panel__step--current' : ''} ${state === 'failed' ? 'debug-panel__step--failed' : ''} ${!node.enabled ? 'debug-panel__step--node-disabled' : ''}`}
+                data-summary={node.id}
+                role={hasEvidence ? 'button' : undefined}
+                tabIndex={hasEvidence ? 0 : undefined}
+                onClick={() => {
+                  if (hasEvidence) setSelectedEvidenceId(node.id);
+                }}
+                onKeyDown={(e) => {
+                  if (hasEvidence && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault();
+                    setSelectedEvidenceId(node.id);
+                  }
+                }}
+                className={`debug-panel__summary-row debug-panel__summary-row--${state} ${selectedEvidenceId === node.id ? 'debug-panel__summary-row--selected' : ''} ${hasEvidence ? 'debug-panel__summary-row--has-evidence' : ''}`}
               >
-                <span className={`debug-panel__step-dot debug-panel__step-dot--${state}`} aria-hidden="true" />
-                <span className="debug-panel__step-index">{index + 1}</span>
-                <span className="debug-panel__step-main">
-                  <span className="debug-panel__step-title">
-                    {node.title}
-                    {state === 'failed' && <span className="debug-panel__step-failed-icon"> ✗</span>}
-                  </span>
-                  <span className="debug-panel__step-type">{node.type}{node.enabled === false ? ' · 已停用' : ''}</span>
-                </span>
-                {state === 'done' && result && (
-                  <span className="debug-panel__step-elapsed">{result.elapsedMs}ms</span>
-                )}
-                <span className={`debug-panel__step-status debug-panel__step-status--${state}`}>
-                  {stepStatusLabel[state]}
-                </span>
+                <span className="debug-panel__summary-index">{index + 1}</span>
+                <div className="debug-panel__summary-main">
+                  <div className="debug-panel__summary-title">
+                    <strong>{node.title}</strong>
+                    <span className="debug-panel__summary-type">{NODE_TYPE_LABELS[node.type] ?? node.type}</span>
+                    <span className={`debug-panel__step-status debug-panel__step-status--${state}`}>{STATUS_LABELS[state]}</span>
+                  </div>
+                  <div className="debug-panel__summary-message">{summary}</div>
+                  {detail && <div className="debug-panel__summary-detail">{detail}</div>}
+                </div>
+                <div className="debug-panel__summary-side">
+                  {result?.elapsedMs !== undefined && <span className="debug-panel__summary-time">{result.elapsedMs}ms</span>}
+                  {hasEvidence && <span className="debug-panel__summary-evidence">查看截图 ›</span>}
+                </div>
               </div>
             );
           })}
-          {steps.length === 0 && <div className="debug-panel__empty">画布还没有节点</div>}
-        </div>
-      </div>
-
-      {/* Detail */}
-      <section className="debug-panel__detail">
-        <div className="debug-panel__section-title">步骤摘要</div>
-        <div className="debug-panel__summary-list">
-          {summaryRows.map(({ node, index, state, result, summary, detail }) => (
-            <div key={node.id} className={`debug-panel__summary-row debug-panel__summary-row--${state}`}>
-              <span className="debug-panel__summary-index">{index + 1}</span>
-              <div className="debug-panel__summary-main">
-                <div className="debug-panel__summary-title">
-                  <strong>{node.title}</strong>
-                  <span className="debug-panel__summary-type">{NODE_TYPE_LABELS[node.type] ?? node.type}</span>
-                  <span className={`debug-panel__step-status debug-panel__step-status--${state}`}>{STATUS_LABELS[state]}</span>
-                </div>
-                <div className="debug-panel__summary-message">{summary}</div>
-                {detail && <div className="debug-panel__summary-detail">{detail}</div>}
-              </div>
-              {result?.elapsedMs !== undefined && <span className="debug-panel__summary-time">{result.elapsedMs}ms</span>}
-            </div>
-          ))}
           {summaryRows.length === 0 && <div className="debug-panel__empty">画布还没有节点</div>}
         </div>
       </section>
-
-      <div className="debug-panel__shots">
-        <div className="debug-panel__section-title">截图证据</div>
-        <div className="debug-panel__shot-grid">
-          {screenshotEvidence.map((shot, index) => (
-            <button className="debug-panel__shot-card" key={shot.node.id} onClick={() => setExpandedShotIndex(index)} title="点击放大">
-              <div className="debug-panel__shot-card-title">{shot.node.title}</div>
-              <div className="debug-panel__shot-card-stack">
-                <img src={shot.result.frame} alt={`${shot.node.title}截图`} className="debug-panel__shot-card-img" />
-                {(shot.markers.length > 0 || shot.boxes.length > 0) && (
-                <div className="debug-panel__shot-card-overlay">
-                  {shot.markers.map((m, markerIndex) => (
-                    <span
-                      key={markerIndex}
-                      className={`debug-panel__shot-card-marker debug-panel__shot-card-marker--${m.kind}`}
-                      style={{
-                        left: `${Math.max(0, Math.min(100, m.x / Math.max(shot.result.width ?? 1, 1) * 100))}%`,
-                        top: `${Math.max(0, Math.min(100, m.y / Math.max(shot.result.height ?? 1, 1) * 100))}%`,
-                      }}
-                      title={`${m.label} (${m.x.toFixed(1)}, ${m.y.toFixed(1)})`}
-                    />
-                  ))}
-                </div>
-              )}
-              </div>
-              {(shot.markers.length > 0 || shot.boxes.length > 0) && (
-                <div className="debug-panel__shot-card-meta">
-                  {shot.boxes.length} 个匹配框 · {shot.markers.length} 个识别/点击标记
-                  {shot.boxes.length > 0 && shot.boxes[0]?.scale !== undefined && (
-                    <span className="debug-panel__shot-card-scale"> · 匹配倍率 {shot.boxes[0].scale.toFixed(2)}x</span>
-                  )}
-                </div>
-              )}
-            </button>
-          ))}
-          {screenshotEvidence.length === 0 && <div className="debug-panel__shot-card-empty">暂无截图证据</div>}
-        </div>
-      </div>
-
 
       {/* Engine logs */}
       <div className="debug-panel__logs">
@@ -461,59 +492,114 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
         )}
       </div>
 
-      {/* Shot viewer */}
-      {expandedShotIndex !== null && (
-        <div className="debug-panel__shot-viewer" onClick={() => setExpandedShotIndex(null)}>
+      {/* Shot viewer（仅识别节点：展示截图、匹配框/点与所用模板） */}
+      {selectedEvidenceId !== null && selectedStep?.type === 'recognize' && focusedEvidence && (
+        <div className="debug-panel__shot-viewer" onClick={() => setSelectedEvidenceId(null)}>
           <div className="debug-panel__shot-viewer-inner debug-panel__shot-viewer-inner--large" onClick={(e) => e.stopPropagation()}>
             <div className="debug-panel__shot-viewer-head">
               <div className="debug-panel__shot-viewer-head-main">
-                <span className="debug-panel__shot-viewer-head-title">{shotLabel}</span>
-                {expandedEvidence && (
-                  <span className="debug-panel__shot-viewer-head-meta">
-                    {expandedEvidence.boxes.length} 个匹配框 · {expandedEvidence.markers.length} 个识别/点击标记
-                    {expandedEvidence.boxes.length > 0 && expandedEvidence.boxes[0]?.scale !== undefined && (
-                      <span className="debug-panel__shot-viewer-head-scale"> · 匹配倍率 {expandedEvidence.boxes[0].scale.toFixed(2)}x</span>
-                    )}
-                  </span>
-                )}
+                <span className="debug-panel__shot-viewer-head-title">
+                  {selectedStepIndex + 1}. {selectedStep.title}
+                </span>
+                <span className="debug-panel__shot-viewer-head-meta">
+                  识别时基于「{focusedEvidence.node.title}」画面 · {focusedEvidence.result.width ?? 0}×{focusedEvidence.result.height ?? 0}
+                  {' · '}{focusedEvidence.boxes.length} 个匹配框 · {focusedEvidence.markers.length} 个识别/点击点
+                </span>
               </div>
-              <button className="template-modal__close" onClick={() => setExpandedShotIndex(null)} aria-label="关闭">×</button>
+              <button className="template-modal__close" onClick={() => setSelectedEvidenceId(null)} aria-label="关闭">×</button>
             </div>
-            <div className="debug-panel__shot-viewer-canvas debug-panel__shot-viewer-canvas--large">
-              {expandedFrame ? (
+            <div className="debug-panel__shot-viewer-split">
+              <div className="debug-panel__shot-viewer-canvas debug-panel__shot-viewer-canvas--large">
                 <div className="debug-panel__shot-viewer-stage">
                   <img
-                    src={expandedFrame}
-                    alt={`${expandedEvidence?.node.title ?? '截图'}放大图`}
+                    src={focusedEvidence.result.frame}
+                    alt={`${focusedEvidence.node.title}截图`}
                     className="debug-panel__shot-viewer-img"
                   />
-                  {expandedEvidence?.boxes.map((box, index) => (
-                    <div
-                      key={`box-${index}`}
-                      className="debug-panel__shot-viewer-box"
-                      style={{
-                        left: `${box.x / Math.max(expandedSize?.width ?? 1, 1) * 100}%`,
-                        top: `${box.y / Math.max(expandedSize?.height ?? 1, 1) * 100}%`,
-                        width: `${box.width / Math.max(expandedSize?.width ?? 1, 1) * 100}%`,
-                        height: `${box.height / Math.max(expandedSize?.height ?? 1, 1) * 100}%`,
-                      }}
-                      title={`${box.label} · 匹配倍率 ${box.scale !== undefined ? box.scale.toFixed(2) : '1.00'}x`}
-                    />
-                  ))}
-                  {expandedEvidence?.markers.map((m, index) => (
-                    <div
-                      key={`marker-${index}`}
-                      className={`debug-panel__shot-viewer-marker debug-panel__shot-viewer-marker--${m.kind}`}
-                      style={{
-                        left: `${Math.max(0, Math.min(100, m.x / Math.max(expandedSize?.width ?? 1, 1) * 100))}%`,
-                        top: `${Math.max(0, Math.min(100, m.y / Math.max(expandedSize?.height ?? 1, 1) * 100))}%`,
-                      }}
-                      title={`${m.label} (${m.x.toFixed(1)}, ${m.y.toFixed(1)})`}
-                    />
-                  ))}
+                  {focusedEvidence.boxes.map((box, index) => {
+                    const isFocus = box.nodeId === selectedEvidenceId;
+                    return (
+                      <div
+                        key={`box-${index}`}
+                        className={`debug-panel__shot-viewer-box ${isFocus ? 'debug-panel__shot-viewer-box--focus' : ''}`}
+                        style={{
+                          left: `${box.x / Math.max(focusedEvidence.result.width ?? 1, 1) * 100}%`,
+                          top: `${box.y / Math.max(focusedEvidence.result.height ?? 1, 1) * 100}%`,
+                          width: `${box.width / Math.max(focusedEvidence.result.width ?? 1, 1) * 100}%`,
+                          height: `${box.height / Math.max(focusedEvidence.result.height ?? 1, 1) * 100}%`,
+                          borderColor: box.color,
+                          boxShadow: `0 0 10px ${box.color}66`,
+                        }}
+                        title={`${box.label} · 匹配倍率 ${box.scale !== undefined ? box.scale.toFixed(2) : '1.00'}x`}
+                      />
+                    );
+                  })}
+                  {focusedEvidence.markers.map((m, index) => {
+                    const isFocus = m.nodeId === selectedEvidenceId;
+                    return (
+                      <div
+                        key={`marker-${index}`}
+                        className={`debug-panel__shot-viewer-marker ${isFocus ? 'debug-panel__shot-viewer-marker--focus' : ''}`}
+                        style={{
+                          left: `${Math.max(0, Math.min(100, m.x / Math.max(focusedEvidence.result.width ?? 1, 1) * 100))}%`,
+                          top: `${Math.max(0, Math.min(100, m.y / Math.max(focusedEvidence.result.height ?? 1, 1) * 100))}%`,
+                          borderColor: m.color,
+                          background: `${m.color}33`,
+                          boxShadow: `0 0 10px ${m.color}99`,
+                        }}
+                        title={`${m.label} (${m.x.toFixed(1)}, ${m.y.toFixed(1)})`}
+                      />
+                    );
+                  })}
                 </div>
-              ) : (
-                <div className="debug-panel__shot-viewer-empty">暂无截图</div>
+              </div>
+              <div className="debug-panel__shot-viewer-template">
+                <div className="debug-panel__shot-detail-title">使用的模板</div>
+                {selectedTemplateId ? (
+                  <>
+                    <div className="debug-panel__shot-viewer-template-frame">
+                      <TemplateThumb id={selectedTemplateId} kind="template" className="debug-panel__shot-viewer-template-img" />
+                    </div>
+                    <div className="debug-panel__shot-viewer-template-meta">
+                      该识别节点用此模板做「模板匹配」，命中位置与倍率见下方明细。
+                      {(() => {
+                        const focusBox = focusedEvidence.boxes.find((b) => b.nodeId === selectedEvidenceId);
+                        if (focusBox && typeof focusBox.scale === 'number' && focusBox.scale > 0) {
+                          const tw = Math.round(focusBox.width / focusBox.scale);
+                          const th = Math.round(focusBox.height / focusBox.scale);
+                          return ` 模板原尺寸约 ${tw}×${th}，以 ${focusBox.scale.toFixed(2)}x 匹配 → 红框 ${Math.round(focusBox.width)}×${Math.round(focusBox.height)}，图内红框即模板内容。`;
+                        }
+                        return '';
+                      })()}
+                    </div>
+                  </>
+                ) : (
+                  <div className="debug-panel__shot-viewer-template-empty">
+                    该识别节点未配置「模板匹配」策略（或模板已被删除），无模板可显示。
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="debug-panel__shot-detail">
+              <div className="debug-panel__shot-detail-title">识别 / 点击明细</div>
+              {focusedEvidence.relatedNodes.map((node, nodeIndex) => {
+                const result = runResults[node.id];
+                const state = stepStates[node.id] ?? 'pending';
+                const color = MARKER_COLORS[nodeIndex % MARKER_COLORS.length];
+                return (
+                  <div key={node.id} className={`debug-panel__shot-detail-node ${node.id === selectedEvidenceId ? 'debug-panel__shot-detail-node--focus' : ''}`}>
+                    <div className="debug-panel__shot-detail-head">
+                      <span className="debug-panel__shot-detail-dot" style={{ background: color }} />
+                      <strong>{node.title}</strong>
+                      <span className="debug-panel__shot-detail-type">{NODE_TYPE_LABELS[node.type] ?? node.type}</span>
+                      <span className={`debug-panel__step-status debug-panel__step-status--${state}`}>{STATUS_LABELS[state]}</span>
+                    </div>
+                    <div className="debug-panel__shot-detail-body">{renderNodeDetails(node, result)}</div>
+                  </div>
+                );
+              })}
+              {focusedEvidence.relatedNodes.length === 0 && (
+                <div className="debug-panel__shot-detail-empty">这张截图之后没有识别 / 点击步骤</div>
               )}
             </div>
           </div>

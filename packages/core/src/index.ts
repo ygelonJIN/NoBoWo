@@ -52,6 +52,10 @@ export type ScreenshotNode = WorkflowNodeBase<'screenshot', {
   streamSourceId?: string;
   /** source=window 时：窗口标题关键字，用于匹配本机窗口 */
   windowHint?: string;
+  /** source=window 时：锁定的 CGWindowID（标题变化也能精确定位） */
+  windowId?: number;
+  /** source=window 时：锁定的应用进程名（如 Google Chrome），ID 失效时兜底 */
+  windowApp?: string;
   region?: TemplateRect;
 }>;
 
@@ -154,6 +158,10 @@ export type StreamWindowInfo = {
   /** 窗口缩略图宽高 */
   width: number;
   height: number;
+  /** 从 source id 解析出的数值 CGWindowID（标题变化也稳定） */
+  windowId?: number;
+  /** 所属应用进程名（如 Google Chrome） */
+  windowApp?: string;
 };
 
 export type StreamScreenshotResult = {

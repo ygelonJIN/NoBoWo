@@ -197,6 +197,32 @@ function parseBounds(raw: string): { x: number; y: number; width: number; height
   return { x, y, width, height };
 }
 
+function getMacWindowOwnerById(windowId?: number): string | null {
+  if (!windowId) return null;
+  const script = `import json
+try:
+    import Quartz
+except Exception:
+    print(json.dumps(None))
+    raise SystemExit(0)
+window_id = int(${JSON.stringify(windowId)})
+options = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+windows = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
+for win in windows:
+    if int(win.get(Quartz.kCGWindowNumber, 0) or 0) == window_id:
+        print(json.dumps(win.get(Quartz.kCGWindowOwnerName, "") or ""))
+        raise SystemExit(0)
+print(json.dumps(None))`;
+  const res = spawnSync('python3', ['-c', script], { encoding: 'utf8' });
+  if (res.status !== 0) return null;
+  try {
+    const out = JSON.parse(String(res.stdout ?? '').trim() || 'null') as string | null;
+    return out?.trim() ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 function getMacWindowBoundsById(windowId?: number): { x: number; y: number; width: number; height: number } | null {
   if (!windowId) return null;
   const script = `import json
@@ -539,7 +565,13 @@ export class WorkflowExecutor {
 
   private resolveNext(node: WorkflowNode, result: NodeRunResult): string | null {
     if (node.type === 'if') return this.nextOf(node.id, result.branch ?? 'false');
-    if (node.type === 'loop') return this.nextOf(node.id, 'done');
+    if (node.type === 'loop') {
+      // 循环的出口始终是配对 Down 的 out 端口（Begin 只标记循环体起点）
+      const loop = node as LoopNode;
+      if (loop.data.role === 'down') return this.nextOf(loop.id, 'out');
+      const paired = this.findLoopPair(loop, 'down');
+      return paired ? this.nextOf(paired.id, 'out') : null;
+    }
     return this.nextOf(node.id, 'out');
   }
 
@@ -756,7 +788,7 @@ export class WorkflowExecutor {
       }
 
       case 'loop':
-        return this.executeLoop(node);
+        return this.executeLoop(node, generation);
 
       case 'scroll': {
         const { direction } = node.data;
@@ -808,29 +840,74 @@ export class WorkflowExecutor {
     }
   }
 
-  private async executeLoop(node: LoopNode): Promise<NodeRunResult> {
+  /**
+   * pairId 缺失或不一致时，按连线结构推断 Loop Begin/Down 的配对。
+   * 结构约定：Begin.out → 循环体第一个节点 → … → Down.in，Down.out → 循环后继续的节点。
+   */
+  private findLoopPair(node: LoopNode, want: 'begin' | 'down'): LoopNode | undefined {
+    const nodes = this.workflow!.nodes;
+    const others = nodes.filter((candidate): candidate is LoopNode => candidate.type === 'loop' && candidate.id !== node.id && candidate.data.role === want);
+    if (others.length === 0) return undefined;
+    if (others.length === 1) return others[0];
+
+    if (node.data.role === 'begin') {
+      let current = this.nextOf(node.id, 'out');
+      const visited = new Set<string>();
+      while (current && !visited.has(current)) {
+        visited.add(current);
+        const cur = nodes.find((candidate) => candidate.id === current);
+        if (!cur) return undefined;
+        if (cur.type === 'loop') return cur.data.role === 'down' ? (cur as LoopNode) : undefined;
+        current = this.nextOf(cur.id, 'out');
+      }
+      return undefined;
+    }
+
+    const matching = others.filter((candidate) => {
+      let current = this.nextOf(candidate.id, 'out');
+      const visited = new Set<string>();
+      while (current && !visited.has(current)) {
+        visited.add(current);
+        if (current === node.id) return true;
+        const cur = nodes.find((candidateNode) => candidateNode.id === current);
+        if (!cur) return false;
+        if (cur.type === 'loop') return false;
+        current = this.nextOf(cur.id, 'out');
+      }
+      return false;
+    });
+    return matching.length === 1 ? matching[0] : undefined;
+  }
+
+  private async executeLoop(node: LoopNode, generation: number): Promise<NodeRunResult> {
     const runId = this.runId!;
     const pairId = node.data.pairId;
-    if (!pairId) return { nodeId: node.id, status: 'fail', message: 'Loop 缺少配对标识，请重新添加 Loop Begin/Down' };
-    const pair = this.workflow!.nodes.find((candidate) => candidate.type === 'loop' && candidate.data.pairId === pairId && candidate.id !== node.id) as LoopNode | undefined;
-    if (!pair) return { nodeId: node.id, status: 'fail', message: 'Loop Begin/Down 尚未配对' };
+    const other = pairId
+      ? this.workflow!.nodes.find((candidate) => candidate.type === 'loop' && candidate.data.pairId === pairId && candidate.id !== node.id) as LoopNode | undefined
+      : undefined;
 
-    const begin = node.data.role === 'begin' ? node : pair.data.role === 'begin' ? pair : undefined;
-    const down = node.data.role === 'down' ? node : pair.data.role === 'down' ? pair : undefined;
-    if (!begin || !down) return { nodeId: node.id, status: 'fail', message: 'Loop 必须由一个 Begin 和一个 Down 组成' };
+    // 优先按 pairId 配对；pairId 缺失或不一致时，按连线结构推断配对
+    let begin: LoopNode | undefined;
+    let down: LoopNode | undefined;
+    if (node.data.role === 'begin') {
+      begin = node;
+      down = other?.data.role === 'down' ? other : this.findLoopPair(node, 'down');
+    } else {
+      down = node;
+      begin = other?.data.role === 'begin' ? other : this.findLoopPair(node, 'begin');
+    }
+    if (!begin || !down) return { nodeId: node.id, status: 'fail', message: 'Loop Begin/Down 尚未配对' };
 
     const beginNext = this.nextOf(begin.id, 'out');
-    const downNext = this.nextOf(down.id, 'out');
     if (!beginNext) return { nodeId: node.id, status: 'fail', message: 'Loop Begin 没有连接循环体' };
-    if (!downNext) return { nodeId: node.id, status: 'fail', message: 'Loop Down 没有连接后续步骤' };
 
     const countLimit = begin.data.mode === 'count' ? Math.max(0, begin.data.count ?? 1) : 10000;
     const condition = begin.data.conditionText?.trim() || 'false';
     let executed = 0;
     this.emit({ t: 'log', runId, level: 'info', message: begin.data.mode === 'count' ? `开始循环 ${countLimit} 次` : `开始条件循环：${condition}`, nodeId: begin.id });
 
-    while (!this.stopped && this.runGeneration === 0 && executed < countLimit) {
-      if (!(await this.checkpoint(0))) break;
+    while (!this.stopped && this.runGeneration === generation && executed < countLimit) {
+      if (!(await this.checkpoint(generation))) break;
       if (begin.data.mode === 'condition') {
         let shouldContinue = false;
         try {
@@ -843,12 +920,12 @@ export class WorkflowExecutor {
 
       let current: string | null = beginNext;
       const visited = new Set<string>();
-      while (current && current !== down.id && !this.stopped && this.runGeneration === 0) {
+      while (current && current !== down.id && !this.stopped && this.runGeneration === generation) {
         if (visited.has(current)) return { nodeId: node.id, status: 'fail', message: '循环体出现额外回路，请只连接到 Loop Down' };
         visited.add(current);
         const currentNode = this.findNode(current);
         if (!currentNode) return { nodeId: node.id, status: 'fail', message: `循环体节点不存在：${current}` };
-        const result = await this.executeNodeWithEvents(currentNode, 0);
+        const result = await this.executeNodeWithEvents(currentNode, generation);
         if (result.status === 'fail') return { nodeId: node.id, status: 'fail', message: result.message ?? '循环体执行失败' };
         current = this.resolveNext(currentNode, result) ?? null;
       }
@@ -1266,24 +1343,45 @@ export class WorkflowExecutor {
     node: ScreenshotNode,
   ): Promise<{ ok: boolean; frame?: string; width?: number; height?: number; originX?: number; originY?: number; scaleX?: number; scaleY?: number; displayId?: string; windowId?: number; message?: string }> {
     const thumbnailSize = { width: 1920, height: 1080 };
-    const captureWindowByHint = async (hintText?: string, label = '串流窗口') => {
+    const captureWindowByHint = async (opts: { hintText?: string; windowId?: number; windowApp?: string }, label = '串流窗口') => {
+      const thumbnailSize0 = thumbnailSize;
       const sources = await desktopCapturer.getSources({
         types: ['window'],
-        thumbnailSize,
+        thumbnailSize: thumbnailSize0,
         fetchWindowIcons: false,
       });
-      const hint = hintText?.trim().toLowerCase();
-      if (!hint) {
-        return { ok: false as const, message: `未设置${label}标题关键字，无法定位窗口` };
+      const hint = opts.hintText?.trim().toLowerCase();
+      const wantedId = typeof opts.windowId === 'number' ? opts.windowId : undefined;
+      const wantedApp = opts.windowApp?.trim().toLowerCase();
+
+      // 1) 优先按锁定的 CGWindowID 精确定位（标题变化也不影响）
+      let windowSource =
+        wantedId !== undefined
+          ? sources.find((item) => new RegExp(`^window:${wantedId}(?::|$)`).test(item.id))
+          : undefined;
+
+      // 2) ID 未命中或未锁定，按应用进程名兜底（如 Google Chrome）
+      if (!windowSource && wantedApp) {
+        windowSource = sources.find((item) => {
+          const idMatch = /^window:(\d+)/.exec(item.id);
+          if (!idMatch) return false;
+          const owner = getMacWindowOwnerById(Number(idMatch[1]));
+          return (owner?.trim().toLowerCase() ?? '') === wantedApp;
+        });
       }
-      const windowSource = sources.find((item) => item.name.toLowerCase().includes(hint));
+
+      // 3) 最后退回标题关键字匹配
+      if (!windowSource && hint) {
+        windowSource = sources.find((item) => item.name.toLowerCase().includes(hint));
+      }
+
       if (!windowSource || windowSource.thumbnail.isEmpty()) {
-        return { ok: false as const, message: `未找到${label}，请确认窗口已打开、标题关键字正确、且未最小化` };
+        return { ok: false as const, message: `未找到${label}，请确认窗口已打开、窗口选择正确、且未最小化` };
       }
       const size = windowSource.thumbnail.getSize();
       const windowIdMatch = /^window:(\d+)/.exec(windowSource.id);
       const windowId = windowIdMatch ? Number(windowIdMatch[1]) : undefined;
-      const bounds = getMacWindowBoundsById(windowId) ?? getMacWindowBoundsByHint(hintText);
+      const bounds = getMacWindowBoundsById(windowId) ?? getMacWindowBoundsByHint(hint);
       // desktopCapturer 的 id 形如 window:<CGWindowID>:<screenID>，用它精确定位同一窗口
       if (!bounds) {
         // 边界拿不到就只保留截图尺寸，点击阶段会输出完整诊断并拒绝盲点
@@ -1338,7 +1436,10 @@ export class WorkflowExecutor {
 
     try {
       if (node.data.source === 'window') {
-        return await captureWindowByHint(node.data.windowHint, '目标窗口');
+        return await captureWindowByHint(
+          { hintText: node.data.windowHint, windowId: node.data.windowId, windowApp: node.data.windowApp },
+          '目标窗口',
+        );
       }
       if (node.data.source === 'stream') {
         const index = await loadStreamSources();
@@ -1348,10 +1449,10 @@ export class WorkflowExecutor {
         }
         if (profile.type === 'local') {
           return profile.windowHint?.trim()
-            ? await captureWindowByHint(profile.windowHint, '本机窗口')
+            ? await captureWindowByHint({ hintText: profile.windowHint }, '本机窗口')
             : await captureScreen();
         }
-        return await captureWindowByHint(profile.windowHint, '串流窗口');
+        return await captureWindowByHint({ hintText: profile.windowHint }, '串流窗口');
       }
       return await captureScreen();
     } catch (err) {

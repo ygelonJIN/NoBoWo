@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { connect as tcpConnect } from 'node:net';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import type {
   CloudApiProfile,
   CloudApiVisionResult,
@@ -64,7 +64,27 @@ const createWindow = () => {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'));
   }
+
+  // 键盘录制兜底通道：渲染层 keydown 收不到时（焦点/系统按键处理等原因），
+  // 主进程 before-input-event 先于渲染进程拿到按键，转发给录制面板。
+  win.webContents.on('before-input-event', (_event, input) => {
+    if (!keyRecordingWebContents || keyRecordingWebContents !== win.webContents) return;
+    if (input.type === 'keyDown' || input.type === 'keyUp') {
+      win.webContents.send('keyboardRecord:event', {
+        type: input.type,
+        key: input.key,
+        code: input.code,
+      });
+    }
+  });
 };
+
+// 键盘录制：主进程捕获按键的开关状态（由渲染层 IPC 控制）
+let keyRecordingWebContents: Electron.WebContents | null = null;
+
+function setKeyRecordingActive(active: boolean, wc?: Electron.WebContents | null) {
+  keyRecordingWebContents = active ? (wc ?? null) : null;
+}
 
 // ===== 模板库存储 =====
 
@@ -183,6 +203,15 @@ function normalizeFolderName(name: string) {
 }
 
 function registerCloudApiIpc() {
+  ipcMain.handle('keyboardRecord:start', (event) => {
+    setKeyRecordingActive(true, event.sender);
+    return { ok: true };
+  });
+  ipcMain.handle('keyboardRecord:stop', () => {
+    setKeyRecordingActive(false);
+    return { ok: true };
+  });
+
   ipcMain.handle('cloudApi:list', async (): Promise<CloudApiProfile[]> => {
     const index = await loadCloudApiIndex();
     return index.profiles.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -390,6 +419,31 @@ function normalizeStreamSource(source: StreamSourceProfile): StreamSourceProfile
   };
 }
 
+function getWindowOwnerName(windowId: number): string | undefined {
+  const script = `import json
+try:
+    import Quartz
+except Exception:
+    print(json.dumps(None))
+    raise SystemExit(0)
+window_id = int(${JSON.stringify(windowId)})
+options = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+windows = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
+for win in windows:
+    if int(win.get(Quartz.kCGWindowNumber, 0) or 0) == window_id:
+        print(json.dumps(win.get(Quartz.kCGWindowOwnerName, "") or ""))
+        raise SystemExit(0)
+print(json.dumps(None))`;
+  const res = spawnSync('python3', ['-c', script], { encoding: 'utf8' });
+  if (res.status !== 0) return undefined;
+  try {
+    const out = JSON.parse(String(res.stdout ?? '').trim() || 'null') as string | null;
+    return out?.trim() ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadStreamSources(): Promise<StreamSourceIndex> {
   try {
     const raw = await readFile(streamSourcesFile(), 'utf8');
@@ -548,12 +602,16 @@ function registerStreamIpc() {
         .filter((source) => !source.name.startsWith('NoBoWo'))
         .map((source) => {
           const size = source.thumbnail.getSize();
+          const windowIdMatch = /^window:(\d+)/.exec(source.id);
+          const windowId = windowIdMatch ? Number(windowIdMatch[1]) : undefined;
           return {
             id: source.id,
             name: source.name,
             thumbnail: source.thumbnail.toDataURL(),
             width: size.width,
             height: size.height,
+            windowId,
+            windowApp: windowId ? getWindowOwnerName(windowId) : undefined,
           };
         })
         .filter((item) => item.thumbnail.length > 0);

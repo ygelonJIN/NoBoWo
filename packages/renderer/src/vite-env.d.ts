@@ -53,6 +53,11 @@ declare global {
       test: (payload: { baseUrl: string; apiKey: string; name?: string }) => Promise<{ ok: boolean; message?: string; lastTestAt: number }>;
       vision: (payload: { imageDataUrl: string; profileId: string; prompt?: string }) => Promise<CloudApiVisionResult>;
     };
+    keyboardRecordAPI?: {
+      start: () => Promise<{ ok: boolean }>;
+      stop: () => Promise<{ ok: boolean }>;
+      onKeyEvent: (cb: (data: { type: 'keyDown' | 'keyUp'; key: string; code: string }) => void) => () => void;
+    };
     engineAPI?: {
       envInfo: () => Promise<EngineEnvInfo>;
       templateMatch: (payload: { imageDataUrl: string; templateId?: string; templatePath?: string; threshold?: number }) => Promise<EngineRunResult>;

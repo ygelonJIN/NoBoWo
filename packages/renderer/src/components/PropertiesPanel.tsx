@@ -74,6 +74,81 @@ function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data'
   };
 }
 
+// 键盘录制：优先用物理键码(e.code)，回退用 e.key。
+// macOS 上 e.key 受修饰键交换等系统设置影响（物理 ⌘ 可能被报告为 Control），
+// 而 e.code 是物理键码（MetaLeft 一定是 command）；但个别环境 e.code 可能缺失，
+// 所以 e.key 作为回退通道，保证任何情况下都能捕获到按键。
+const RECORD_CODE_MAP: Record<string, string> = {
+  MetaLeft: 'command',
+  MetaRight: 'command',
+  ControlLeft: 'ctrl',
+  ControlRight: 'ctrl',
+  AltLeft: 'option',
+  AltRight: 'option',
+  ShiftLeft: 'shift',
+  ShiftRight: 'shift',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+  ArrowUp: 'up',
+  ArrowDown: 'down',
+  Enter: 'enter',
+  NumpadEnter: 'enter',
+  Tab: 'tab',
+  Escape: 'esc',
+  Backspace: 'delete',
+  Delete: 'del',
+  Space: 'space',
+  Home: 'home',
+  End: 'end',
+  PageUp: 'pageup',
+  PageDown: 'pagedown',
+  F1: 'f1', F2: 'f2', F3: 'f3', F4: 'f4', F5: 'f5', F6: 'f6',
+  F7: 'f7', F8: 'f8', F9: 'f9', F10: 'f10', F11: 'f11', F12: 'f12',
+};
+
+const RECORD_KEY_MAP: Record<string, string> = {
+  Meta: 'command',
+  Control: 'ctrl',
+  Alt: 'option',
+  Shift: 'shift',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+  ArrowUp: 'up',
+  ArrowDown: 'down',
+  Enter: 'enter',
+  Tab: 'tab',
+  Escape: 'esc',
+  Backspace: 'delete',
+  Delete: 'del',
+  ' ': 'space',
+  Spacebar: 'space',
+  Home: 'home',
+  End: 'end',
+  PageUp: 'pageup',
+  PageDown: 'pagedown',
+  F1: 'f1', F2: 'f2', F3: 'f3', F4: 'f4', F5: 'f5', F6: 'f6',
+  F7: 'f7', F8: 'f8', F9: 'f9', F10: 'f10', F11: 'f11', F12: 'f12',
+};
+
+const RECORD_MODIFIER_ORDER = ['command', 'ctrl', 'option', 'shift', 'fn', 'capslock'];
+
+function sortRecordedCombo(names: string[]): string[] {
+  const rest = names.filter((n) => !RECORD_MODIFIER_ORDER.includes(n));
+  const mods = names.filter((n) => RECORD_MODIFIER_ORDER.includes(n));
+  mods.sort((a, b) => RECORD_MODIFIER_ORDER.indexOf(a) - RECORD_MODIFIER_ORDER.indexOf(b));
+  return [...mods, ...rest];
+}
+
+function recordKeyPress(e: { code: string; key: string }): { id: string; label: string } | null {
+  if (e.code === 'CapsLock' || e.key === 'CapsLock') return null; // 大小写锁定只是状态键
+  const codeMapped = RECORD_CODE_MAP[e.code];
+  if (codeMapped) return { id: e.code, label: codeMapped };
+  const keyMapped = RECORD_KEY_MAP[e.key];
+  if (keyMapped) return { id: e.key, label: keyMapped };
+  if (e.key.length === 1) return { id: e.code || e.key, label: e.key };
+  return null;
+}
+
 export function PropertiesPanel({
   node,
   onChangeNode,
@@ -110,6 +185,99 @@ export function PropertiesPanel({
   const [streamSourceLoading, setStreamSourceLoading] = useState(false);
   const [windows, setWindows] = useState<StreamWindowInfo[]>([]);
   const [probingWindows, setProbingWindows] = useState(false);
+  const [keyRecording, setKeyRecording] = useState(false);
+  const [keyRecordingPresses, setKeyRecordingPresses] = useState<string[]>([]);
+  const keyRecordingRef = useRef<{
+    labels: Record<string, string>;
+    lastCombo: string[];
+    timer: number | null;
+    finished: boolean;
+  } | null>(null);
+
+  const finishKeyRecording = useCallback(
+    (combo: string[] | null) => {
+      const rec = keyRecordingRef.current;
+      if (rec?.timer != null) window.clearTimeout(rec.timer);
+      keyRecordingRef.current = null;
+      setKeyRecording(false);
+      setKeyRecordingPresses([]);
+      if (combo && combo.length > 0 && node?.type === 'keyboard') {
+        onChangeNode(updateNodeData(node, { keys: combo.join('+') }));
+      }
+    },
+    [node, onChangeNode],
+  );
+
+  useEffect(() => {
+    if (!keyRecording) return;
+    // 判定“松开”：keydown 累积按键并重置长兜底定时器（防 keyup 丢失）；
+    // keyup 重置短定时器。任何一次 keyup 到达都会在 ~200ms 后填入，
+    // 即使 keyup 的键名与 keydown 不一致也能正常结束（不依赖精确配对）。
+    const armTimer = (rec: NonNullable<typeof keyRecordingRef.current>, ms: number) => {
+      if (rec.timer != null) window.clearTimeout(rec.timer);
+      rec.timer = window.setTimeout(() => {
+        const combo = rec.lastCombo;
+        rec.finished = true;
+        finishKeyRecording(combo.length > 0 ? combo : null);
+      }, ms);
+    };
+    const handlePress = (kind: 'keyDown' | 'keyUp', key: string, code: string) => {
+      const rec = keyRecordingRef.current;
+      if (!rec || rec.finished) return;
+      if (kind === 'keyDown') {
+        if ((code === 'Escape' || key === 'Escape') && Object.keys(rec.labels).length === 0) {
+          rec.finished = true;
+          finishKeyRecording(null);
+          return;
+        }
+        const press = recordKeyPress({ code, key });
+        if (!press) return;
+        rec.labels[press.id] = press.label;
+        rec.lastCombo = sortRecordedCombo(Object.values(rec.labels));
+        setKeyRecordingPresses(rec.lastCombo);
+        armTimer(rec, 3000);
+      } else {
+        armTimer(rec, 200);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handlePress('keyDown', e.key, e.code);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handlePress('keyUp', e.key, e.code);
+    };
+    const onBlur = () => {
+      const rec = keyRecordingRef.current;
+      if (rec && !rec.finished) {
+        rec.finished = true;
+        // 窗口失焦兜底：已按过的键视为完成，直接填入
+        finishKeyRecording(rec.lastCombo.length > 0 ? rec.lastCombo : null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    window.addEventListener('blur', onBlur);
+    // 主进程兜底通道：渲染层 keydown 收不到时仍能捕获按键
+    const unsubscribe = window.keyboardRecordAPI?.onKeyEvent((data) => handlePress(data.type, data.key, data.code));
+    window.keyboardRecordAPI?.start().catch(() => {});
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+      window.removeEventListener('blur', onBlur);
+      unsubscribe?.();
+      window.keyboardRecordAPI?.stop().catch(() => {});
+    };
+  }, [keyRecording, finishKeyRecording]);
+
+  const startKeyRecording = () => {
+    keyRecordingRef.current = { labels: {}, lastCombo: [], timer: null, finished: false };
+    setKeyRecording(true);
+    setKeyRecordingPresses([]);
+  };
 
   useEffect(() => {
     if (!window.templateAPI) {
@@ -467,13 +635,26 @@ export function PropertiesPanel({
             {node.data.source === 'window' && (
               <>
                 <label>
-                  窗口标题关键字
+                  窗口标题关键字（可选，用于标题匹配）
                   <input
                     value={node.data.windowHint ?? ''}
                     onChange={(e) => onChangeNode(updateNodeData(node, { windowHint: e.target.value }))}
                     placeholder="例如：Remote Play / Excel / 游戏名"
                   />
                 </label>
+                {node.data.windowId !== undefined && (
+                  <div className="properties-panel__lock-chip">
+                    <span className="properties-panel__lock-dot" />
+                    已锁定窗口 · ID {node.data.windowId}
+                    {node.data.windowApp ? ` · ${node.data.windowApp}` : ''}
+                    <button
+                      className="properties-panel__ghost-button properties-panel__lock-clear"
+                      onClick={() => onChangeNode(updateNodeData(node, { windowId: undefined, windowApp: undefined }))}
+                    >
+                      解除锁定
+                    </button>
+                  </div>
+                )}
                 <div className="properties-panel__window-picker">
                   <button
                     className="properties-panel__ghost-button"
@@ -495,17 +676,36 @@ export function PropertiesPanel({
                   </button>
                   {windows.length > 0 && (
                     <div className="properties-panel__window-list">
-                      {windows.map((win) => (
-                        <button
-                          key={win.id}
-                          className={node.data.windowHint && win.name.toLowerCase().includes(node.data.windowHint.toLowerCase()) ? 'active' : ''}
-                          onClick={() => onChangeNode(updateNodeData(node, { windowHint: win.name }))}
-                          title={win.name}
-                        >
-                          {win.name}
-                        </button>
-                      ))}
+                      {windows.map((win) => {
+                        const isLocked = win.windowId !== undefined && win.windowId === node.data.windowId;
+                        return (
+                          <button
+                            key={win.id}
+                            className={isLocked ? 'active' : ''}
+                            onClick={() =>
+                              onChangeNode(updateNodeData(node, {
+                                windowHint: win.name,
+                                windowId: win.windowId,
+                                windowApp: win.windowApp,
+                              }))
+                            }
+                            title={`${win.name}${win.windowId !== undefined ? ` · ID ${win.windowId}` : ''}${win.windowApp ? ` · ${win.windowApp}` : ''}`}
+                          >
+                            {win.name}
+                            {win.windowId !== undefined && (
+                              <span className={isLocked ? 'properties-panel__window-app active' : 'properties-panel__window-app'}>
+                                ID{win.windowId} · {win.windowApp ?? ''}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
+                  )}
+                  {node.data.windowHint && (
+                    <p className="properties-panel__window-hint">
+                      选择窗口会自动记下稳定的窗口 ID，标题改变也能继续定位；仅标题匹配则填写上方关键字。
+                    </p>
                   )}
                 </div>
               </>
@@ -547,34 +747,40 @@ export function PropertiesPanel({
           <section className="properties-panel__group">
             <h3>循环配置</h3>
             <p className="properties-panel__hint">Loop 通过角色区分：Begin 负责开始循环，Down 负责循环结束后继续。每个节点只有左侧输入点和右侧输出点。</p>
-            <label>
-              模式
-              <CustomSelect
-                value={node.data.mode}
-                options={[
-                  { value: 'count', label: '次数' },
-                  { value: 'condition', label: '条件' },
-                ]}
-                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' }))}
-              />
-            </label>
-            {node.data.mode === 'count' ? (
-              <label>
-                次数
-                <input
-                  type="number"
-                  value={node.data.count ?? 3}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { count: Number(e.target.value) }))}
-                />
-              </label>
+            {node.data.role === 'down' ? (
+              <p className="properties-panel__hint">循环次数/条件请在配对的 Loop Begin 上设置，Down 只负责结束循环并继续后续步骤。</p>
             ) : (
-              <label>
-                条件文本
-                <input
-                  value={node.data.conditionText ?? ''}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { conditionText: e.target.value }))}
-                />
-              </label>
+              <>
+                <label>
+                  模式
+                  <CustomSelect
+                    value={node.data.mode}
+                    options={[
+                      { value: 'count', label: '次数' },
+                      { value: 'condition', label: '条件' },
+                    ]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' }))}
+                  />
+                </label>
+                {node.data.mode === 'count' ? (
+                  <label>
+                    次数
+                    <input
+                      type="number"
+                      value={node.data.count ?? 3}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { count: Number(e.target.value) }))}
+                    />
+                  </label>
+                ) : (
+                  <label>
+                    条件文本
+                    <input
+                      value={node.data.conditionText ?? ''}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { conditionText: e.target.value }))}
+                    />
+                  </label>
+                )}
+              </>
             )}
           </section>
         )}
@@ -627,14 +833,48 @@ export function PropertiesPanel({
         {node.type === 'keyboard' && (
           <section className="properties-panel__group">
             <h3>键盘配置</h3>
-            <label>
-              按键
-              <input
-                value={node.data.keys}
-                placeholder="例如：enter / ctrl+shift+a / F5，连续输入直接输入文本"
-                onChange={(e) => onChangeNode(updateNodeData(node, { keys: e.target.value }))}
-              />
-            </label>
+            {node.data.mode !== 'type' ? (
+              <>
+                <button
+                  className={`properties-panel__key-record-btn${keyRecording ? ' properties-panel__key-record-btn--recording' : ''}`}
+                  onClick={(e) => {
+                    (e.currentTarget as HTMLButtonElement).blur();
+                    if (keyRecording) {
+                      finishKeyRecording(null);
+                    } else {
+                      startKeyRecording();
+                    }
+                  }}
+                >
+                  {keyRecording ? '● 录制中… 松开即填入（Esc 取消）' : '录制按键'}
+                </button>
+                {keyRecording && (
+                  <span className="properties-panel__key-record-hint">
+                    {keyRecordingPresses.length > 0
+                      ? `已捕获：${keyRecordingPresses.join(' + ')}`
+                      : '按下按键，例如 A、⌘←'}
+                  </span>
+                )}
+                <label>
+                  按键
+                  <input
+                    className="properties-panel__key-input--muted"
+                    value={node.data.keys}
+                    placeholder={keyRecording ? '正在录制…' : '或手动输入，例如 A / enter'}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { keys: e.target.value }))}
+                  />
+                </label>
+              </>
+            ) : (
+              <label>
+                按键
+                <input
+                  value={node.data.keys}
+                  placeholder="例如：ABCD 或 你好"
+                  onChange={(e) => onChangeNode(updateNodeData(node, { keys: e.target.value }))}
+                />
+              </label>
+            )}
             <label>
               模式
               <CustomSelect
@@ -661,8 +901,8 @@ export function PropertiesPanel({
             )}
             <p className="properties-panel__hint">
               {node.data.mode === 'type'
-                ? '连续输入会逐字符输入，{enter}、{tab}、{esc} 等表示特殊按键'
-                : '多个按键用 + 连接，如 ctrl+shift+a'}
+                ? '逐字符输入：ABCD 打大写，{enter}、{tab}、{esc} 表示特殊键'
+                : '推荐用上方「录制按键」录入；也可手动写：A、command+left、enter'}
             </p>
           </section>
         )}

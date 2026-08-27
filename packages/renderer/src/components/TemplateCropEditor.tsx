@@ -18,14 +18,20 @@ type DragState =
   | { kind: 'draw'; start: Point; current: Point }
   | { kind: 'move'; start: Point; orig: TemplateRect }
   | { kind: 'resize'; corner: Corner; start: Point; orig: TemplateRect }
+  | { kind: 'offset'; start: Point; orig: ClickOffset; rect: TemplateRect }
+  | { kind: 'pan'; start: Point; scrollLeft: number; scrollTop: number }
   | null;
 
 const STAGE_MAX_H = 440;
 const MIN_CROP = 4;
+const OFFSET_HIT_PX = 14;
+const ZOOM_STEP = 1.15;
+const MAX_ZOOM = 24;
 
 export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange, onOffsetChange }: Props) {
   const [natural, setNatural] = useState<Point | null>(null);
   const [availW, setAvailW] = useState(640);
+  const [zoom, setZoom] = useState(1);
   const [draft, setDraft] = useState<TemplateRect | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -37,6 +43,11 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     img.onerror = () => setNatural(null);
     img.src = imageUrl;
   }, [imageUrl]);
+
+  // 切换图片时重置缩放
+  useEffect(() => {
+    setZoom(1);
+  }, [natural]);
 
   useEffect(() => {
     const el = stageRef.current;
@@ -50,9 +61,36 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     return () => ro.disconnect();
   }, []);
 
-  const scale = natural ? Math.min(1, (availW - 24) / natural.x, STAGE_MAX_H / natural.y) : 1;
+  const fitScale = natural ? Math.min(1, (availW - 24) / natural.x, STAGE_MAX_H / natural.y) : 1;
+  const scale = fitScale * zoom;
+  const maxZoom = natural ? Math.max(4, Math.min(MAX_ZOOM, (1 / fitScale) * 2)) : 4;
   const displayW = natural ? Math.max(1, Math.round(natural.x * scale)) : 0;
   const displayH = natural ? Math.max(1, Math.round(natural.y * scale)) : 0;
+
+  // 滚轮缩放：以光标为中心
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !natural) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      const nextZoom = Math.min(maxZoom, Math.max(1, zoom * factor));
+      if (nextZoom === zoom) return;
+      const rect = stage.getBoundingClientRect();
+      const oldScale = fitScale * zoom;
+      const newScale = fitScale * nextZoom;
+      // 光标下的图片内容点（图片坐标）
+      const contentX = (e.clientX - rect.left - stage.clientLeft + stage.scrollLeft) / oldScale;
+      const contentY = (e.clientY - rect.top - stage.clientTop + stage.scrollTop) / oldScale;
+      setZoom(nextZoom);
+      requestAnimationFrame(() => {
+        stage.scrollLeft = contentX * newScale - (e.clientX - rect.left - stage.clientLeft);
+        stage.scrollTop = contentY * newScale - (e.clientY - rect.top - stage.clientTop);
+      });
+    };
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onWheel);
+  }, [fitScale, maxZoom, natural, zoom]);
 
   const clampRect = useCallback((r: TemplateRect, n: Point): TemplateRect => {
     const x = Math.max(0, Math.min(n.x, r.x));
@@ -119,6 +157,18 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     }
   }, []);
 
+  const handleOffsetHandleDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0 || !natural || !rect) return;
+      e.stopPropagation();
+      e.preventDefault();
+      surfaceRef.current?.setPointerCapture(e.pointerId);
+      const p = toImagePoint(e.clientX, e.clientY);
+      dragRef.current = { kind: 'offset', start: p, orig: { ...offset }, rect: { ...rect } };
+    },
+    [natural, offset, rect, toImagePoint],
+  );
+
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0 || !natural) return;
@@ -126,15 +176,39 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
       surfaceRef.current?.setPointerCapture(e.pointerId);
       const p = toImagePoint(e.clientX, e.clientY);
       setDraft(null);
+
+      if (rect && !draft) {
+        const cx = rect.x + rect.width / 2 + offset.x;
+        const cy = rect.y + rect.height / 2 + offset.y;
+        const dist = Math.hypot((p.x - cx) * scale, (p.y - cy) * scale);
+        if (dist < OFFSET_HIT_PX) {
+          dragRef.current = { kind: 'offset', start: p, orig: { ...offset }, rect: { ...rect } };
+          return;
+        }
+      }
+
       if (tool === 'draw') {
         dragRef.current = { kind: 'draw', start: p, current: p };
         return;
       }
       if (rect && p.x >= rect.x && p.x <= rect.x + rect.width && p.y >= rect.y && p.y <= rect.y + rect.height) {
         dragRef.current = { kind: 'move', start: p, orig: rect };
+        return;
+      }
+      // 放大后，拖拽空白区域平移画布
+      if (zoom > 1) {
+        const stage = stageRef.current;
+        if (stage) {
+          dragRef.current = {
+            kind: 'pan',
+            start: { x: e.clientX, y: e.clientY },
+            scrollLeft: stage.scrollLeft,
+            scrollTop: stage.scrollTop,
+          };
+        }
       }
     },
-    [natural, rect, toImagePoint, tool],
+    [draft, natural, offset, rect, scale, toImagePoint, tool, zoom],
   );
 
   const handleResizeDown = useCallback(
@@ -170,9 +244,24 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
         onRectChange(moveRect(drag.orig, p.x - drag.start.x, p.y - drag.start.y, natural));
       } else if (drag.kind === 'resize') {
         onRectChange(resizeRect(drag.orig, drag.corner, p, natural));
+      } else if (drag.kind === 'offset') {
+        const dx = p.x - drag.start.x;
+        const dy = p.y - drag.start.y;
+        const boundX = drag.rect.width / 2;
+        const boundY = drag.rect.height / 2;
+        onOffsetChange({
+          x: Math.max(-boundX, Math.min(boundX, Math.round(drag.orig.x + dx))),
+          y: Math.max(-boundY, Math.min(boundY, Math.round(drag.orig.y + dy))),
+        });
+      } else if (drag.kind === 'pan') {
+        const stage = stageRef.current;
+        if (stage) {
+          stage.scrollLeft = drag.scrollLeft - (e.clientX - drag.start.x);
+          stage.scrollTop = drag.scrollTop - (e.clientY - drag.start.y);
+        }
       }
     },
-    [clampRect, moveRect, natural, onRectChange, resizeRect, toImagePoint],
+    [clampRect, moveRect, natural, onOffsetChange, onRectChange, resizeRect, toImagePoint],
   );
 
   const handlePointerUp = useCallback(
@@ -207,18 +296,35 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
   const selWidth = selection ? selection.width * scale : 0;
   const selHeight = selection ? selection.height * scale : 0;
 
+  const clickLeft = rect ? (rect.x + rect.width / 2 + offset.x) * scale : 0;
+  const clickTop = rect ? (rect.y + rect.height / 2 + offset.y) * scale : 0;
+  const isOffsetCenter = offset.x === 0 && offset.y === 0;
+
   const hint =
     tool === 'draw'
       ? rect
-        ? '在图片上拖拽，重新框选要识别的区域'
-        : '在图片上拖拽，框选要识别的区域'
+        ? '拖拽可重画选框 · 滚轮缩放'
+        : '在图片上拖拽，框选要识别的区域 · 滚轮缩放'
       : rect
-        ? '拖拽选框可移动，拖动四角可调整大小'
-        : '当前没有选框，请切换到「框选」模式绘制';
+        ? '拖拽选框可移动 · 四角调整大小 · 红点设置点击位置 · 滚轮缩放，放大后拖空白处平移'
+        : '当前没有选框，请切换到「框选」模式绘制 · 滚轮缩放';
+
+  const offDesc = [
+    offset.x > 0 ? `右 ${offset.x}` : offset.x < 0 ? `左 ${Math.abs(offset.x)}` : '',
+    offset.y > 0 ? `下 ${offset.y}` : offset.y < 0 ? `上 ${Math.abs(offset.y)}` : '',
+  ].filter(Boolean).join(' · ');
 
   return (
     <div className={`crop-editor crop-editor--${tool}`}>
-      <p className="crop-editor__hint">{hint}</p>
+      <div className="crop-editor__bar">
+        <span className="crop-editor__bar-hint">{hint}</span>
+        <div className="crop-editor__bar-right">
+          <span className="crop-editor__zoom-label">{Math.round(scale * 100)}%</span>
+          <button className="crop-editor__zoom-reset" onClick={() => setZoom(1)} disabled={zoom <= 1}>
+            适配窗口
+          </button>
+        </div>
+      </div>
       <div className="crop-editor__stage" ref={stageRef}>
         {natural ? (
           <div
@@ -233,7 +339,7 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
             {selection && (
               <>
                 <div
-                  className="crop-editor__selection"
+                  className={`crop-editor__selection ${draft ? 'crop-editor__selection--draft' : ''}`}
                   style={{ left: selLeft, top: selTop, width: selWidth, height: selHeight }}
                 />
                 <div
@@ -255,11 +361,42 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
                 )}
               </>
             )}
+            {rect && !draft && (
+              <div
+                className="crop-editor__click-point"
+                style={{ left: clickLeft, top: clickTop }}
+                onPointerDown={handleOffsetHandleDown}
+                title={`点击偏移 ${offset.x}, ${offset.y} — 拖动调整`}
+                role="button"
+                aria-label={`点击点 ${offset.x}, ${offset.y}`}
+              >
+                <span className="crop-editor__click-point-inner" />
+                {isOffsetCenter && <span className="crop-editor__click-point-badge">中心</span>}
+              </div>
+            )}
           </div>
         ) : (
           <div className="crop-editor__loading">图片加载中…</div>
         )}
       </div>
+      {rect && !draft && (
+        <div className="crop-editor__status">
+          <span className="crop-editor__status-item">
+            <span className="crop-editor__status-label">选框</span>
+            <span className="crop-editor__status-value">{Math.round(rect.width)} × {Math.round(rect.height)}</span>
+          </span>
+          <span className="crop-editor__status-sep" aria-hidden="true" />
+          <span className="crop-editor__status-item">
+            <span className="crop-editor__status-label">点击点</span>
+            <span className="crop-editor__status-value">({offset.x}, {offset.y})</span>
+            {!isOffsetCenter && offDesc && <span className="crop-editor__status-sub">距中心 {offDesc}</span>}
+          </span>
+          <span className="crop-editor__status-tip">拖动红色点调整点击位置</span>
+          <button className="crop-editor__offset-reset" onClick={() => onOffsetChange({ x: 0, y: 0 })} disabled={isOffsetCenter}>
+            回中心
+          </button>
+        </div>
+      )}
     </div>
   );
 }

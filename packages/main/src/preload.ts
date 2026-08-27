@@ -46,6 +46,16 @@ contextBridge.exposeInMainWorld('workflowAPI', {
   },
 });
 
+contextBridge.exposeInMainWorld('keyboardRecordAPI', {
+  start: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('keyboardRecord:start'),
+  stop: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('keyboardRecord:stop'),
+  onKeyEvent: (cb: (data: { type: 'keyDown' | 'keyUp'; key: string; code: string }) => void): (() => void) => {
+    const listener = (_event: unknown, data: { type: 'keyDown' | 'keyUp'; key: string; code: string }) => cb(data);
+    ipcRenderer.on('keyboardRecord:event', listener);
+    return () => ipcRenderer.removeListener('keyboardRecord:event', listener);
+  },
+});
+
 contextBridge.exposeInMainWorld('cloudApiAPI', {
   list: () => ipcRenderer.invoke('cloudApi:list'),
   create: (payload: { name: string; baseUrl: string; apiKey: string; defaultPrompt?: string }) =>

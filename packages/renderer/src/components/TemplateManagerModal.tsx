@@ -613,7 +613,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
 
                     <div className="yolo-dataset__grid">
                       {activeTemplates.map((tpl) => (
-                        <div key={tpl.id} className={`yolo-dataset__cell delete-hover ${selectedId === tpl.id ? 'active' : ''}`} onClick={() => void openTemplate(tpl)}>
+                        <div key={tpl.id} className={`yolo-dataset__cell delete-hover ${selectedId === tpl.id ? 'active' : ''} ${tpl.enabled === false ? 'yolo-dataset__cell--disabled' : ''}`} onClick={() => void openTemplate(tpl)}>
                           <TemplateThumb id={tpl.id} className="yolo-dataset__cell-img" />
                           <span className="yolo-dataset__cell-delete-controls" onClick={(e) => e.stopPropagation()}>
                             {confirmDeleteId === tpl.id ? (
@@ -655,7 +655,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                 <div className="yolo-annotate__thumb-list">
                   {activeTemplates.length === 0 && <div className="yolo-annotate__empty-hint">{activeFolderId === null ? '先选择一个文件夹，再上传模板。' : '还没有模板，点击上方上传第一张截图。'}</div>}
                   {activeTemplates.map((tpl) => (
-                    <button key={tpl.id} className={`yolo-annotate__thumb ${selectedId === tpl.id ? 'active' : ''}`} onClick={() => void openTemplate(tpl)}>
+                    <button key={tpl.id} className={`yolo-annotate__thumb ${selectedId === tpl.id ? 'active' : ''} ${tpl.enabled === false ? 'yolo-annotate__thumb--disabled' : ''}`} onClick={() => void openTemplate(tpl)}>
                       <TemplateThumb id={tpl.id} className="yolo-annotate__thumb-img" />
                       <div className="yolo-annotate__thumb-info">
                         <span className="yolo-annotate__thumb-name">{tpl.name}</span>
