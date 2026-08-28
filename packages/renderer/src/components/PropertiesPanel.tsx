@@ -364,6 +364,7 @@ export function PropertiesPanel({
   const handleHeaderPointerDown = useCallback((e: React.PointerEvent, strategyKey: StrategyKey) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest('input, button, select, textarea')) return;
+    e.preventDefault();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -461,6 +462,7 @@ export function PropertiesPanel({
   const handleApiGripPointerDown = useCallback((e: React.PointerEvent, id: string, index: number) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    e.preventDefault();
     try {
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     } catch {
@@ -962,6 +964,7 @@ export function PropertiesPanel({
                     onPointerMove={handleHeaderPointerMove}
                     onPointerUp={handleHeaderPointerUp}
                     onPointerCancel={handleHeaderPointerCancel}
+                    style={{ touchAction: 'none' }}
                   >
                     <span className="strategy-card__grip" aria-hidden="true">
                       ⋮⋮
@@ -1112,6 +1115,7 @@ export function PropertiesPanel({
                                   <span
                                     className="api-chip__grip"
                                     title="拖动排序"
+                                    style={{ touchAction: 'none' }}
                                     onPointerDown={(e) => handleApiGripPointerDown(e, id, index)}
                                     onPointerMove={handleApiGripPointerMove}
                                     onPointerUp={handleApiGripPointerUp}

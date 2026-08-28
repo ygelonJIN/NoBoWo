@@ -13,6 +13,7 @@ type DragState =
   | { kind: 'draw'; start: { x: number; y: number }; current: { x: number; y: number } }
   | { kind: 'move'; id: string; start: { x: number; y: number }; orig: YoloBox }
   | { kind: 'resize'; id: string; corner: ResizeCorner; start: { x: number; y: number }; orig: YoloBox }
+  | { kind: 'pan'; anchor: { x: number; y: number }; startPan: { x: number; y: number } }
   | null;
 
 type StageProps = {
@@ -27,11 +28,17 @@ type StageProps = {
   tool: 'draw' | 'move';
 };
 
+const ZOOM_STEP = 1.15;
+const MAX_ZOOM = 24;
+
 function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, classes, selectedId, onSelect, onChange, tool }: StageProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
   const [drag, setDrag] = useState<DragState>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panRef = useRef({ x: 0, y: 0 });
 
   const annotationsRef = useRef(annotations);
   annotationsRef.current = annotations;
@@ -50,12 +57,57 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
     return () => ro.disconnect();
   }, []);
 
-  const scale =
+  const fitScale =
     imageWidth > 0 && imageHeight > 0 && boxSize.w > 0 && boxSize.h > 0
       ? Math.min(boxSize.w / imageWidth, boxSize.h / imageHeight)
       : 1;
+  const scale = fitScale * zoom;
   const displayW = Math.max(1, Math.round(imageWidth * scale));
   const displayH = Math.max(1, Math.round(imageHeight * scale));
+
+  // 滚轮缩放：以光标为中心
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || imageWidth === 0) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      const maxZoom = Math.max(4, Math.min(MAX_ZOOM, (1 / fitScale) * 2));
+      const nextZoom = Math.min(maxZoom, Math.max(1, zoom * factor));
+      if (nextZoom === zoom) return;
+      const rect = el.getBoundingClientRect();
+      const oldScale = fitScale * zoom;
+      const newScale = fitScale * nextZoom;
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const nextPan = {
+        x: mouseX - (mouseX - panRef.current.x) * (newScale / oldScale),
+        y: mouseY - (mouseY - panRef.current.y) * (newScale / oldScale),
+      };
+      panRef.current = nextPan;
+      setPan(nextPan);
+      setZoom(nextZoom);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [fitScale, imageWidth, zoom]);
+
+  // 切换图片时重置缩放；居中由 surface 的 margin auto 负责
+  useEffect(() => {
+    setZoom(1);
+    panRef.current = { x: 0, y: 0 };
+    setPan({ x: 0, y: 0 });
+  }, [imageUrl]);
+
+  // 图片加载后或容器尺寸变化时居中
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || boxSize.w === 0 || imageWidth === 0 || imageHeight === 0) return;
+    const fs = Math.min(boxSize.w / imageWidth, boxSize.h / imageHeight);
+    const w = Math.max(1, Math.round(imageWidth * fs * zoom));
+    const h = Math.max(1, Math.round(imageHeight * fs * zoom));
+    setPan({ x: (el.clientWidth - w) / 2, y: (el.clientHeight - h) / 2 });
+  }, [boxSize, imageWidth, imageHeight]);
 
   const toNorm = useCallback((clientX: number, clientY: number) => {
     const rect = boxRef.current?.getBoundingClientRect();
@@ -65,6 +117,19 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
       y: Math.min(1, Math.max(0, (clientY - rect.top) / rect.height)),
     };
   }, []);
+
+  const startPan = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0 || zoom <= 1) return;
+    const surface = boxRef.current;
+    if (!surface) return;
+    const bounds = surface.getBoundingClientRect();
+    if (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom) return;
+    setDrag({
+      kind: 'pan',
+      anchor: { x: e.clientX, y: e.clientY },
+      startPan: { x: pan.x, y: pan.y },
+    });
+  }, [pan, zoom]);
 
   const clampBox = useCallback((b: YoloBox): YoloBox => {
     const width = Math.min(1, Math.max(0.004, b.width));
@@ -138,6 +203,13 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
             break;
         }
         onChange(annotationsRef.current.map((a) => (a.id === d.id ? { ...a, box: next } : a)));
+      } else if (d.kind === 'pan') {
+        const nextPan = {
+          x: d.startPan.x + e.clientX - d.anchor.x,
+          y: d.startPan.y + e.clientY - d.anchor.y,
+        };
+        panRef.current = nextPan;
+        setPan(nextPan);
       }
     };
     const onUp = () => {
@@ -179,6 +251,7 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
       setDrag({ kind: 'move', id: hit.id, start: pt, orig: hit.box });
     } else {
       onSelect(null);
+      startPan(e);
     }
   };
 
@@ -206,57 +279,72 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
   const py = (v: number) => `${v * displayH}px`;
 
   return (
-    <div className={`yolo-stage ${tool === 'draw' ? 'yolo-stage--draw' : 'yolo-stage--move'}`} ref={wrapRef} onMouseDown={handleStageDown}>
-      {imageUrl ? (
-        <div ref={boxRef} className="yolo-stage__surface" style={{ width: displayW, height: displayH }}>
-          <img className="yolo-stage__image" src={imageUrl} alt="" draggable={false} style={{ width: displayW, height: displayH }} />
-          {annotations.map((ann) => {
-            const cls = classes.find((c) => c.id === ann.classId);
-            const color = cls?.color ?? '#8b9dc9';
-            const selected = ann.id === selectedId;
-            return (
-              <div
-                key={ann.id}
-                className={`yolo-stage__box ${selected ? 'yolo-stage__box--selected' : ''} ${ann.classId ? '' : 'yolo-stage__box--unclassified'}`}
-                style={{
-                  left: px(ann.box.x),
-                  top: py(ann.box.y),
-                  width: px(ann.box.width),
-                  height: py(ann.box.height),
-                  borderColor: color,
-                }}
-                onMouseDown={(e) => handleBoxDown(e, ann)}
-              >
-                <span className="yolo-stage__label" style={{ background: color }}>
-                  {cls?.name ?? '未分类'}
-                </span>
-                {selected &&
-                  (['nw', 'ne', 'sw', 'se'] as ResizeCorner[]).map((corner) => (
-                    <span
-                      key={corner}
-                      className={`yolo-stage__handle yolo-stage__handle--${corner}`}
-                      style={{ borderColor: color }}
-                      onMouseDown={(e) => handleResizeDown(e, ann.id, corner)}
-                    />
-                  ))}
-              </div>
-            );
-          })}
-          {drag?.kind === 'draw' && (
-            <div
-              className="yolo-stage__drawing"
-              style={{
-                left: px(Math.min(drag.start.x, drag.current.x)),
-                top: py(Math.min(drag.start.y, drag.current.y)),
-                width: px(Math.abs(drag.current.x - drag.start.x)),
-                height: py(Math.abs(drag.current.y - drag.start.y)),
-              }}
-            />
-          )}
+    <div className="yolo-stage-editor">
+      <div className="yolo-stage__bar">
+        <span className="yolo-stage__bar-hint">
+          {tool === 'draw'
+            ? '在图片上拖拽，框选要识别的区域 · 滚轮缩放'
+            : '拖拽选框可移动 · 四角调整大小 · 滚轮缩放，放大后拖空白处平移'}
+        </span>
+        <div className="yolo-stage__bar-right">
+          <span className="yolo-stage__zoom-label">{Math.round(scale * 100)}%</span>
+          <button className="yolo-stage__zoom-reset" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} disabled={zoom <= 1}>
+            适配窗口
+          </button>
         </div>
-      ) : (
-        <div className="yolo-stage__empty">等待加载图片…</div>
-      )}
+      </div>
+      <div className={`yolo-stage ${tool === 'draw' ? 'yolo-stage--draw' : 'yolo-stage--move'}`} ref={wrapRef} onMouseDown={handleStageDown}>
+        {imageUrl ? (
+          <div ref={boxRef} className="yolo-stage__surface" style={{ width: displayW, height: displayH, transform: `translate(${pan.x}px, ${pan.y}px)` }} onMouseDown={startPan}>
+            <img className="yolo-stage__image" src={imageUrl} alt="" draggable={false} style={{ width: displayW, height: displayH }} />
+            {annotations.map((ann) => {
+              const cls = classes.find((c) => c.id === ann.classId);
+              const color = cls?.color ?? '#8b9dc9';
+              const selected = ann.id === selectedId;
+              return (
+                <div
+                  key={ann.id}
+                  className={`yolo-stage__box ${selected ? 'yolo-stage__box--selected' : ''} ${ann.classId ? '' : 'yolo-stage__box--unclassified'}`}
+                  style={{
+                    left: px(ann.box.x),
+                    top: py(ann.box.y),
+                    width: px(ann.box.width),
+                    height: py(ann.box.height),
+                    borderColor: color,
+                  }}
+                  onMouseDown={(e) => handleBoxDown(e, ann)}
+                >
+                  <span className="yolo-stage__label" style={{ background: color }}>
+                    {cls?.name ?? '未分类'}
+                  </span>
+                  {selected &&
+                    (['nw', 'ne', 'sw', 'se'] as ResizeCorner[]).map((corner) => (
+                      <span
+                        key={corner}
+                        className={`yolo-stage__handle yolo-stage__handle--${corner}`}
+                        style={{ borderColor: color }}
+                        onMouseDown={(e) => handleResizeDown(e, ann.id, corner)}
+                      />
+                    ))}
+                </div>
+              );
+            })}
+            {drag?.kind === 'draw' && (
+              <div
+                className="yolo-stage__drawing"
+                style={{
+                  left: px(Math.min(drag.start.x, drag.current.x)),
+                  top: py(Math.min(drag.start.y, drag.current.y)),
+                  width: px(Math.abs(drag.current.x - drag.start.x)),
+                  height: py(Math.abs(drag.current.y - drag.start.y)),
+                }}
+              />
+            )}
+          </div>
+        ) : (
+          <div className="yolo-stage__empty">等待加载图片…</div>
+        )}
+      </div>
     </div>
   );
 }

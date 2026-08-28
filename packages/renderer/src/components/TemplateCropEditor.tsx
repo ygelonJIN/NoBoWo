@@ -19,7 +19,7 @@ type DragState =
   | { kind: 'move'; start: Point; orig: TemplateRect }
   | { kind: 'resize'; corner: Corner; start: Point; orig: TemplateRect }
   | { kind: 'offset'; start: Point; orig: ClickOffset; rect: TemplateRect }
-  | { kind: 'pan'; start: Point; scrollLeft: number; scrollTop: number }
+  | { kind: 'pan'; start: Point; grab: Point }
   | null;
 
 const STAGE_MAX_H = 440;
@@ -32,7 +32,9 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
   const [natural, setNatural] = useState<Point | null>(null);
   const [availW, setAvailW] = useState(640);
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [draft, setDraft] = useState<TemplateRect | null>(null);
+  const panRef = useRef<Point>({ x: 0, y: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState>(null);
@@ -44,10 +46,12 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     img.src = imageUrl;
   }, [imageUrl]);
 
-  // 切换图片时重置缩放
+  // 切换图片时重置缩放；居中由 surface 的 margin auto 负责
   useEffect(() => {
     setZoom(1);
-  }, [natural]);
+    panRef.current = { x: 0, y: 0 };
+    setPan({ x: 0, y: 0 });
+  }, [imageUrl]);
 
   useEffect(() => {
     const el = stageRef.current;
@@ -79,14 +83,15 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
       const rect = stage.getBoundingClientRect();
       const oldScale = fitScale * zoom;
       const newScale = fitScale * nextZoom;
-      // 光标下的图片内容点（图片坐标）
-      const contentX = (e.clientX - rect.left - stage.clientLeft + stage.scrollLeft) / oldScale;
-      const contentY = (e.clientY - rect.top - stage.clientTop + stage.scrollTop) / oldScale;
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const nextPan = {
+        x: mouseX - (mouseX - panRef.current.x) * (newScale / oldScale),
+        y: mouseY - (mouseY - panRef.current.y) * (newScale / oldScale),
+      };
+      panRef.current = nextPan;
+      setPan(nextPan);
       setZoom(nextZoom);
-      requestAnimationFrame(() => {
-        stage.scrollLeft = contentX * newScale - (e.clientX - rect.left - stage.clientLeft);
-        stage.scrollTop = contentY * newScale - (e.clientY - rect.top - stage.clientTop);
-      });
     };
     stage.addEventListener('wheel', onWheel, { passive: false });
     return () => stage.removeEventListener('wheel', onWheel);
@@ -195,20 +200,16 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
         dragRef.current = { kind: 'move', start: p, orig: rect };
         return;
       }
-      // 放大后，拖拽空白区域平移画布
+      // 放大后拖拽图片本身或空白区域时平移画布
       if (zoom > 1) {
-        const stage = stageRef.current;
-        if (stage) {
-          dragRef.current = {
-            kind: 'pan',
-            start: { x: e.clientX, y: e.clientY },
-            scrollLeft: stage.scrollLeft,
-            scrollTop: stage.scrollTop,
-          };
-        }
+        dragRef.current = {
+          kind: 'pan',
+          start: { x: e.clientX, y: e.clientY },
+          grab: { x: e.clientX - panRef.current.x, y: e.clientY - panRef.current.y },
+        };
       }
     },
-    [draft, natural, offset, rect, scale, toImagePoint, tool, zoom],
+    [draft, natural, offset, rect, scale, toImagePoint, tool, zoom, pan],
   );
 
   const handleResizeDown = useCallback(
@@ -254,11 +255,12 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
           y: Math.max(-boundY, Math.min(boundY, Math.round(drag.orig.y + dy))),
         });
       } else if (drag.kind === 'pan') {
-        const stage = stageRef.current;
-        if (stage) {
-          stage.scrollLeft = drag.scrollLeft - (e.clientX - drag.start.x);
-          stage.scrollTop = drag.scrollTop - (e.clientY - drag.start.y);
-        }
+        const nextPan = {
+          x: e.clientX - drag.grab.x,
+          y: e.clientY - drag.grab.y,
+        };
+        panRef.current = nextPan;
+        setPan(nextPan);
       }
     },
     [clampRect, moveRect, natural, onOffsetChange, onRectChange, resizeRect, toImagePoint],
@@ -320,7 +322,7 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
         <span className="crop-editor__bar-hint">{hint}</span>
         <div className="crop-editor__bar-right">
           <span className="crop-editor__zoom-label">{Math.round(scale * 100)}%</span>
-          <button className="crop-editor__zoom-reset" onClick={() => setZoom(1)} disabled={zoom <= 1}>
+          <button className="crop-editor__zoom-reset" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} disabled={zoom <= 1}>
             适配窗口
           </button>
         </div>
@@ -330,7 +332,7 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
           <div
             className="crop-editor__surface"
             ref={surfaceRef}
-            style={{ width: displayW, height: displayH }}
+            style={{ width: displayW, height: displayH, transform: `translate(${pan.x}px, ${pan.y}px)` }}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
@@ -379,6 +381,7 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
           <div className="crop-editor__loading">图片加载中…</div>
         )}
       </div>
+
       {rect && !draft && (
         <div className="crop-editor__status">
           <span className="crop-editor__status-item">
