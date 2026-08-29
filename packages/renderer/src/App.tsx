@@ -28,6 +28,7 @@ const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 2;
 const PANEL_WIDTH = 320;
 const PANEL_GAP = 14;
+const CONTROL_WINDOW_ACTIVATE_MS = 1000;
 
 type Point = { x: number; y: number };
 type ContextMenu = { x: number; y: number; edgeId?: string };
@@ -239,6 +240,9 @@ export function App() {
   const [windowActivating, setWindowActivating] = useState(false);
   const holdTimerRef = useRef<number | null>(null);
   const holdStartedRef = useRef<number | null>(null);
+  const activationRafRef = useRef<number | null>(null);
+  const activationStartRef = useRef(0);
+  const activationDoneRef = useRef(false);
   const [currentRunStep, setCurrentRunStep] = useState(0);
   const [totalRunSteps, setTotalRunSteps] = useState(0);
   const [workflowRunLogs, setWorkflowRunLogs] = useState<string[]>([]);
@@ -289,13 +293,39 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!window.workflowAPI?.onControlHolding) return;
+    if (!isControlWindow || !window.workflowAPI?.onControlHolding) return;
     const off = window.workflowAPI.onControlHolding((data) => {
-      setWindowActivationProgress(data.progress);
       setWindowActivating(data.activating);
+      if (data.activating) {
+        // 主进程低频轮询只负责“进出”判定；进度在本地用 rAF 逐帧播放（60fps+）
+        if (activationRafRef.current !== null || activationDoneRef.current) return;
+        activationStartRef.current = performance.now();
+        const step = () => {
+          const progress = Math.min(1, (performance.now() - activationStartRef.current) / CONTROL_WINDOW_ACTIVATE_MS);
+          setWindowActivationProgress(progress);
+          if (progress >= 1) {
+            activationDoneRef.current = true;
+            activationRafRef.current = null;
+          } else {
+            activationRafRef.current = requestAnimationFrame(step);
+          }
+        };
+        activationRafRef.current = requestAnimationFrame(step);
+      } else {
+        if (activationRafRef.current !== null) {
+          cancelAnimationFrame(activationRafRef.current);
+          activationRafRef.current = null;
+        }
+        activationDoneRef.current = false;
+        setWindowActivationProgress(data.progress);
+      }
     });
-    return off;
-  }, []);
+    return () => {
+      off();
+      if (activationRafRef.current !== null) cancelAnimationFrame(activationRafRef.current);
+      activationRafRef.current = null;
+    };
+  }, [isControlWindow]);
 
   useEffect(() => {
     if (!window.workflowAPI) return;
@@ -771,7 +801,7 @@ export function App() {
   }, []);
 
   const cancelHold = useCallback(() => {
-    if (holdTimerRef.current !== null) window.clearInterval(holdTimerRef.current);
+    if (holdTimerRef.current !== null) cancelAnimationFrame(holdTimerRef.current);
     if (isControlWindow) setControlWindowReady(false);
     holdTimerRef.current = null;
     holdStartedRef.current = null;
@@ -791,11 +821,17 @@ export function App() {
     cancelHold();
     holdStartedRef.current = performance.now();
     setHoldingAction(action);
-    holdTimerRef.current = window.setInterval(() => {
+    const step = () => {
       const progress = Math.min(1, (performance.now() - (holdStartedRef.current ?? performance.now())) / 1000);
       setHoldProgress(progress);
-      if (progress >= 1) finishHold(action);
-    }, 16);
+      if (progress >= 1) {
+        holdTimerRef.current = null;
+        finishHold(action);
+        return;
+      }
+      holdTimerRef.current = requestAnimationFrame(step);
+    };
+    holdTimerRef.current = requestAnimationFrame(step);
   }, [cancelHold, finishHold]);
 
   const importWorkflow = useCallback((file: File) => {
@@ -878,7 +914,7 @@ export function App() {
       </button>
     );
     return (
-      <div className="floating-run-panel" style={{ '--activation-progress': windowActivationProgress } as CSSProperties} tabIndex={0}>
+      <div className={`floating-run-panel ${windowActivating ? 'floating-run-panel--activating' : ''}`} style={{ '--activation-progress': windowActivationProgress } as CSSProperties} tabIndex={0}>
         {windowActivating && <div className="floating-run-panel__activate-bar" style={{ '--activation-progress': windowActivationProgress } as CSSProperties} aria-hidden="true" />}
         <div className="floating-run-panel__surface" onMouseDown={(event) => event.stopPropagation()}>
         <div className="floating-run-panel__topbar">

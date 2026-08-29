@@ -3137,10 +3137,10 @@ function loadRendererWindow(win: BrowserWindow, hash = '') {
 }
 
 const CONTROL_WINDOW_ACTIVATE_MS = 1000;
-const CONTROL_WINDOW_POLL_MS = 48;
+// 低频轮询只负责判定鼠标「进出」，动画进度由渲染层本地 rAF 驱动（60fps+）
+const CONTROL_WINDOW_POLL_MS = 200;
 
 let controlWindowHoverTimer: NodeJS.Timeout | null = null;
-let controlWindowActivationTimer: NodeJS.Timeout | null = null;
 let controlWindowHoverStartedAt = 0;
 
 function setControlWindowInteractive(interactive: boolean) {
@@ -3158,10 +3158,6 @@ function broadcastControlWindowHolding(progress: number, activating: boolean) {
 }
 
 function clearControlWindowActivation() {
-  if (controlWindowActivationTimer) {
-    clearTimeout(controlWindowActivationTimer);
-    controlWindowActivationTimer = null;
-  }
   controlWindowHoverStartedAt = 0;
 }
 
@@ -3186,17 +3182,14 @@ function startControlWindowHoverPolling(target: BrowserWindow) {
     if (inside && !controlWindowInteractive) {
       if (!controlWindowHoverStartedAt) {
         controlWindowHoverStartedAt = Date.now();
-        controlWindowActivationTimer = setTimeout(() => {
-          controlWindowActivationTimer = null;
-          controlWindowHoverStartedAt = 0;
-          setControlWindowInteractive(true);
-          broadcastControlWindowHolding(1, false);
-        }, CONTROL_WINDOW_ACTIVATE_MS);
       }
-      broadcastControlWindowHolding(
-        Math.min(1, (Date.now() - controlWindowHoverStartedAt) / CONTROL_WINDOW_ACTIVATE_MS),
-        true,
-      );
+      if (Date.now() - controlWindowHoverStartedAt >= CONTROL_WINDOW_ACTIVATE_MS) {
+        controlWindowHoverStartedAt = 0;
+        setControlWindowInteractive(true);
+        broadcastControlWindowHolding(1, false);
+      } else {
+        broadcastControlWindowHolding(0, true);
+      }
     } else if (!inside) {
       clearControlWindowActivation();
       broadcastControlWindowHolding(0, false);
@@ -3275,7 +3268,11 @@ function openControlWindow() {
     stopControlWindowHoverPolling();
   });
   startControlWindowHoverPolling(controlWindow);
-  controlWindow.on('blur', () => setControlWindowInteractive(false));
+  controlWindow.on('blur', () => {
+    clearControlWindowActivation();
+    broadcastControlWindowHolding(0, false);
+    setControlWindowInteractive(false);
+  });
   loadRendererWindow(controlWindow, '#/run-control');
 }
 
