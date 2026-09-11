@@ -9,7 +9,7 @@ type Props = {
   onChanged?: () => void;
 };
 
-type DepGroup = 'runtime' | 'template' | 'input' | 'yolo' | 'weights' | 'ocr';
+type DepGroup = 'runtime' | 'template' | 'input' | 'yolo' | 'weights' | 'ocr' | 'stream';
 type DepState = 'ok' | 'missing' | 'na' | 'info';
 
 type DepRow = {
@@ -32,6 +32,7 @@ const GROUP_META: Record<DepGroup, { title: string; desc: string }> = {
   yolo: { title: 'YOLO 运行环境', desc: '识别节点「YOLO」策略与训练推理依赖' },
   weights: { title: 'YOLO 预训练权重', desc: 'COCO 预训练参数，训练时作为初始权重' },
   ocr: { title: 'OCR 引擎', desc: 'OCR 测试台、识别节点「OCR」策略' },
+  stream: { title: '串流控制', desc: 'PS5/XBOX 串流与手柄控制' },
 };
 
 const CUSTOM_MIRROR = '__custom__';
@@ -428,6 +429,7 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
     const showInputDeps = mode === 'input' || mode === 'full';
     const showYoloDeps = mode === 'yolo' || mode === 'full';
     const showOcrDeps = mode === 'full';
+    const showStreamDeps = mode === 'full';
 
     if (!yoloEnv) return list;
 
@@ -605,6 +607,51 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
               ? '当前使用 CPU 运算，训练会偏慢；安装带 GPU 后端的 PyTorch 可加速。'
               : '未检测到可用推理设备，先安装 PyTorch 后再重新检测。',
       });
+    }
+
+
+    if (showStreamDeps) {
+      // Chiaki-ng 检测
+      const chiakiPath = engineEnv?.chiakiPath ?? null;
+      if (chiakiPath) {
+        push({ id: 'chiaki', label: 'Chiaki-ng', group: 'stream', usedBy: 'PS5 串流控制', state: 'ok', value: chiakiPath });
+      } else {
+        push({
+          id: 'chiaki',
+          label: 'Chiaki-ng',
+          group: 'stream',
+          usedBy: 'PS5 串流控制',
+          state: 'missing',
+          value: '未找到',
+          hint: 'Chiaki-ng 是开源的 PS5 串流客户端，用于内置串流功能。点击安装会自动下载并安装到系统。',
+          installLabel: '自动安装 Chiaki-ng',
+          installAction: async () => {
+            const platform = navigator.platform.toLowerCase().includes('mac') ? 'mac' : 'win';
+            try {
+              const result = await (window as any).engineAPI?.installChiaki?.(platform);
+              return { started: result?.ok ?? false, message: result?.message ?? '安装请求已发送' };
+            } catch (e) {
+              return { started: false, message: `安装失败: ${String(e)}` };
+            }
+          },
+        });
+      }
+
+      // SharedMemory 支持检测
+      const sharedMemoryAvailable = engineEnv?.sharedMemoryAvailable ?? false;
+      if (sharedMemoryAvailable) {
+        push({ id: 'sharedMemory', label: 'SharedMemory', group: 'stream', usedBy: '手柄控制（低延迟）', state: 'ok', value: '可用' });
+      } else {
+        push({
+          id: 'sharedMemory',
+          label: 'SharedMemory',
+          group: 'stream',
+          usedBy: '手柄控制（低延迟）',
+          state: 'info',
+          value: '未检测',
+          hint: 'SharedMemory 用于通过共享内存发送手柄按键到 Chiaki-ng，延迟更低。需要 Chiaki-ng 支持共享内存输入。',
+        });
+      }
     }
 
     if (showOcrDeps) {

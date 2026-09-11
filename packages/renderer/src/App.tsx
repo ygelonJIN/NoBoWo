@@ -171,11 +171,19 @@ function getNodeSummary(node: WorkflowNode): string {
       const presetLabel = node.data.preset === 'small' ? '小幅' : node.data.preset === 'medium' ? '中幅' : node.data.preset === 'large' ? '大幅' : '自定义';
       return `滚动${directionLabel(node.data.direction)} · ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;
     }
-    case 'keyboard':
+    case 'keyboard': {
+      const targetHint = (node.data.target ?? 'global') === 'stream' ? ' → 串流窗口' : '';
       if (node.data.mode === 'type') {
-        return node.data.keys ? `连续输入：${node.data.keys}（间隔 ${node.data.interval ?? 200}ms）` : '空输入';
+        return node.data.keys ? `连续输入：${node.data.keys}（间隔 ${node.data.interval ?? 200}ms）${targetHint}` : `空输入${targetHint}`;
       }
-      return node.data.keys ? `按键：${node.data.keys}` : '空按键';
+      return node.data.keys ? `按键：${node.data.keys}${targetHint}` : `空按键${targetHint}`;
+    }
+    case 'gamepad': {
+      const targetHint = node.data.target === 'stream' ? ' → 串流窗口' : '';
+      return `手柄：${node.data.action}${targetHint}`;
+    }
+    case 'liveVision':
+      return `实时检测 · ${node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${node.data.fps ?? 10} FPS`;
     case 'recognize':
       return '';
   }
@@ -1018,8 +1026,8 @@ export function App() {
                 </div>
               </div>
               <div className="toolbar__actions">
-                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
-                  <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type}</button>
+                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad'] as WorkflowNode['type'][]).map((type) => (
+                  <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type === 'liveVision' ? 'liveVision' : type}</button>
                 ))}
                 <button onClick={exportWorkflow}>导出</button>
                 <button onClick={() => fileInputRef.current?.click()}>导入</button>

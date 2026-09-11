@@ -107,6 +107,7 @@ contextBridge.exposeInMainWorld('engineAPI', {
     ipcRenderer.invoke('engine:templateMatch', payload),
   yoloDetect: (payload: { imageDataUrl: string; modelId?: string; modelPath?: string; threshold?: number }) =>
     ipcRenderer.invoke('engine:yoloDetect', payload),
+  installChiaki: (platform: string) => ipcRenderer.invoke('engine:installChiaki', platform),
 });
 
 contextBridge.exposeInMainWorld('templateAPI', {
@@ -150,6 +151,8 @@ contextBridge.exposeInMainWorld('yoloAPI', {
   exportModel: (id: string, format: 'onnx' | 'tflite' | 'openvino', imageSize: number) => ipcRenderer.invoke('yolo:exportModel', id, format, imageSize),
   removeModel: (id: string) => ipcRenderer.invoke('yolo:removeModel', id),
   setActiveModel: (id: string) => ipcRenderer.invoke('yolo:setActiveModel', id),
+  importModel: (payload: { file: string; name: string; baseModel: string; imageSize: number; numClasses: number }) => ipcRenderer.invoke("yolo:importModel", payload),
+  pickModelFile: () => ipcRenderer.invoke("yolo:pickModelFile"),
   getEnvInfo: () => ipcRenderer.invoke('yolo:getEnvInfo'),
   installPackage: (packageName: string) => ipcRenderer.invoke('yolo:installPackage', packageName),
   getYoloxPath: () => ipcRenderer.invoke('yolo:getYoloxPath'),

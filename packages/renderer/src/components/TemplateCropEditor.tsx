@@ -22,7 +22,7 @@ type DragState =
   | { kind: 'pan'; start: Point; grab: Point }
   | null;
 
-const STAGE_MAX_H = 440;
+const STAGE_MAX_H = 600;
 const MIN_CROP = 4;
 const OFFSET_HIT_PX = 14;
 const ZOOM_STEP = 1.15;
@@ -65,7 +65,7 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     return () => ro.disconnect();
   }, []);
 
-  const fitScale = natural ? Math.min(1, (availW - 24) / natural.x, STAGE_MAX_H / natural.y) : 1;
+  const fitScale = natural ? Math.min(2, Math.max(0.5, Math.min((availW - 24) / natural.x, STAGE_MAX_H / natural.y))) : 1;
   const scale = fitScale * zoom;
   const maxZoom = natural ? Math.max(4, Math.min(MAX_ZOOM, (1 / fitScale) * 2)) : 4;
   const displayW = natural ? Math.max(1, Math.round(natural.x * scale)) : 0;

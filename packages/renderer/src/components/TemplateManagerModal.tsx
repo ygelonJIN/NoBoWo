@@ -97,6 +97,54 @@ function cropToDataUrl(imageUrl: string, rect: TemplateRect): Promise<string> {
   });
 }
 
+
+type FolderTreeNode = TemplateFolder & { children: FolderTreeNode[]; depth: number };
+
+function buildFolderTree(folders: TemplateFolder[]): FolderTreeNode[] {
+  const map = new Map<string, FolderTreeNode>();
+  const roots: FolderTreeNode[] = [];
+  
+  for (const f of folders) {
+    map.set(f.id, { ...f, children: [], depth: 0 });
+  }
+  
+  for (const f of folders) {
+    const node = map.get(f.id)!;
+    if (f.parentId && map.has(f.parentId)) {
+      const parent = map.get(f.parentId)!;
+      node.depth = parent.depth + 1;
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+  
+  return roots;
+}
+
+function flattenTree(nodes: FolderTreeNode[], expandedIds: Set<string>): FolderTreeNode[] {
+  const result: FolderTreeNode[] = [];
+  for (const node of nodes) {
+    result.push(node);
+    if (node.children.length > 0 && expandedIds.has(node.id)) {
+      result.push(...flattenTree(node.children, expandedIds));
+    }
+  }
+  return result;
+}
+
+function countTemplatesInFolder(folderId: string, folders: TemplateFolder[], templates: TemplateDefinition[]): number {
+  const childIds = new Set<string>();
+  const collect = (id: string) => {
+    childIds.add(id);
+    for (const f of folders) {
+      if (f.parentId === id) collect(f.id);
+    }
+  };
+  collect(folderId);
+  return templates.filter(t => childIds.has(t.folderId ?? '')).length;
+}
+
 function normalizeTags(text: string) {
   return [...new Set(text.split(/[，,\n]/).map((v) => v.trim()).filter(Boolean))].join('，');
 }
@@ -123,7 +171,8 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const [renameFolderName, setRenameFolderName] = useState('');
   const [tab, setTab] = useState<'folders' | 'annotate'>('folders');
   const [tool, setTool] = useState<'draw' | 'move'>('draw');
-  const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
+    const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingReplaceRef = useRef(false);
   const apiUnavailable = !window.templateAPI;
@@ -370,7 +419,12 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     return [t.name, t.app, t.notes, t.windowTitle, ...(t.tags ?? [])].some((v) => v?.toLowerCase().includes(q));
   });
 
-  const activeTemplates = filtered.filter((tpl) => (activeFolderId ? tpl.folderId === activeFolderId : true));
+  const getDescendantFolderIds = (folderId: string): string[] => {
+    const children = folders.filter(f => f.parentId === folderId);
+    return [folderId, ...children.flatMap(c => getDescendantFolderIds(c.id))];
+  };
+  const activeFolderIds = activeFolderId ? new Set(getDescendantFolderIds(activeFolderId)) : null;
+  const activeTemplates = filtered.filter((tpl) => (activeFolderIds ? activeFolderIds.has(tpl.folderId ?? '') : true));
   const halfW = edit.sourceRect ? Math.round(edit.sourceRect.width / 2) : 0;
   const halfH = edit.sourceRect ? Math.round(edit.sourceRect.height / 2) : 0;
   const canSave = Boolean(edit.name.trim() && edit.sourceRect) && !apiUnavailable;
@@ -467,49 +521,86 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                   </button>
                 )}
                 <div className="yolo-dataset__items">
-                  {folders.map((folder) => (
-                    <div key={folder.id} className={`yolo-dataset__item delete-hover ${activeFolderId === folder.id ? 'active' : ''} ${confirmDeleteFolderId === folder.id ? 'confirming' : ''}`} onClick={() => setActiveFolderId(folder.id)}>
-                      <div className="yolo-dataset__item-main">
-                        <div className="yolo-dataset__item-head">
-                          {renameFolderId === folder.id ? (
-                            <input
-                              className="yolo-dataset__rename-input"
-                              autoFocus
-                              value={renameFolderName}
-                              onChange={(e) => setRenameFolderName(e.target.value)}
-                              onBlur={() => void commitRenameFolder()}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') void commitRenameFolder();
-                                if (e.key === 'Escape') setRenameFolderId(null);
-                              }}
-                            />
-                          ) : (
-                            <span className="yolo-dataset__item-name">{folder.name}</span>
-                          )}
-                          <span className="yolo-dataset__item-meta">{templates.filter((t) => t.folderId === folder.id).length} 个</span>
+                  {(() => {
+                    const tree = buildFolderTree(folders);
+                    // Auto-expand root folders on first render
+                    if (expandedFolders.size === 0 && tree.length > 0) {
+                      const rootIds = new Set(tree.map(f => f.id));
+                      setExpandedFolders(rootIds);
+                    }
+                    const flat = flattenTree(tree, expandedFolders);
+                    if (flat.length === 0) return <div className="yolo-annotate__empty-hint">还没有文件夹。文件夹用于把同类模板归到一起。</div>;
+                    return flat.map((folder) => {
+                      const hasChildren = folder.children.length > 0;
+                      const isExpanded = expandedFolders.has(folder.id);
+                      const templateCount = countTemplatesInFolder(folder.id, folders, templates);
+                      return (
+                        <div
+                          key={folder.id}
+                          className={`yolo-dataset__item delete-hover ${activeFolderId === folder.id ? 'active' : ''} ${confirmDeleteFolderId === folder.id ? 'confirming' : ''}`}
+                          style={{ paddingLeft: `${12 + folder.depth * 28}px`, position: 'relative' }}
+                          onClick={() => {
+                            setActiveFolderId(folder.id);
+                            if (hasChildren) {
+                              setExpandedFolders(prev => {
+                                const next = new Set(prev);
+                                if (next.has(folder.id)) next.delete(folder.id);
+                                else next.add(folder.id);
+                                return next;
+                              });
+                            }
+                          }}
+                        >
+                          <div className="yolo-dataset__item-main">
+                            <div className="yolo-dataset__item-head">
+                              <span
+                                className="yolo-dataset__folder-toggle"
+                                style={{ cursor: 'pointer', marginRight: '4px', fontSize: '24px', opacity: hasChildren ? 0.9 : 0.4, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '16px', height: '24px', userSelect: 'none', flexShrink: 0 }}
+                              >
+                                {hasChildren ? (isExpanded ? '▾' : '▸') : '•'}
+                              </span>
+                              {renameFolderId === folder.id ? (
+                                <input
+                                  className="yolo-dataset__rename-input"
+                                  autoFocus
+                                  value={renameFolderName}
+                                  onChange={(e) => setRenameFolderName(e.target.value)}
+                                  onBlur={() => void commitRenameFolder()}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') void commitRenameFolder();
+                                    if (e.key === 'Escape') setRenameFolderId(null);
+                                  }}
+                                />
+                              ) : (
+                                <span className="yolo-dataset__item-name">
+                                  {folder.name}
+                                </span>
+                              )}
+                              <span className="yolo-dataset__item-meta">{templateCount} 个</span>
+                            </div>
+                            <div className="yolo-dataset__item-actions delete-hover" >
+                              {renameFolderId === folder.id ? (
+                                <>
+                                  <button className="delete-confirm__ok" onClick={() => void commitRenameFolder()}>确定</button>
+                                  <button className="delete-confirm__cancel" onClick={() => setRenameFolderId(null)}>取消</button>
+                                </>
+                              ) : confirmDeleteFolderId === folder.id ? (
+                                <>
+                                  <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
+                                  <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
+                                </>
+                              ) : (
+                                <>
+                                  <button className="yolo-dataset__rename-btn" onClick={(e) => { e.stopPropagation(); startRenameFolder(folder); }}>重命名</button>
+                                  <button className="delete-trigger" onClick={(e) => { e.stopPropagation(); setConfirmDeleteFolderId(folder.id); }} title="删除文件夹（其中的模板移到未归类）">删除</button>
+                                </>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                        <div className="yolo-dataset__item-actions delete-hover" onClick={(e) => e.stopPropagation()}>
-                          {renameFolderId === folder.id ? (
-                            <>
-                              <button className="delete-confirm__ok" onClick={() => void commitRenameFolder()}>确定</button>
-                              <button className="delete-confirm__cancel" onClick={() => setRenameFolderId(null)}>取消</button>
-                            </>
-                          ) : confirmDeleteFolderId === folder.id ? (
-                            <>
-                              <button className="delete-confirm__ok" onClick={() => void deleteFolder(folder.id)}>确定</button>
-                              <button className="delete-confirm__cancel" onClick={() => setConfirmDeleteFolderId(null)}>取消</button>
-                            </>
-                          ) : (
-                            <>
-                              <button className="yolo-dataset__rename-btn" onClick={(e) => { e.stopPropagation(); startRenameFolder(folder); }}>重命名</button>
-                              <button className="delete-trigger" onClick={(e) => { e.stopPropagation(); setConfirmDeleteFolderId(folder.id); }} title="删除文件夹（其中的模板移到未归类）">删除</button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                  {folders.length === 0 && <div className="yolo-annotate__empty-hint">还没有文件夹。文件夹用于把同类模板归到一起。</div>}
+                      );
+                    });
+                  })()}
                 </div>
               </aside>
 

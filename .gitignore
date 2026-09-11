@@ -4,3 +4,16 @@ dist/
 .DS_Store
 .npm-cache/
 *.tsbuildinfo
+
+# 大型模型文件
+*.onnx
+
+# 逆向工程资料
+NBA2K26_逆向/
+NBA2K26_逆向分析.md
+
+# 备份文件
+*.bak
+
+# 二进制文件目录
+packages/engine/bin/

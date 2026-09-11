@@ -431,6 +431,9 @@ function ModelsTab({ models, onChanged, apiAvailable }: ModelsTabProps) {
   const [selectedId, setSelectedId] = useState<string | null>(models[0]?.id ?? null);
   const [confusionMatrix, setConfusionMatrix] = useState<string | null>(null);
   const [prCurve, setPrCurve] = useState<string | null>(null);
+  const [showImport, setShowImport] = useState(false);
+  const [importFile, setImportFile] = useState<string | null>(null);
+  const [importName, setImportName] = useState("");
 
   const selected = models.find((m) => m.id === selectedId) ?? models[0] ?? null;
 
@@ -506,6 +509,40 @@ function ModelsTab({ models, onChanged, apiAvailable }: ModelsTabProps) {
     }
   };
 
+  const handleImport = async () => {
+    if (!window.yoloAPI || !importFile || !importName.trim()) return;
+    setBusy(true);
+    try {
+      await window.yoloAPI.importModel({
+        file: importFile,
+        name: importName.trim(),
+      });
+      setShowImport(false);
+      setImportFile(null);
+      setImportName("");
+      onChanged();
+    } catch (err) {
+      console.error("导入模型失败:", err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleFileSelect = async () => {
+    if (!window.yoloAPI) return;
+    try {
+      const filePath = await window.yoloAPI.pickModelFile();
+      if (filePath) {
+        setImportFile(filePath);
+        const fileName = filePath.split("/").pop() ?? "";
+        const nameWithoutExt = fileName.replace(/\.[^.]+$/, "");
+        if (!importName) setImportName(nameWithoutExt);
+      }
+    } catch (err) {
+      console.error("选择文件失败:", err);
+    }
+  };
+
   if (models.length === 0) {
     return (
       <div className="yolo-models yolo-models--empty">
@@ -513,23 +550,76 @@ function ModelsTab({ models, onChanged, apiAvailable }: ModelsTabProps) {
           <div className="yolo-models__empty-icon">◈</div>
           <p>还没有训练好的模型</p>
           <p className="yolo-models__empty-sub">去「训练」页配置参数并开始训练，完成后模型会出现在这里</p>
+          <button className="yolo-models__import-btn" onClick={() => { console.log("点击了导入按钮"); setShowImport(true); }} disabled={busy}>
+            导入模型
+          </button>
         </div>
+        
+        {/* 导入模型对话框 */}
+        {showImport && (
+          <div className="yolo-model-import-overlay" onClick={() => setShowImport(false)}>
+            <div className="yolo-model-import" onClick={(e) => e.stopPropagation()}>
+              <div className="yolo-model-import__head">
+                <span>导入模型</span>
+                <button className="yolo-model-import__close" onClick={() => setShowImport(false)}>×</button>
+              </div>
+              <div className="yolo-model-import__body">
+                <label className="yolo-model-import__field">
+                  <span>模型文件 *</span>
+                  <div className="yolo-model-import__file">
+                    <input
+                      type="text"
+                      value={importFile ?? ""}
+                      readOnly
+                      placeholder="点击选择模型文件"
+                      onClick={handleFileSelect}
+                    />
+                    <button onClick={handleFileSelect}>选择文件</button>
+                  </div>
+                  <span className="yolo-model-import__hint">支持 .onnx、.pt、.pth、.weights 格式</span>
+                </label>
+                <label className="yolo-model-import__field">
+                  <span>模型名称 *</span>
+                  <input
+                    type="text"
+                    value={importName}
+                    onChange={(e) => setImportName(e.target.value)}
+                    placeholder="如：my_custom_model"
+                  />
+                </label>
+              </div>
+              <div className="yolo-model-import__foot">
+                <button className="yolo-model-import__cancel" onClick={() => setShowImport(false)}>取消</button>
+                <button
+                  className="yolo-model-import__submit"
+                  onClick={handleImport}
+                  disabled={!importFile || !importName.trim() || busy}
+                >
+                  {busy ? "导入中..." : "导入"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="yolo-models">
-      <div className="yolo-models__head">
-        <span className="yolo-panel-title">
-          <span>已训练模型</span>
-          <span className="yolo-panel-title__sub">{models.length} 个</span>
-        </span>
-        <span className="yolo-models__hint">设为「使用中」的模型可用于识别节点中的 YOLO 策略，也可直接一键应用到当前识别节点</span>
-      </div>
-      <div className="yolo-models__grid">
-        {models.map((m) => (
-          <div key={m.id} className={`yolo-model-card ${m.isActive ? 'active' : ''} ${selectedId === m.id ? 'selected' : ''}`} onClick={() => setSelectedId(m.id)}>
+      <div className="yolo-models__list">
+        <div className="yolo-models__head">
+          <span className="yolo-panel-title">
+            <span>已训练模型</span>
+            <span className="yolo-panel-title__sub">{models.length} 个</span>
+          </span>
+          <button className="yolo-models__import-btn" onClick={() => setShowImport(true)} disabled={busy}>
+            导入模型
+          </button>
+        </div>
+        <div className="yolo-models__grid">
+          {models.map((m) => (
+            <div key={m.id} className={`yolo-model-card ${m.isActive ? 'active' : ''} ${selectedId === m.id ? 'selected' : ''}`} onClick={() => setSelectedId(m.id)}>
             <div className="yolo-model-card__head">
               <span className="yolo-model-card__name">{m.name}</span>
               {m.isActive && <span className="yolo-model-card__active">使用中</span>}
@@ -582,35 +672,106 @@ function ModelsTab({ models, onChanged, apiAvailable }: ModelsTabProps) {
           </div>
         ))}
       </div>
+      </div>
 
       {selected && (
         <div className="yolo-model-detail">
           <div className="yolo-model-detail__head">
-            <span className="yolo-panel-title">
-              <span>模型详情</span>
-              <span className="yolo-panel-title__sub">{selected.name}</span>
-            </span>
-            <div className="yolo-model-detail__actions">
-              <button onClick={() => void exportModel(selected.id, 'onnx')} disabled={!apiAvailable || busy}>导出 ONNX</button>
-              <button onClick={() => void exportModel(selected.id, 'tflite')} disabled={!apiAvailable || busy}>导出 TFLite</button>
-              <button onClick={() => void exportModel(selected.id, 'openvino')} disabled={!apiAvailable || busy}>导出 OpenVINO</button>
+            <div className="yolo-model-detail__title-row">
+              <span className="yolo-model-detail__title">模型详情</span>
+              <span className="yolo-model-detail__name">{selected.name}</span>
             </div>
           </div>
+          <div className="yolo-model-detail__actions">
+            <button onClick={() => void exportModel(selected.id, 'onnx')} disabled={!apiAvailable || busy}>导出 ONNX</button>
+            <button onClick={() => void exportModel(selected.id, 'tflite')} disabled={!apiAvailable || busy}>导出 TFLite</button>
+            <button onClick={() => void exportModel(selected.id, 'openvino')} disabled={!apiAvailable || busy}>导出 OpenVINO</button>
+          </div>
           <div className="yolo-model-detail__content">
-            <div className="yolo-model-detail__meta">
-              <div>路径：<code>{selected.path ?? '—'}</code></div>
-              <div>当前节点接入：点击「应用到识别节点」即可把该模型路径写入识别节点 YOLO 策略。</div>
-              <div>训练产物：{selected.artifacts ? '已生成混淆矩阵 / PR 曲线' : '暂无产物图，可能是训练版本较旧或未完成验证阶段'}</div>
+            <div className="yolo-model-detail__section">
+              <div className="yolo-model-detail__section-title">基本信息</div>
+              <div className="yolo-model-detail__meta">
+                <div className="yolo-model-detail__meta-item">
+                  <span className="yolo-model-detail__meta-label">文件路径</span>
+                  <span className="yolo-model-detail__meta-value">{selected.path ?? '—'}</span>
+                </div>
+                <div className="yolo-model-detail__meta-item">
+                  <span className="yolo-model-detail__meta-label">基座模型</span>
+                  <span className="yolo-model-detail__meta-value">{selected.baseModel ?? '检测不到'}</span>
+                </div>
+                <div className="yolo-model-detail__meta-item">
+                  <span className="yolo-model-detail__meta-label">图像大小</span>
+                  <span className="yolo-model-detail__meta-value">{selected.imageSize ? `${selected.imageSize}px` : '检测不到'}</span>
+                </div>
+                <div className="yolo-model-detail__meta-item">
+                  <span className="yolo-model-detail__meta-label">类别数</span>
+                  <span className="yolo-model-detail__meta-value">{selected.numClasses ?? '检测不到'}</span>
+                </div>
+                <div className="yolo-model-detail__meta-item">
+                  <span className="yolo-model-detail__meta-label">文件大小</span>
+                  <span className="yolo-model-detail__meta-value">{formatBytes(selected.sizeBytes)}</span>
+                </div>
+              </div>
             </div>
-            <div className="yolo-model-detail__plots">
-              <div className="yolo-model-detail__plot">
-                <span>混淆矩阵</span>
-                {confusionMatrix ? <img src={confusionMatrix} alt="混淆矩阵" /> : <div className="yolo-model-detail__plot-empty">暂无</div>}
+            <div className="yolo-model-detail__section">
+              <div className="yolo-model-detail__section-title">训练产物</div>
+              <div className="yolo-model-detail__plots">
+                <div className="yolo-model-detail__plot">
+                  <span>混淆矩阵</span>
+                  {confusionMatrix ? <img src={confusionMatrix} alt="混淆矩阵" /> : <div className="yolo-model-detail__plot-empty">暂无</div>}
+                </div>
+                <div className="yolo-model-detail__plot">
+                  <span>PR 曲线</span>
+                  {prCurve ? <img src={prCurve} alt="PR曲线" /> : <div className="yolo-model-detail__plot-empty">暂无</div>}
+                </div>
               </div>
-              <div className="yolo-model-detail__plot">
-                <span>PR 曲线</span>
-                {prCurve ? <img src={prCurve} alt="PR曲线" /> : <div className="yolo-model-detail__plot-empty">暂无</div>}
-              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 导入模型对话框 */}
+      {showImport && (
+        <div className="yolo-model-import-overlay" onClick={() => setShowImport(false)}>
+          <div className="yolo-model-import" onClick={(e) => e.stopPropagation()}>
+            <div className="yolo-model-import__head">
+              <span>导入模型</span>
+              <button className="yolo-model-import__close" onClick={() => setShowImport(false)}>×</button>
+            </div>
+            <div className="yolo-model-import__body">
+              <label className="yolo-model-import__field">
+                <span>模型文件 *</span>
+                <div className="yolo-model-import__file">
+                  <input
+                    type="text"
+                    value={importFile ?? ""}
+                    readOnly
+                    placeholder="点击选择模型文件"
+                    onClick={handleFileSelect}
+                  />
+                  <button onClick={handleFileSelect}>选择文件</button>
+                </div>
+                <span className="yolo-model-import__hint">支持 .onnx、.pt、.pth、.weights 格式</span>
+              </label>
+              <label className="yolo-model-import__field">
+                <span>模型名称 *</span>
+                <input
+                  type="text"
+                  value={importName}
+                  onChange={(e) => setImportName(e.target.value)}
+                  placeholder="如：my_custom_model"
+                />
+              </label>
+            </div>
+            <div className="yolo-model-import__foot">
+              <button className="yolo-model-import__cancel" onClick={() => setShowImport(false)}>取消</button>
+              <button
+                className="yolo-model-import__submit"
+                onClick={handleImport}
+                disabled={!importFile || !importName.trim() || busy}
+              >
+                {busy ? "导入中..." : "导入"}
+              </button>
             </div>
           </div>
         </div>

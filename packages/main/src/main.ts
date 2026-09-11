@@ -1,5 +1,5 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell } from 'electron';
-import { join } from 'node:path';
+import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -47,7 +47,7 @@ const createWindow = () => {
     minHeight: 800,
     title: 'NoBoWo',
     webPreferences: {
-      preload: join(__dirname, '../preload/preload.js'),
+      preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -62,7 +62,7 @@ const createWindow = () => {
   } else if (process.env.NODE_ENV === 'development') {
     win.loadURL('http://localhost:5173');
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'));
+    win.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
   // 键盘录制兜底通道：渲染层 keydown 收不到时（焦点/系统按键处理等原因），
@@ -100,11 +100,11 @@ const normalizeTemplate = (tpl: TemplateDefinition): TemplateDefinition => ({
   matchHotspot: tpl.matchHotspot ?? tpl.sourceRect,
 });
 
-const templatesDir = () => join(app.getPath('userData'), 'templates');
-const indexFile = () => join(templatesDir(), 'index.json');
-const templateImagesDir = () => join(templatesDir(), 'images');
-const templateSourcesDir = () => join(templatesDir(), 'sources');
-const cloudApiProfilesFile = () => join(app.getPath('userData'), 'api-profiles.json');
+const templatesDir = () => path.join(app.getPath('userData'), 'templates');
+const indexFile = () => path.join(templatesDir(), 'index.json');
+const templateImagesDir = () => path.join(templatesDir(), 'images');
+const templateSourcesDir = () => path.join(templatesDir(), 'sources');
+const cloudApiProfilesFile = () => path.join(app.getPath('userData'), 'api-profiles.json');
 
 async function ensureTemplatesDir() {
   await mkdir(templatesDir(), { recursive: true });
@@ -184,7 +184,7 @@ function dataUrlToFileData(dataUrl: string): { buffer: Buffer; ext: string } {
 }
 
 async function readImageAsDataUrl(fileName: string, kind: 'template' | 'source' = 'template'): Promise<string> {
-  const buffer = await readFile(kind === 'source' ? join(templateSourcesDir(), fileName) : join(templateImagesDir(), fileName));
+  const buffer = await readFile(kind === 'source' ? path.join(templateSourcesDir(), fileName) : path.join(templateImagesDir(), fileName));
   const ext = fileName.split('.').pop() ?? 'png';
   const mime = ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png';
   return `data:${mime};base64,${buffer.toString('base64')}`;
@@ -397,7 +397,7 @@ function registerCloudApiIpc() {
 
 // ===== 串流设备管理 =====
 
-const streamSourcesFile = () => join(app.getPath('userData'), 'stream-sources.json');
+const streamSourcesFile = () => path.join(app.getPath('userData'), 'stream-sources.json');
 
 type StreamSourceIndex = {
   sources: StreamSourceProfile[];
@@ -721,7 +721,7 @@ function registerOcrIpc() {
     default: 'auto',
   }));
 
-  const ocrDataDir = () => join(app.getPath('userData'), 'ocr');
+  const ocrDataDir = () => path.join(app.getPath('userData'), 'ocr');
   type OcrProgressLevel = 'info' | 'warn' | 'error' | 'debug';
   type OcrProgressFn = (level: OcrProgressLevel, message: string, percent?: number) => void;
 
@@ -751,8 +751,8 @@ function registerOcrIpc() {
     let allGzip = true;
     for (const lang of langs) {
       const label = OCR_LANG_META[lang]?.label ?? lang;
-      const gzPath = join(dir, `${lang}.traineddata.gz`);
-      const rawPath = join(dir, `${lang}.traineddata`);
+      const gzPath = path.join(dir, `${lang}.traineddata.gz`);
+      const rawPath = path.join(dir, `${lang}.traineddata`);
       let state: 'gz' | 'raw' | null = null;
       try {
         await stat(gzPath);
@@ -831,9 +831,9 @@ function registerOcrIpc() {
   /** 解析 macOS Vision OCR 脚本路径（dev / 打包） */
   function resolveVisionOcrScript(): string | null {
     const candidates = [
-      join(app.getAppPath(), 'packages', 'engine', 'macos', 'vision_ocr.js'),
-      join(process.resourcesPath, 'engine', 'macos', 'vision_ocr.js'),
-      join(app.getAppPath(), 'engine', 'macos', 'vision_ocr.js'),
+      path.join(app.getAppPath(), 'packages', 'engine', 'macos', 'vision_ocr.js'),
+      path.join(process.resourcesPath, 'engine', 'macos', 'vision_ocr.js'),
+      path.join(app.getAppPath(), 'engine', 'macos', 'vision_ocr.js'),
     ];
     return candidates.find((path) => existsSync(path)) ?? null;
   }
@@ -851,7 +851,7 @@ function registerOcrIpc() {
       }
       let stdout = '';
       let stderr = '';
-      const child = spawn('osascript', ['-l', 'JavaScript', scriptPath, imagePath, languages.join(',')]);
+      const child = spawn('osascript', ['-l', 'JavaScript', scriptPath, imagePath, languages.path.join(',')]);
       const timer = setTimeout(() => {
         try {
           child.kill();
@@ -886,14 +886,14 @@ function registerOcrIpc() {
     const installed: Record<string, boolean> = {};
     for (const lang of Object.keys(OCR_LANG_META)) {
       try {
-        await stat(join(dir, `${lang}.traineddata.gz`));
+        await stat(path.join(dir, `${lang}.traineddata.gz`));
         installed[lang] = true;
         continue;
       } catch {
         // continue
       }
       try {
-        await stat(join(dir, `${lang}.traineddata`));
+        await stat(path.join(dir, `${lang}.traineddata`));
         installed[lang] = true;
         continue;
       } catch {
@@ -956,7 +956,7 @@ function registerOcrIpc() {
               engine: payload.engine,
               width: visionResult.width,
               height: visionResult.height,
-              text: visionResult.blocks.map((block) => block.text).join('\n'),
+              text: visionResult.blocks.map((block) => block.text).path.join('\n'),
               matches: visionResult.blocks.map((block, index) => ({
                 id: `vision-${index}-${block.box.x}-${block.box.y}`,
                 text: block.text,
@@ -1121,13 +1121,13 @@ function registerTemplateIpc() {
       const image = dataUrlToFileData(payload.imageDataUrl);
       const imageFile = `${id}.${image.ext}`;
       await ensureTemplatesDir();
-      await writeFile(join(templateImagesDir(), imageFile), image.buffer);
+      await writeFile(path.join(templateImagesDir(), imageFile), image.buffer);
 
       let sourceFile: string | undefined;
       if (payload.sourceDataUrl) {
         const source = dataUrlToFileData(payload.sourceDataUrl);
         sourceFile = `${id}.src.${source.ext}`;
-        await writeFile(join(templateSourcesDir(), sourceFile), source.buffer);
+        await writeFile(path.join(templateSourcesDir(), sourceFile), source.buffer);
       }
 
       const definition: TemplateDefinition = {
@@ -1167,16 +1167,16 @@ function registerTemplateIpc() {
       if (patch.imageDataUrl) {
         const image = dataUrlToFileData(patch.imageDataUrl);
         await ensureTemplatesDir();
-        await writeFile(join(templateImagesDir(), existing.imageFile), image.buffer);
+        await writeFile(path.join(templateImagesDir(), existing.imageFile), image.buffer);
       }
       if (patch.sourceDataUrl) {
         const source = dataUrlToFileData(patch.sourceDataUrl);
         const sourceFile = `${id}.src.${source.ext}`;
         await ensureTemplatesDir();
         if (existing.sourceFile && existing.sourceFile !== sourceFile) {
-          await unlink(join(templateSourcesDir(), existing.sourceFile)).catch(() => {});
+          await unlink(path.join(templateSourcesDir(), existing.sourceFile)).catch(() => {});
         }
-        await writeFile(join(templateSourcesDir(), sourceFile), source.buffer);
+        await writeFile(path.join(templateSourcesDir(), sourceFile), source.buffer);
         existing.sourceFile = sourceFile;
       }
 
@@ -1198,9 +1198,9 @@ function registerTemplateIpc() {
     const index = await loadIndex();
     const found = index.templates.find((t) => t.id === id);
     if (!found) return;
-    await unlink(join(templateImagesDir(), found.imageFile)).catch(() => {});
+    await unlink(path.join(templateImagesDir(), found.imageFile)).catch(() => {});
     if (found.sourceFile) {
-      await unlink(join(templateSourcesDir(), found.sourceFile)).catch(() => {});
+      await unlink(path.join(templateSourcesDir(), found.sourceFile)).catch(() => {});
     }
     await saveIndex({ folders: index.folders, templates: index.templates.filter((t) => t.id !== id) });
   });
@@ -1232,9 +1232,9 @@ function registerTemplateIpc() {
     const idSet = new Set(ids);
     for (const tpl of index.templates) {
       if (!idSet.has(tpl.id)) continue;
-      await unlink(join(templateImagesDir(), tpl.imageFile)).catch(() => {});
+      await unlink(path.join(templateImagesDir(), tpl.imageFile)).catch(() => {});
       if (tpl.sourceFile) {
-        await unlink(join(templateSourcesDir(), tpl.sourceFile)).catch(() => {});
+        await unlink(path.join(templateSourcesDir(), tpl.sourceFile)).catch(() => {});
       }
     }
     const before = index.templates.length;
@@ -1256,28 +1256,28 @@ function registerTemplateIpc() {
     });
     if (result.canceled || result.filePaths.length === 0) return { path: null, count: 0 };
     const baseDir = result.filePaths[0];
-    const exportRoot = join(baseDir, `nobowo-templates-${new Date().toISOString().slice(0, 10)}`);
-    await mkdir(join(exportRoot, 'images'), { recursive: true });
-    await mkdir(join(exportRoot, 'sources'), { recursive: true });
+    const exportRoot = path.join(baseDir, `nobowo-templates-${new Date().toISOString().slice(0, 10)}`);
+    await mkdir(path.join(exportRoot, 'images'), { recursive: true });
+    await mkdir(path.join(exportRoot, 'sources'), { recursive: true });
 
     const manifest: TemplateDefinition[] = [];
     for (const tpl of picked) {
       const entry: TemplateDefinition = { ...tpl };
       try {
-        await copyFile(join(templateImagesDir(), tpl.imageFile), join(exportRoot, 'images', tpl.imageFile));
+        await copyFile(path.join(templateImagesDir(), tpl.imageFile), path.join(exportRoot, 'images', tpl.imageFile));
       } catch {
         entry.imageFile = '';
       }
       if (tpl.sourceFile) {
         try {
-          await copyFile(join(templateSourcesDir(), tpl.sourceFile), join(exportRoot, 'sources', tpl.sourceFile));
+          await copyFile(path.join(templateSourcesDir(), tpl.sourceFile), path.join(exportRoot, 'sources', tpl.sourceFile));
         } catch {
           entry.sourceFile = undefined;
         }
       }
       manifest.push(entry);
     }
-    await writeFile(join(exportRoot, 'templates.json'), JSON.stringify({ version: 1, folders: index.folders, templates: manifest }, null, 2), 'utf8');
+    await writeFile(path.join(exportRoot, 'templates.json'), JSON.stringify({ version: 1, folders: index.folders, templates: manifest }, null, 2), 'utf8');
     await shell.openPath(exportRoot);
     return { path: exportRoot, count: manifest.length };
   });
@@ -1894,13 +1894,13 @@ if __name__ == "__main__":
     sys.exit(main())
 `;
 
-const yoloRootDir = () => join(app.getPath('userData'), 'yolo');
-const yoloDatasetsDir = () => join(yoloRootDir(), 'datasets');
-const yoloModelsDir = () => join(yoloRootDir(), 'models');
-const yoloRunsDir = () => join(yoloRootDir(), 'runs');
-const yoloIndexFile = () => join(yoloRootDir(), 'index.json');
-const yoloSettingsFile = () => join(yoloRootDir(), 'settings.json');
-const yoloWeightsDir = () => join(yoloRootDir(), 'weights');
+const yoloRootDir = () => path.join(app.getPath('userData'), 'yolo');
+const yoloDatasetsDir = () => path.join(yoloRootDir(), 'datasets');
+const yoloModelsDir = () => path.join(yoloRootDir(), 'models');
+const yoloRunsDir = () => path.join(yoloRootDir(), 'runs');
+const yoloIndexFile = () => path.join(yoloRootDir(), 'index.json');
+const yoloSettingsFile = () => path.join(yoloRootDir(), 'settings.json');
+const yoloWeightsDir = () => path.join(yoloRootDir(), 'weights');
 
 type YoloSettings = {
   /** YOLOX 源码目录（绝对路径） */
@@ -1938,19 +1938,19 @@ async function resolveYoloxPath(): Promise<string | null> {
   const settings = await loadYoloSettings();
   if (settings.yoloxPath) {
     try {
-      await stat(join(settings.yoloxPath, 'yolox', '__init__.py'));
+      await stat(path.join(settings.yoloxPath, 'yolox', '__init__.py'));
       return settings.yoloxPath;
     } catch {
       // 配置路径失效，回退到内置路径
     }
   }
   const candidates = [
-    join(app.getAppPath(), 'third_party', 'YOLOX'),
-    join(process.resourcesPath, 'third_party', 'YOLOX'),
+    path.join(app.getAppPath(), 'third_party', 'YOLOX'),
+    path.join(process.resourcesPath, 'third_party', 'YOLOX'),
   ];
   for (const p of candidates) {
     try {
-      await stat(join(p, 'yolox', '__init__.py'));
+      await stat(path.join(p, 'yolox', '__init__.py'));
       return p;
     } catch {
       // continue
@@ -1963,7 +1963,7 @@ async function resolveYoloxPath(): Promise<string | null> {
 async function resolvePretrainedWeight(baseModel: string): Promise<string | null> {
   const name = String(baseModel ?? '').replace(/-/g, '_');
   if (!name) return null;
-  const p = join(yoloWeightsDir(), `${name}.pth`);
+  const p = path.join(yoloWeightsDir(), `${name}.pth`);
   try {
     const s = await stat(p);
     return s.size > 0 ? p : null;
@@ -2024,9 +2024,9 @@ async function saveYoloIndex(index: YoloIndexFile) {
   await writeFile(yoloIndexFile(), JSON.stringify(index, null, 2), 'utf8');
 }
 
-const datasetFile = (id: string) => join(yoloDatasetsDir(), id, 'dataset.json');
-const datasetImagesDir = (id: string) => join(yoloDatasetsDir(), id, 'images');
-const datasetExportDir = (id: string) => join(yoloDatasetsDir(), id, 'export');
+const datasetFile = (id: string) => path.join(yoloDatasetsDir(), id, 'dataset.json');
+const datasetImagesDir = (id: string) => path.join(yoloDatasetsDir(), id, 'images');
+const datasetExportDir = (id: string) => path.join(yoloDatasetsDir(), id, 'export');
 
 async function loadDatasetFile(id: string): Promise<YoloDatasetFile> {
   try {
@@ -2046,7 +2046,7 @@ async function loadDatasetFile(id: string): Promise<YoloDatasetFile> {
 }
 
 async function saveDatasetFile(id: string, data: YoloDatasetFile) {
-  await mkdir(join(yoloDatasetsDir(), id), { recursive: true });
+  await mkdir(path.join(yoloDatasetsDir(), id), { recursive: true });
   await writeFile(datasetFile(id), JSON.stringify(data, null, 2), 'utf8');
 }
 
@@ -2064,7 +2064,7 @@ async function readDatasetImage(datasetId: string, imageId: string): Promise<str
   const image = data.images.find((img) => img.id === imageId);
   if (!image) return null;
   try {
-    const buffer = await readFile(join(datasetImagesDir(datasetId), image.file));
+    const buffer = await readFile(path.join(datasetImagesDir(datasetId), image.file));
     const ext = image.file.split('.').pop() ?? 'png';
     const mime = ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png';
     return `data:${mime};base64,${buffer.toString('base64')}`;
@@ -2102,9 +2102,9 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
   if (data.images.length === 0) throw new Error('数据集没有图片，请先上传截图');
 
   const exportDir = datasetExportDir(datasetId);
-  const imagesAll = join(exportDir, 'images');
-  const labelsAll = join(exportDir, 'labels');
-  const splitDir = join(exportDir, 'split');
+  const imagesAll = path.join(exportDir, 'images');
+  const labelsAll = path.join(exportDir, 'labels');
+  const splitDir = path.join(exportDir, 'split');
   await rm(exportDir, { recursive: true, force: true });
   await mkdir(imagesAll, { recursive: true });
   await mkdir(labelsAll, { recursive: true });
@@ -2112,8 +2112,8 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
   const classIndex = new Map(data.classes.map((c, i) => [c.id, i]));
 
   for (const image of data.images) {
-    const src = join(datasetImagesDir(datasetId), image.file);
-    await linkOrCopy(src, join(imagesAll, image.file));
+    const src = path.join(datasetImagesDir(datasetId), image.file);
+    await linkOrCopy(src, path.join(imagesAll, image.file));
     const lines: string[] = [];
     for (const ann of data.annotations[image.id] ?? []) {
       if (!ann.classId) continue;
@@ -2126,7 +2126,7 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
       const h = Math.min(1, Math.max(0, height));
       lines.push(`${ci} ${cx.toFixed(6)} ${cy.toFixed(6)} ${w.toFixed(6)} ${h.toFixed(6)}`);
     }
-    await writeFile(join(labelsAll, `${image.id}.txt`), lines.join('\n'), 'utf8');
+    await writeFile(path.join(labelsAll, `${image.id}.txt`), lines.path.join('\n'), 'utf8');
   }
 
   const ordered = [...data.images].sort((a, b) => a.createdAt - b.createdAt);
@@ -2136,13 +2136,13 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
   const trainSet = new Set(shuffled.slice(0, trainCount).map((img) => img.id));
 
   for (const sub of ['train', 'val']) {
-    await mkdir(join(splitDir, 'images', sub), { recursive: true });
-    await mkdir(join(splitDir, 'labels', sub), { recursive: true });
+    await mkdir(path.join(splitDir, 'images', sub), { recursive: true });
+    await mkdir(path.join(splitDir, 'labels', sub), { recursive: true });
   }
   for (const image of data.images) {
     const sub = trainSet.has(image.id) ? 'train' : 'val';
-    await linkOrCopy(join(imagesAll, image.file), join(splitDir, 'images', sub, image.file));
-    await linkOrCopy(join(labelsAll, `${image.id}.txt`), join(splitDir, 'labels', sub, `${image.id}.txt`));
+    await linkOrCopy(path.join(imagesAll, image.file), path.join(splitDir, 'images', sub, image.file));
+    await linkOrCopy(path.join(labelsAll, `${image.id}.txt`), path.join(splitDir, 'labels', sub, `${image.id}.txt`));
   }
 
   const yaml = [
@@ -2153,10 +2153,10 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
     'names:',
     ...data.classes.map((c, i) => `  ${i}: ${JSON.stringify(c.name)}`),
   ].join('\n');
-  await writeFile(join(exportDir, 'data.yaml'), yaml, 'utf8');
+  await writeFile(path.join(exportDir, 'data.yaml'), yaml, 'utf8');
 
   // ===== COCO JSON（YOLOX 原生训练/评估格式） =====
-  const annotationsDir = join(exportDir, 'annotations');
+  const annotationsDir = path.join(exportDir, 'annotations');
   await mkdir(annotationsDir, { recursive: true });
 
   const writeCocoJson = async (imageIds: Set<string>, fileName: string) => {
@@ -2198,7 +2198,7 @@ async function writeYoloExport(datasetId: string, splitTrain: number, seed: numb
       }
     }
     await writeFile(
-      join(annotationsDir, fileName),
+      path.join(annotationsDir, fileName),
       JSON.stringify({
         images,
         annotations,
@@ -2383,7 +2383,7 @@ function registerYoloIpc() {
       if (!meta) return;
       const index = await loadYoloIndex();
       const id = randomUUID();
-      const dest = join(yoloModelsDir(), `${id}.pth`);
+      const dest = path.join(yoloModelsDir(), `${id}.pth`);
       await mkdir(yoloModelsDir(), { recursive: true });
       await copyFile(ev.modelPath, dest);
       const size = await stat(dest);
@@ -2405,15 +2405,15 @@ function registerYoloIpc() {
       };
       // 复制混淆矩阵 / PR 曲线等训练产物
       if (ev.artifacts) {
-        const artifactDir = join(yoloModelsDir(), id);
+        const artifactDir = path.join(yoloModelsDir(), id);
         await mkdir(artifactDir, { recursive: true });
         const artifacts: YoloModelArtifacts = {};
         if (ev.artifacts.confusionMatrix) {
-          await copyFile(ev.artifacts.confusionMatrix, join(artifactDir, 'confusion_matrix.png')).catch(() => {});
+          await copyFile(ev.artifacts.confusionMatrix, path.join(artifactDir, 'confusion_matrix.png')).catch(() => {});
           artifacts.confusionMatrix = 'confusion_matrix.png';
         }
         if (ev.artifacts.prCurve) {
-          await copyFile(ev.artifacts.prCurve, join(artifactDir, 'pr_curve.png')).catch(() => {});
+          await copyFile(ev.artifacts.prCurve, path.join(artifactDir, 'pr_curve.png')).catch(() => {});
           artifacts.prCurve = 'pr_curve.png';
         }
         if (Object.keys(artifacts).length > 0) model.artifacts = artifacts;
@@ -2477,11 +2477,11 @@ function registerYoloIpc() {
     const index = await loadYoloIndex();
     index.datasets = index.datasets.filter((d) => d.id !== id);
     for (const model of index.models.filter((m) => m.datasetId === id)) {
-      await unlink(join(yoloModelsDir(), model.file)).catch(() => {});
+      await unlink(path.join(yoloModelsDir(), model.file)).catch(() => {});
     }
     index.models = index.models.filter((m) => m.datasetId !== id);
     await saveYoloIndex(index);
-    await rm(join(yoloDatasetsDir(), id), { recursive: true, force: true });
+    await rm(path.join(yoloDatasetsDir(), id), { recursive: true, force: true });
   });
 
   ipcMain.handle(
@@ -2498,7 +2498,7 @@ function registerYoloIpc() {
         const id = randomUUID();
         const { buffer, ext } = dataUrlToFileData(file.dataUrl);
         const stored = `${id}.${ext}`;
-        await writeFile(join(datasetImagesDir(datasetId), stored), buffer);
+        await writeFile(path.join(datasetImagesDir(datasetId), stored), buffer);
         data.images.push({
           id,
           fileName: file.name,
@@ -2527,7 +2527,7 @@ function registerYoloIpc() {
     const data = await loadDatasetFile(datasetId);
     const image = data.images.find((img) => img.id === imageId);
     if (image) {
-      await unlink(join(datasetImagesDir(datasetId), image.file)).catch(() => {});
+      await unlink(path.join(datasetImagesDir(datasetId), image.file)).catch(() => {});
     }
     data.images = data.images.filter((img) => img.id !== imageId);
     delete data.annotations[imageId];
@@ -2597,11 +2597,11 @@ function registerYoloIpc() {
     return [...index.models]
       .map((model) => ({
         ...model,
-        path: join(yoloModelsDir(), model.file),
+        path: path.join(yoloModelsDir(), model.file),
         artifactPaths: model.artifacts
           ? {
-              confusionMatrix: model.artifacts.confusionMatrix ? join(yoloModelsDir(), model.id, model.artifacts.confusionMatrix) : undefined,
-              prCurve: model.artifacts.prCurve ? join(yoloModelsDir(), model.id, model.artifacts.prCurve) : undefined,
+              confusionMatrix: model.artifacts.confusionMatrix ? path.join(yoloModelsDir(), model.id, model.artifacts.confusionMatrix) : undefined,
+              prCurve: model.artifacts.prCurve ? path.join(yoloModelsDir(), model.id, model.artifacts.prCurve) : undefined,
             }
           : null,
       }))
@@ -2617,11 +2617,11 @@ function registerYoloIpc() {
     if (!model) return null;
     return {
       ...model,
-      path: join(yoloModelsDir(), model.file),
+      path: path.join(yoloModelsDir(), model.file),
       artifactPaths: model.artifacts
         ? {
-            confusionMatrix: model.artifacts.confusionMatrix ? join(yoloModelsDir(), model.id, model.artifacts.confusionMatrix) : undefined,
-            prCurve: model.artifacts.prCurve ? join(yoloModelsDir(), model.id, model.artifacts.prCurve) : undefined,
+            confusionMatrix: model.artifacts.confusionMatrix ? path.join(yoloModelsDir(), model.id, model.artifacts.confusionMatrix) : undefined,
+            prCurve: model.artifacts.prCurve ? path.join(yoloModelsDir(), model.id, model.artifacts.prCurve) : undefined,
           }
         : null,
     };
@@ -2633,7 +2633,7 @@ function registerYoloIpc() {
     const relative = model?.artifacts?.[kind];
     if (!relative) return null;
     try {
-      const buffer = await readFile(join(yoloModelsDir(), id, relative));
+      const buffer = await readFile(path.join(yoloModelsDir(), id, relative));
       return `data:image/png;base64,${buffer.toString('base64')}`;
     } catch {
       return null;
@@ -2648,19 +2648,19 @@ function registerYoloIpc() {
     const yoloxPath = await resolveYoloxPath();
     if (!yoloxPath) return { started: false, message: '未找到 YOLOX 源码目录，请先在「环境」页选择 YOLOX 目录' };
     const cmd = pythonCommand();
-    const runDir = join(yoloRunsDir(), `export-${Date.now()}`);
+    const runDir = path.join(yoloRunsDir(), `export-${Date.now()}`);
     await mkdir(runDir, { recursive: true });
-    const enginePath = join(runDir, 'engine.py');
-    const configPath = join(runDir, 'config.json');
+    const enginePath = path.join(runDir, 'engine.py');
+    const configPath = path.join(runDir, 'config.json');
     await writeFile(enginePath, YOLO_ENGINE_SOURCE, 'utf8');
     await writeFile(
       configPath,
       JSON.stringify({
         mode: 'export',
         yoloxPath,
-        modelPath: join(yoloModelsDir(), model.file),
+        modelPath: path.join(yoloModelsDir(), model.file),
         format,
-        imageSize,
+        imageSize: imageSize || null,
         baseModel: model.baseModel,
         numClasses: model.numClasses ?? 0,
       }),
@@ -2691,8 +2691,8 @@ function registerYoloIpc() {
     const index = await loadYoloIndex();
     const model = index.models.find((m) => m.id === id);
     if (!model) return;
-    await unlink(join(yoloModelsDir(), model.file)).catch(() => {});
-    await rm(join(yoloModelsDir(), id), { recursive: true, force: true });
+    await unlink(path.join(yoloModelsDir(), model.file)).catch(() => {});
+    await rm(path.join(yoloModelsDir(), id), { recursive: true, force: true });
     index.models = index.models.filter((m) => m.id !== id);
     await saveYoloIndex(index);
   });
@@ -2703,7 +2703,54 @@ function registerYoloIpc() {
     await saveYoloIndex(index);
   });
 
-  // ===== 环境检测与依赖包 =====
+  ipcMain.handle("yolo:importModel", async (_event, payload: { file: string; name: string; baseModel?: string; imageSize?: number; numClasses?: number }): Promise<YoloModel> => {
+    const { file, name, baseModel, imageSize, numClasses } = payload;
+    
+    // 检查文件是否存在
+    if (!existsSync(file)) {
+      throw new Error("模型文件不存在: " + file);
+    }
+    
+    // 获取文件信息
+    const stats = await stat(file);
+    const fileName = path.basename(file);
+    
+    // 复制模型文件到yolo目录
+    const modelsDir = yoloModelsDir();
+    
+    // 生成唯一ID
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const targetFile = path.join(modelsDir, id + path.extname(fileName));
+    
+    // 复制文件
+    await copyFile(file, targetFile);
+    
+    // 创建模型记录
+    const model: YoloModel = {
+      id,
+      name: name || fileName.replace(/\.[^.]+$/, ""),
+      baseModel: baseModel || null,
+      datasetId: "",
+      datasetName: "导入的模型",
+      epochs: 0,
+      imageSize: imageSize || null,
+      batch: 1,
+      numClasses: numClasses || null,
+      file: path.basename(targetFile),
+      sizeBytes: stats.size,
+      metrics: null,
+      createdAt: Date.now(),
+      isActive: false,
+      path: targetFile,
+    };
+    
+    // 保存到索引
+    const index = await loadYoloIndex();
+    index.models.push(model);
+    await saveYoloIndex(index);
+    
+    return model;
+  });
   ipcMain.handle('yolo:getYoloxPath', async (): Promise<string | null> => resolveYoloxPath());
 
   ipcMain.handle('yolo:setYoloxPath', async (_event, path: string): Promise<void> => {
@@ -2725,6 +2772,23 @@ function registerYoloIpc() {
     return picked;
   });
 
+
+  ipcMain.handle("yolo:pickModelFile", async (): Promise<string | null> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const result = win
+      ? await dialog.showOpenDialog(win, {
+          title: "选择模型文件",
+          properties: ["openFile"],
+          filters: [
+            { name: "模型文件", extensions: ["onnx", "pt", "pth", "weights"] },
+            { name: "所有文件", extensions: ["*"] },
+          ],
+          buttonLabel: "选择此文件",
+        })
+      : null;
+    if (!result || result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
   ipcMain.handle('yolo:getPipMirror', async (): Promise<string | null> => (await loadYoloSettings()).pipMirror);
 
   ipcMain.handle('yolo:setPipMirror', async (_event, url: string | null): Promise<void> => {
@@ -2829,7 +2893,7 @@ function registerYoloIpc() {
     if (!yoloxPath) {
       return { started: false, message: '未找到 YOLOX 源码目录，请先在「环境」页选择 YOLOX 目录' };
     }
-    const reqFile = join(yoloxPath, 'requirements.txt');
+    const reqFile = path.join(yoloxPath, 'requirements.txt');
     try {
       await stat(reqFile);
     } catch {
@@ -2877,7 +2941,7 @@ function registerYoloIpc() {
     const out: { name: string; present: boolean; sizeBytes: number }[] = [];
     for (const name of Object.keys(YOLOX_WEIGHTS)) {
       try {
-        const s = await stat(join(yoloWeightsDir(), `${name}.pth`));
+        const s = await stat(path.join(yoloWeightsDir(), `${name}.pth`));
         out.push({ name, present: s.size > 0, sizeBytes: s.size });
       } catch {
         out.push({ name, present: false, sizeBytes: 0 });
@@ -2893,7 +2957,7 @@ function registerYoloIpc() {
     if (packageChild) return { started: false, message: '已有安装任务在进行中' };
     try {
       await mkdir(yoloWeightsDir(), { recursive: true });
-      const dest = join(yoloWeightsDir(), `${name}.pth`);
+      const dest = path.join(yoloWeightsDir(), `${name}.pth`);
       try {
         const existing = await stat(dest);
         if (existing.size > 0) return { started: false, message: `${name} 预训练权重已存在` };
@@ -2942,13 +3006,13 @@ function registerYoloIpc() {
 
         const jobId = `run-${Date.now()}`;
         const { dataDir, classCount } = await writeYoloExport(datasetId, cfg.splitTrain, cfg.seed);
-        const runDir = join(yoloRunsDir(), jobId);
+        const runDir = path.join(yoloRunsDir(), jobId);
         await rm(runDir, { recursive: true, force: true });
         await mkdir(runDir, { recursive: true });
 
-        const enginePath = join(runDir, 'engine.py');
+        const enginePath = path.join(runDir, 'engine.py');
         await writeFile(enginePath, YOLO_ENGINE_SOURCE, 'utf8');
-        const configPath = join(runDir, 'config.json');
+        const configPath = path.join(runDir, 'config.json');
         await writeFile(
           configPath,
           JSON.stringify(
@@ -3038,12 +3102,23 @@ function registerEngineIpc() {
         yolox: typeof env.yolox === 'string' ? env.yolox : null,
         pyautogui: typeof env.pyautogui === 'string' ? env.pyautogui : null,
         paddleocr: typeof env.paddleocr === 'string' ? env.paddleocr : null,
+        chiakiPath: typeof env.chiakiPath === 'string' ? env.chiakiPath : null,
+        sharedMemoryAvailable: Boolean(env.sharedMemoryAvailable),
         cuda: Boolean(env.cuda),
         mps: Boolean(env.mps),
         device: typeof env.device === 'string' ? env.device : 'none',
       };
     }
-    return { cv2: null, torch: null, yolox: null, pyautogui: null, paddleocr: null, cuda: false, mps: false, device: 'none' };
+    return { cv2: null, torch: null, yolox: null, pyautogui: null, paddleocr: null, chiakiPath: null, sharedMemoryAvailable: false, cuda: false, mps: false, device: 'none' };
+  });
+
+  ipcMain.handle('engine:installChiaki', async (_event, platform: string): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const result = await runVisionEngine('install_chiaki', { platform: platform || 'mac' }, 300000);
+      return { ok: result.ok, message: result.message ?? (result.ok ? '安装成功' : '安装失败') };
+    } catch (e) {
+      return { ok: false, message: `安装失败: ${String(e)}` };
+    }
   });
 
   ipcMain.handle(
@@ -3057,7 +3132,7 @@ function registerEngineIpc() {
         ? index.templates.find((item) => item.id === payload.templateId)
         : null;
       const templatePath = template
-        ? join(templateImagesDir(), template.imageFile)
+        ? path.join(templateImagesDir(), template.imageFile)
         : (payload.templatePath ?? null);
       if (!templatePath) {
         return { ok: false, message: '未选择匹配模板，请先在策略中选定模板' };
@@ -3088,7 +3163,7 @@ function registerEngineIpc() {
     ): Promise<EngineRunResult> => {
       const index = await loadYoloIndex();
       const model = payload.modelId ? index.models.find((item) => item.id === payload.modelId) : null;
-      const modelPath = model ? join(yoloModelsDir(), model.file) : (payload.modelPath ?? null);
+      const modelPath = model ? path.join(yoloModelsDir(), model.file) : (payload.modelPath ?? null);
       if (!modelPath) {
         return { ok: false, message: '未选择 YOLO 模型，请先在策略中选定模型' };
       }
@@ -3132,7 +3207,7 @@ function loadRendererWindow(win: BrowserWindow, hash = '') {
   } else if (process.env.NODE_ENV === 'development') {
     void win.loadURL(`http://localhost:5173${hash}`);
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined);
+    void win.loadFile(path.join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined);
   }
 }
 
@@ -3248,7 +3323,7 @@ function openControlWindow() {
     skipTaskbar: false,
     title: 'NoBoWo 运行控制',
     webPreferences: {
-      preload: join(__dirname, '../preload/preload.js'),
+      preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },

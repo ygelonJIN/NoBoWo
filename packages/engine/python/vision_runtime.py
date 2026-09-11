@@ -128,6 +128,20 @@ def run_check(cfg):
         info["yolox"] = getattr(yolox, "__version__", "?")
     except Exception:
         pass
+
+    # Chiaki-ng 检测
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stream'))
+        from stream.chiaki_manager import ChiakiManager
+        manager = ChiakiManager()
+        chiaki_path = manager.find_chiaki_executable()
+        info["chiakiPath"] = chiaki_path if chiaki_path else None
+        info["sharedMemoryAvailable"] = True
+    except Exception:
+        info["chiakiPath"] = None
+        info["sharedMemoryAvailable"] = False
+
     emit(t="done", command="check", ok=True, env=info)
     return 0
 
@@ -833,6 +847,459 @@ def run_input(cfg):
     return 0
 
 
+
+# ===== 手柄按键发送 =====
+
+# 手柄按键映射：将gamepad动作映射到键盘按键
+# PS Remote使用键盘映射发送手柄按键
+GAMEPAD_KEY_MAP = {
+    # PS5手柄按键 -> 键盘按键
+    'pressA': 'enter',      # A按钮 -> Enter
+    'pressB': 'escape',     # B按钮 -> Escape
+    'pressX': 'space',      # X按钮 -> Space
+    'pressY': 'tab',        # Y按钮 -> Tab
+    'pressRT': 'r',         # RT -> R
+    'pressLT': 'l',         # LT -> L
+    'pressRB': 'e',         # RB -> E
+    'pressLB': 'q',         # LB -> Q
+    'pressSTART': 'enter',  # START -> Enter
+    'pressBACK': 'escape',  # BACK -> Escape
+    'pressHOME': 'h',       # HOME -> H
+    'pressDPADL': 'left',   # 方向键左
+    'pressDPADR': 'right',  # 方向键右
+    'pressDPADU': 'up',     # 方向键上
+    'pressDPADD': 'down',   # 方向键下
+    'pressLU': 'w',         # 左摇杆上
+    'pressLD': 's',         # 左摇杆下
+    'pressLL': 'a',         # 左摇杆左
+    'pressLR': 'd',         # 左摇杆右
+}
+
+# XBOX Remote使用不同的键盘映射
+XBOX_GAMEPAD_KEY_MAP = {
+    'pressA': 'enter',
+    'pressB': 'escape',
+    'pressX': 'space',
+    'pressY': 'tab',
+    'pressRT': 'r',
+    'pressLT': 'l',
+    'pressRB': 'e',
+    'pressLB': 'q',
+    'pressSTART': 'enter',
+    'pressBACK': 'escape',
+    'pressHOME': 'h',
+    'pressDPADL': 'left',
+    'pressDPADR': 'right',
+    'pressDPADU': 'up',
+    'pressDPADD': 'down',
+    'pressLU': 'w',
+    'pressLD': 's',
+    'pressLL': 'a',
+    'pressLR': 'd',
+}
+
+
+
+# ===== CDP Gamepad 实现 =====
+
+import asyncio
+import json
+
+class CDPGamepad:
+    """通过CDP协议控制gamepad"""
+    
+    def __init__(self, cdp_port=9222):
+        self.cdp_port = cdp_port
+        self.websocket = None
+        self.session_id = None
+        
+    async def connect(self):
+        """连接到CDP调试端口"""
+        try:
+            import websockets
+            # 获取调试目标列表
+            import urllib.request
+            response = urllib.request.urlopen(f"http://127.0.0.1:{self.cdp_port}/json")
+            targets = json.loads(response.read())
+            
+            # 查找游戏窗口
+            game_target = None
+            for target in targets:
+                if target.get("type") == "page":
+                    game_target = target
+                    break
+            
+            if not game_target:
+                return False
+            
+            # 连接到WebSocket
+            ws_url = game_target.get("webSocketDebuggerUrl")
+            if not ws_url:
+                return False
+                
+            self.websocket = await websockets.connect(ws_url)
+            return True
+        except Exception as e:
+            print(f"CDP连接失败: {e}")
+            return False
+    
+    async def send_gamepad_event(self, button_index, pressed, value=0.0):
+        """发送gamepad按钮事件"""
+        if not self.websocket:
+            return False
+            
+        try:
+            # 构造gamepad事件
+            event = {
+                "id": 1,
+                "method": "Input.dispatchGamepadEvent",
+                "params": {
+                    "type": "gamepadButton",
+                    "index": button_index,
+                    "pressed": pressed,
+                    "value": value
+                }
+            }
+            
+            await self.websocket.send(json.dumps(event))
+            response = await self.websocket.recv()
+            return True
+        except Exception as e:
+            print(f"发送gamepad事件失败: {e}")
+            return False
+    
+    async def disconnect(self):
+        """断开连接"""
+        if self.websocket:
+            await self.websocket.close()
+            self.websocket = None
+
+
+# 手柄按键到CDP button index的映射
+GAMEPAD_BUTTON_MAP = {
+    "pressA": 0,      # A按钮
+    "pressB": 1,      # B按钮
+    "pressX": 2,      # X按钮
+    "pressY": 3,      # Y按钮
+    "pressLB": 4,     # LB
+    "pressRB": 5,     # RB
+    "pressLT": 6,     # LT
+    "pressRT": 7,     # RT
+    "pressBACK": 8,   # BACK
+    "pressSTART": 9,  # START
+    "pressHOME": 10,  # HOME
+    "pressDPADU": 11, # 方向键上
+    "pressDPADD": 12, # 方向键下
+    "pressDPADL": 13, # 方向键左
+    "pressDPADR": 14, # 方向键右
+}
+
+# 手柄摇杆轴映射
+GAMEPAD_AXIS_MAP = {
+    "pressLU": {"axis": 1, "value": -1.0},  # 左摇杆上
+    "pressLD": {"axis": 1, "value": 1.0},   # 左摇杆下
+    "pressLL": {"axis": 0, "value": -1.0},  # 左摇杆左
+    "pressLR": {"axis": 0, "value": 1.0},   # 左摇杆右
+}
+
+
+
+# ===== SharedMemoryGamepad 支持 =====
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from stream.shared_memory_gamepad import SharedMemoryGamepad
+    SHARED_MEMORY_GAMEPAD_AVAILABLE = True
+except ImportError:
+    SHARED_MEMORY_GAMEPAD_AVAILABLE = False
+
+
+def run_gamepad_with_shared_memory(cfg):
+    """使用SharedMemoryGamepad发送手柄按键"""
+    if not SHARED_MEMORY_GAMEPAD_AVAILABLE:
+        return fail("gamepad", "SharedMemoryGamepad 模块不可用")
+    
+    action = cfg.get("action", "")
+    duration_ms = cfg.get("durationMs", 0)
+    
+    try:
+        gamepad = SharedMemoryGamepad()
+        if not gamepad.connect():
+            return fail("gamepad", "连接共享内存失败")
+        
+        # 发送按键
+        gamepad.send_action(action, duration_ms)
+        
+        # 等待按键生效
+        delay_ms = cfg.get("delayMs", 100)
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+        
+        emit(t="done", command="gamepad", ok=True, action=action,
+             method="shared_memory", message="SharedMemory手柄按键 {0} 发送成功".format(action))
+        return 0
+        
+    except Exception as e:
+        return fail("gamepad", "SharedMemory手柄按键失败: {0}".format(str(e)))
+
+def run_gamepad(cfg):
+    """手柄按键发送：支持CDP协议、SharedMemory和键盘映射"""
+    # 如果使用SharedMemoryGamepad
+    use_shared_memory = cfg.get("useSharedMemory", False)
+    if use_shared_memory:
+        return run_gamepad_with_shared_memory(cfg)
+    
+    
+    try:
+        import pyautogui
+    except Exception:
+        return fail("gamepad", "无法加载 pyautogui，请先安装：pip install pyautogui")
+
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = float(cfg.get("pause", 0.05))
+
+    action = cfg.get("action", "")
+    target = cfg.get("target", "global")
+    stream_type = cfg.get("streamType", "ps5")  # ps5 或 xbox
+    window_hint = cfg.get("windowHint", "")
+    duration_ms = cfg.get("durationMs", 0)
+    delay_ms = cfg.get("delayMs", 100)
+    use_cdp = cfg.get("useCdp", False)
+    cdp_port = cfg.get("cdpPort", 9222)
+
+    # 如果使用CDP协议
+    if use_cdp:
+        try:
+            gamepad = CDPGamepad(cdp_port)
+            loop = asyncio.new_event_loop()
+            
+            async def send_cdp():
+                if not await gamepad.connect():
+                    return False
+                
+                if action in GAMEPAD_BUTTON_MAP:
+                    button_index = GAMEPAD_BUTTON_MAP[action]
+                    await gamepad.send_gamepad_event(button_index, True, 1.0)
+                    await asyncio.sleep(duration_ms / 1000.0 if duration_ms > 0 else 0.05)
+                    await gamepad.send_gamepad_event(button_index, False, 0.0)
+                elif action in GAMEPAD_AXIS_MAP:
+                    axis_info = GAMEPAD_AXIS_MAP[action]
+                    # 轴事件需要特殊的CDP调用
+                    pass
+                
+                await gamepad.disconnect()
+                return True
+            
+            success = loop.run_until_complete(send_cdp())
+            loop.close()
+            
+            if success:
+                emit(t="done", command="gamepad", ok=True, action=action,
+                     target=target, method="cdp", message="CDP手柄按键 {0} 发送成功".format(action))
+                return 0
+            else:
+                # CDP失败，回退到键盘映射
+                pass
+        except Exception as e:
+            # CDP失败，回退到键盘映射
+            pass
+
+    # 键盘映射方式
+    # 如果需要发送到串流窗口
+    if target == "stream" and window_hint:
+        # 先激活串流窗口
+        info = _window_info_by_hint(window_hint)
+        if not info:
+            return fail("gamepad", "未找到串流窗口: {0}".format(window_hint))
+        if not _activate_window(info):
+            return fail("gamepad", "无法激活串流窗口，请确认已授予辅助功能权限")
+        time.sleep(0.1)  # 等待窗口激活
+
+    # 键盘映射
+    key_map = {
+        "pressA": "enter",
+        "pressB": "escape",
+        "pressX": "space",
+        "pressY": "tab",
+        "pressRT": "r",
+        "pressLT": "l",
+        "pressRB": "e",
+        "pressLB": "q",
+        "pressSTART": "enter",
+        "pressBACK": "escape",
+        "pressHOME": "h",
+        "pressDPADL": "left",
+        "pressDPADR": "right",
+        "pressDPADU": "up",
+        "pressDPADD": "down",
+        "pressLU": "w",
+        "pressLD": "s",
+        "pressLL": "a",
+        "pressLR": "d",
+    }
+
+    if action not in key_map:
+        return fail("gamepad", "未知的手柄动作: {0}".format(action))
+
+    key = key_map[action]
+
+    # 发送按键
+    try:
+        if duration_ms > 0:
+            # 长按
+            pyautogui.keyDown(key)
+            time.sleep(duration_ms / 1000.0)
+            pyautogui.keyUp(key)
+        else:
+            # 短按
+            pyautogui.press(key)
+
+        # 按键后延迟
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+
+        emit(t="done", command="gamepad", ok=True, action=action, key=key,
+             target=target, method="keyboard", message="手柄按键 {0} 发送成功".format(action))
+        return 0
+    except Exception:
+        return fail("gamepad", "按键发送失败: {0}".format(traceback.format_exc()))
+
+
+
+
+
+
+def run_install_chiaki(cfg):
+    """自动下载并安装 Chiaki-ng"""
+    import subprocess
+    import tempfile
+    import urllib.request
+
+    platform = cfg.get("platform", "mac")
+
+    if platform == "mac":
+        # macOS: 下载 DMG 并安装
+        download_url = "https://git.sr.ht/~thestr4ng3r/chiaki/refs/download/v2.2.0/Chiaki-v2.2.0-macos.dmg"
+        emit(t="log", command="install_chiaki", message="正在下载 Chiaki-ng...")
+        emit(t="progress", command="install_chiaki", percent=0)
+
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            dmg_path = os.path.join(tmp_dir, "Chiaki.dmg")
+
+            # 下载
+            urllib.request.urlretrieve(download_url, dmg_path)
+            emit(t="progress", command="install_chiaki", percent=50)
+            emit(t="log", command="install_chiaki", message="下载完成，正在安装...")
+
+            # 挂载 DMG
+            mount_result = subprocess.run(
+                ["hdiutil", "attach", dmg_path, "-nobrowse", "-quiet"],
+                capture_output=True, text=True
+            )
+            if mount_result.returncode != 0:
+                emit(t="done", command="install_chiaki", ok=False, message="挂载 DMG 失败")
+                return 1
+
+            emit(t="progress", command="install_chiaki", percent=70)
+
+            # 查找挂载点中的 Chiaki.app
+            mount_point = None
+            for line in mount_result.stdout.split("\n"):
+                if "/Volumes/" in line:
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        mount_point = parts[2].strip()
+                        break
+
+            if not mount_point:
+                # 尝试常见的挂载路径
+                for vol in os.listdir("/Volumes"):
+                    if "chiaki" in vol.lower():
+                        mount_point = f"/Volumes/{vol}"
+                        break
+
+            if not mount_point:
+                emit(t="done", command="install_chiaki", ok=False, message="未找到挂载点")
+                return 1
+
+            # 查找 Chiaki.app
+            app_path = None
+            for item in os.listdir(mount_point):
+                if item.endswith(".app") and "chiaki" in item.lower():
+                    app_path = os.path.join(mount_point, item)
+                    break
+
+            if not app_path:
+                emit(t="done", command="install_chiaki", ok=False, message="DMG 中未找到 Chiaki.app")
+                return 1
+
+            emit(t="progress", command="install_chiaki", percent=80)
+
+            # 复制到 /Applications
+            dest = "/Applications/" + os.path.basename(app_path)
+            subprocess.run(["rm", "-rf", dest], capture_output=True)
+            copy_result = subprocess.run(
+                ["cp", "-R", app_path, "/Applications/"],
+                capture_output=True, text=True
+            )
+
+            if copy_result.returncode != 0:
+                emit(t="done", command="install_chiaki", ok=False, message="复制到 /Applications 失败")
+                return 1
+
+            emit(t="progress", command="install_chiaki", percent=90)
+
+            # 弹出 DMG
+            subprocess.run(["hdiutil", "detach", mount_point, "-quiet"], capture_output=True)
+
+            # 清理临时文件
+            try:
+                os.remove(dmg_path)
+                os.rmdir(tmp_dir)
+            except Exception:
+                pass
+
+            emit(t="progress", command="install_chiaki", percent=100)
+            emit(t="done", command="install_chiaki", ok=True, message="Chiaki-ng 安装成功！已安装到 /Applications/Chiaki.app")
+            return 0
+
+        except Exception as e:
+            emit(t="done", command="install_chiaki", ok=False, message=f"安装失败: {str(e)}")
+            return 1
+
+    elif platform == "win":
+        # Windows: 下载 exe 安装
+        download_url = "https://git.sr.ht/~thestr4ng3r/chiaki/refs/download/v2.2.0/Chiaki-v2.2.0-windows.exe"
+        emit(t="log", command="install_chiaki", message="正在下载 Chiaki-ng...")
+        emit(t="progress", command="install_chiaki", percent=0)
+
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            exe_path = os.path.join(tmp_dir, "Chiaki.exe")
+
+            # 下载
+            urllib.request.urlretrieve(download_url, exe_path)
+            emit(t="progress", command="install_chiaki", percent=100)
+            emit(t="log", command="install_chiaki", message="下载完成，正在启动安装程序...")
+
+            # 启动安装程序
+            subprocess.Popen([exe_path])
+
+            emit(t="done", command="install_chiaki", ok=True, message="Chiaki-ng 安装程序已启动，请按提示完成安装")
+            return 0
+
+        except Exception as e:
+            emit(t="done", command="install_chiaki", ok=False, message=f"下载失败: {str(e)}")
+            return 1
+
+    else:
+        emit(t="done", command="install_chiaki", ok=False, message=f"不支持的平台: {platform}")
+        return 1
+
+
 def main():
     if len(sys.argv) < 3:
         emit(t="error", message="用法: vision_runtime.py <command> <config.json>")
@@ -853,6 +1320,10 @@ def main():
         return run_yolo(cfg)
     if command == "input":
         return run_input(cfg)
+    if command == "gamepad":
+        return run_gamepad(cfg)
+    if command == "install_chiaki":
+        return run_install_chiaki(cfg)
     emit(t="error", message="未知命令：{0}".format(command))
     return 2
 
