@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ClickOffset, TemplateDefinition, TemplateFolder, TemplateRect } from '@nobowo/core';
+import type { ClickOffset, TemplateDefinition, TemplateFolder, TemplateLibraryStats, TemplateRect } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
 import { TemplateCropEditor } from './TemplateCropEditor';
 import { TemplateThumb } from './TemplateThumb';
@@ -97,6 +97,31 @@ function cropToDataUrl(imageUrl: string, rect: TemplateRect): Promise<string> {
   });
 }
 
+function readImageData(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`读取失败：${file.name}`));
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      const image = new Image();
+      image.onerror = () => reject(new Error(`图片格式无法识别：${file.name}`));
+      image.onload = () => {
+        if (image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+          reject(new Error(`图片尺寸无效：${file.name}`));
+          return;
+        }
+        resolve({ dataUrl, width: image.naturalWidth, height: image.naturalHeight });
+      };
+      image.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || /\.(avif|bmp|gif|jpe?g|png|webp)$/i.test(file.name);
+}
+
 
 type FolderTreeNode = TemplateFolder & { children: FolderTreeNode[]; depth: number };
 
@@ -171,11 +196,26 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   const [renameFolderName, setRenameFolderName] = useState('');
   const [tab, setTab] = useState<'folders' | 'annotate'>('folders');
   const [tool, setTool] = useState<'draw' | 'move'>('draw');
-    const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
+  const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const pendingReplaceRef = useRef(false);
+  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
+  const [libraryStats, setLibraryStats] = useState<TemplateLibraryStats>({
+    indexedCount: 0,
+    detectedCount: 0,
+    libraryCount: 0,
+    unclassifiedCount: 0,
+    missingCount: 0,
+    detectedAt: 0,
+  });
   const apiUnavailable = !window.templateAPI;
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute('webkitdirectory', '');
+    folderInputRef.current?.setAttribute('directory', '');
+  }, []);
 
   const refreshList = useCallback(async () => {
     if (!window.templateAPI) return;
@@ -183,10 +223,12 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
       const data = await window.templateAPI.list();
       setTemplates(data.templates);
       setFolders(data.folders);
+      setLibraryStats(data.stats);
       setSelectedId((cur) => (cur && data.templates.some((t) => t.id === cur) ? cur : data.templates[0]?.id ?? null));
     } catch {
       setTemplates([]);
       setFolders([]);
+      setLibraryStats({ indexedCount: 0, detectedCount: 0, libraryCount: 0, unclassifiedCount: 0, missingCount: 0, detectedAt: 0 });
     }
   }, []);
 
@@ -204,7 +246,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   }, [onClose]);
 
   const readFile = useCallback((file: File, keepEditing = false) => {
-    if (!file.type.startsWith('image/')) return;
+    if (!isImageFile(file)) return;
     const reader = new FileReader();
     reader.onload = () => {
       setEdit((prev) => ({
@@ -225,23 +267,6 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     };
     reader.readAsDataURL(file);
   }, [activeFolderId]);
-
-  const handleFileInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      const keepEditing = pendingReplaceRef.current;
-      pendingReplaceRef.current = false;
-      if (batchReplace && selectedIds.length > 0) {
-        void window.templateAPI?.batchUpdate(selectedIds, { notes: `待替换来源截图：${file.name}` }).then(() => refreshList());
-        setBatchReplace(false);
-      } else {
-        readFile(file, keepEditing);
-      }
-      e.target.value = '';
-    },
-    [batchReplace, readFile, refreshList, selectedIds],
-  );
 
   const openTemplate = useCallback(async (tpl: TemplateDefinition) => {
     setSelectedId(tpl.id);
@@ -284,6 +309,64 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     setEdit({ ...blankEdit(), folderId: activeFolderId });
   }, [activeFolderId]);
 
+  const importTemplateFiles = useCallback(
+    async (files: File[]) => {
+      const images = files.filter(isImageFile);
+      if (!window.templateAPI || images.length === 0) {
+        setEdit((prev) => ({ ...prev, error: '请选择至少一张图片' }));
+        return;
+      }
+      setUploading({ done: 0, total: images.length });
+      setEdit((prev) => ({ ...prev, error: null }));
+      const created: TemplateDefinition[] = [];
+      try {
+        for (const [index, file] of images.entries()) {
+          const imageData = await readImageData(file);
+          const definition = await window.templateAPI.create({
+            name: file.name.replace(/\.[^.]+$/, '') || `模板 ${index + 1}`,
+            folderId: activeFolderId,
+            resolution: { width: imageData.width, height: imageData.height },
+            scaleFactor: window.devicePixelRatio || 1,
+            clickOffset: { x: 0, y: 0 },
+            sourceRect: { x: 0, y: 0, width: imageData.width, height: imageData.height },
+            imageDataUrl: imageData.dataUrl,
+            sourceDataUrl: imageData.dataUrl,
+          });
+          created.push(definition);
+          setUploading({ done: index + 1, total: images.length });
+        }
+        await refreshList();
+        if (created[0]) await openTemplate(created[0]);
+        onChanged();
+      } catch (err) {
+        setEdit((prev) => ({ ...prev, error: err instanceof Error ? err.message : String(err) }));
+        await refreshList();
+      } finally {
+        setUploading(null);
+      }
+    },
+    [activeFolderId, onChanged, openTemplate, refreshList],
+  );
+
+  const handleFileInput = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>, folderSelection = false) => {
+      const files = Array.from(e.target.files ?? []);
+      if (files.length === 0) return;
+      const keepEditing = pendingReplaceRef.current;
+      pendingReplaceRef.current = false;
+      if (batchReplace && !folderSelection && selectedIds.length > 0) {
+        void window.templateAPI?.batchUpdate(selectedIds, { notes: `待替换来源截图：${files[0].name}` }).then(() => refreshList());
+        setBatchReplace(false);
+      } else if (folderSelection || files.length > 1) {
+        void importTemplateFiles(files);
+      } else {
+        readFile(files[0], keepEditing);
+      }
+      e.target.value = '';
+    },
+    [batchReplace, importTemplateFiles, readFile, refreshList, selectedIds],
+  );
+
   const handleNewTemplate = useCallback(() => {
     setBatchReplace(false);
     startNew();
@@ -294,10 +377,14 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      const file = e.dataTransfer.files?.[0];
-      if (file) readFile(file);
+      const files = Array.from(e.dataTransfer.files ?? []);
+      if (files.length > 1) {
+        void importTemplateFiles(files);
+      } else if (files[0]) {
+        readFile(files[0]);
+      }
     },
-    [readFile],
+    [importTemplateFiles, readFile],
   );
 
   const handleSave = useCallback(async () => {
@@ -419,6 +506,8 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     return [t.name, t.app, t.notes, t.windowTitle, ...(t.tags ?? [])].some((v) => v?.toLowerCase().includes(q));
   });
 
+  const folderIds = new Set(folders.map((folder) => folder.id));
+  const libraryTemplates = templates.filter((template) => template.folderId && folderIds.has(template.folderId));
   const getDescendantFolderIds = (folderId: string): string[] => {
     const children = folders.filter(f => f.parentId === folderId);
     return [folderId, ...children.flatMap(c => getDescendantFolderIds(c.id))];
@@ -452,6 +541,31 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     setSelectedId(id);
   };
 
+  const uploadActions = (
+    <div className="yolo-dataset__upload-actions">
+      <button
+        className="yolo-btn--primary yolo-btn--compact"
+        disabled={uploading !== null}
+        onClick={(event) => {
+          event.stopPropagation();
+          fileInputRef.current?.click();
+        }}
+      >
+        选择图片
+      </button>
+      <button
+        className="yolo-btn--ghost yolo-btn--compact"
+        disabled={uploading !== null}
+        onClick={(event) => {
+          event.stopPropagation();
+          folderInputRef.current?.click();
+        }}
+      >
+        选择文件夹
+      </button>
+    </div>
+  );
+
   return (
     <div
       className="template-modal__overlay"
@@ -467,7 +581,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
           </div>
           <div className="yolo-modal__training-pill">
             <span className="status-dot status-dot--saved" />
-            {templates.length} 个模板
+            模板库检测 {libraryStats.libraryCount} 个已归类模板
           </div>
           <button className="yolo-modal__close" onClick={onClose} aria-label="关闭">×</button>
         </header>
@@ -475,7 +589,12 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
         <nav className="yolo-modal__tabs">
           <button className={`yolo-modal__tab ${tab === 'folders' ? 'active' : ''}`} onClick={() => setTab('folders')}>
             <span className="yolo-modal__tab-label">模板库</span>
-            {templates.length > 0 && <span className="yolo-modal__tab-badge">{templates.length}</span>}
+            <span
+              className="yolo-modal__tab-badge"
+              title={`模板库 ${libraryStats.libraryCount} 个 · 未分类历史模板 ${libraryStats.unclassifiedCount} 个 · 缺失 ${libraryStats.missingCount} 个`}
+            >
+              模板 {libraryStats.libraryCount}
+            </span>
             <span className="yolo-modal__tab-hint">文件夹与模板列表</span>
           </button>
           <button className={`yolo-modal__tab ${tab === 'annotate' ? 'active' : ''}`} onClick={() => setTab('annotate')}>
@@ -619,17 +738,15 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                         setDragOver(true);
                       }}
                       onDragLeave={() => setDragOver(false)}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setDragOver(false);
-                        const file = e.dataTransfer.files?.[0];
-                        if (file) readFile(file);
-                      }}
-                      onClick={() => fileInputRef.current?.click()}
+                      onDrop={handleDrop}
+                      onClick={() => !uploading && fileInputRef.current?.click()}
                     >
                       <div className="yolo-dataset__drop-icon">⬆</div>
-                      <div className="yolo-dataset__drop-text">拖拽截图到这里，或点击选择文件</div>
-                      <div className="yolo-dataset__drop-sub">上传后自动进入「标注」页框选目标区域</div>
+                      <div className="yolo-dataset__drop-text">
+                        {uploading ? `正在导入 ${uploading.done}/${uploading.total}…` : '拖拽图片到这里，或选择多张图片 / 文件夹'}
+                      </div>
+                      <div className="yolo-dataset__drop-sub">批量图片会自动创建为模板，可继续逐张框选目标区域</div>
+                      {uploadActions}
                     </div>
                   </div>
                 ) : (
@@ -664,17 +781,15 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                         setDragOver(true);
                       }}
                       onDragLeave={() => setDragOver(false)}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setDragOver(false);
-                        const file = e.dataTransfer.files?.[0];
-                        if (file) readFile(file);
-                      }}
-                      onClick={() => fileInputRef.current?.click()}
+                      onDrop={handleDrop}
+                      onClick={() => !uploading && fileInputRef.current?.click()}
                     >
                       <div className="yolo-dataset__drop-icon">⬆</div>
-                      <div className="yolo-dataset__drop-text">拖拽截图到这里创建新模板，或点击选择文件</div>
-                      <div className="yolo-dataset__drop-sub">上传后自动进入「标注」页框选目标区域</div>
+                      <div className="yolo-dataset__drop-text">
+                        {uploading ? `正在导入 ${uploading.done}/${uploading.total}…` : '拖拽图片到这里，或选择多张图片 / 文件夹'}
+                      </div>
+                      <div className="yolo-dataset__drop-sub">批量图片会自动创建为模板，可继续逐张框选目标区域</div>
+                      {uploadActions}
                     </div>
 
                     {edit.error && <div className="yolo-annotate__error">{edit.error}</div>}
@@ -687,9 +802,9 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                       <div className="yolo-dataset__grid-actions">
                         <button
                           onClick={async () => {
-                            if (window.templateAPI && templates.length > 0) await window.templateAPI.export(templates.map((t) => t.id));
+                            if (window.templateAPI && libraryTemplates.length > 0) await window.templateAPI.export(libraryTemplates.map((t) => t.id));
                           }}
-                          disabled={templates.length === 0}
+                          disabled={libraryTemplates.length === 0}
                           title="导出模板库到本地文件夹"
                         >
                           导出模板库
@@ -807,10 +922,13 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                   ) : edit.editing ? (
                     <div className="yolo-stage__empty">该模板没有保存来源截图。可点击「上传新截图」或更换截图后重新框选。</div>
                   ) : (
-                    <div className={`template-modal__upload ${dragOver ? 'template-modal__upload--drag' : ''}`} onClick={() => fileInputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={(e) => { e.preventDefault(); setDragOver(false); handleDrop(e); }}>
+                    <div className={`template-modal__upload ${dragOver ? 'template-modal__upload--drag' : ''}`} onClick={() => !uploading && fileInputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
                       <div className="template-modal__upload-icon">＋</div>
-                      <div className="template-modal__upload-text">拖拽截图到这里，或点击选择文件</div>
-                      <div className="template-modal__upload-hint">支持 PNG / JPG / WebP · 建议截取目标应用的真实画面</div>
+                      <div className="template-modal__upload-text">
+                        {uploading ? `正在导入 ${uploading.done}/${uploading.total}…` : '拖拽图片到这里，或选择多张图片 / 文件夹'}
+                      </div>
+                      <div className="template-modal__upload-hint">支持 PNG / JPG / WebP · 批量图片会自动创建为模板</div>
+                      {uploadActions}
                     </div>
                   )}
                 </div>
@@ -855,7 +973,22 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
 
         </div>
       </div>
-      <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={handleFileInput} />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(event) => handleFileInput(event)}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(event) => handleFileInput(event, true)}
+      />
     </div>
   );
 }

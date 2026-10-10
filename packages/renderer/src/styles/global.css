@@ -1206,6 +1206,7 @@ pre::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 12px;
   width: fit-content;
+  max-width: calc(100vw - 48px);
   min-width: 260px;
   flex: 0 1 auto;
   padding: 16px 18px;
@@ -1226,7 +1227,7 @@ pre::-webkit-scrollbar-thumb:hover {
 }
 .toolbar-tools__actions {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .toolbar-tools__actions button {
@@ -3277,6 +3278,7 @@ pre::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 10px;
   height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 .crop-editor__bar {
@@ -3333,7 +3335,7 @@ pre::-webkit-scrollbar-thumb:hover {
   border-radius: 14px;
   background: var(--bg-sunken);
   border: 1px solid rgba(var(--rgb-white), 0.08);
-  overflow: auto;
+  overflow: hidden;
 }
 .crop-editor__stage::-webkit-scrollbar {
   width: 8px;
@@ -3349,14 +3351,18 @@ pre::-webkit-scrollbar-thumb:hover {
 .crop-editor__stage::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--rgb-white), 0.25);
 }
+.crop-editor__viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
 .crop-editor__surface {
-  position: relative;
+  position: absolute;
   display: block;
   cursor: crosshair;
   user-select: none;
   touch-action: none;
-  margin: auto;
-  flex-shrink: 0;
+  transform: translate(-50%, -50%);
 }
 .crop-editor__surface img {
   display: block;
@@ -3395,35 +3401,6 @@ pre::-webkit-scrollbar-thumb:hover {
 }
 .crop-editor--move .crop-editor__surface {
   cursor: move;
-}
-.crop-editor__handle {
-  position: absolute;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--color-accent);
-  background: var(--bg-input);
-  border-radius: 2px;
-  box-sizing: border-box;
-}
-.crop-editor__handle--nw {
-  top: -6px;
-  left: -6px;
-  cursor: nwse-resize;
-}
-.crop-editor__handle--ne {
-  top: -6px;
-  right: -6px;
-  cursor: nesw-resize;
-}
-.crop-editor__handle--sw {
-  bottom: -6px;
-  left: -6px;
-  cursor: nesw-resize;
-}
-.crop-editor__handle--se {
-  bottom: -6px;
-  right: -6px;
-  cursor: nwse-resize;
 }
 
 /* 可视化点击点：在选框内拖动设置 clickOffset，无需手输坐标 */
@@ -3500,11 +3477,20 @@ pre::-webkit-scrollbar-thumb:hover {
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-shrink: 0;
+  width: 100%;
+  height: 40px;
+  min-width: 0;
+  flex: 0 0 40px;
+  overflow: hidden;
+  box-sizing: border-box;
   padding: 8px 12px;
   border-radius: 12px;
   background: rgba(var(--rgb-white), 0.03);
   border: 1px solid rgba(var(--rgb-white), 0.07);
+}
+.crop-editor__status--hidden {
+  visibility: hidden;
+  pointer-events: none;
 }
 .crop-editor__status-item {
   display: inline-flex;
@@ -5816,6 +5802,13 @@ pre::-webkit-scrollbar-thumb:hover {
   font-size: 11.5px;
   color: rgba(var(--rgb-text), 0.4);
 }
+.yolo-dataset__upload-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-col);
+  margin-top: var(--space-2);
+}
 .yolo-dataset__grid-head {
   display: flex;
   align-items: center;
@@ -6015,6 +6008,7 @@ pre::-webkit-scrollbar-thumb:hover {
 .yolo-annotate__canvas {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
   padding: 14px 16px;
   gap: 10px;
@@ -8891,7 +8885,7 @@ pre::-webkit-scrollbar-thumb:hover {
 /* ===== 模板管理：标注页（复用 YOLO 标注视觉） ===== */
 
 .template-annotate {
-  grid-template-columns: 230px 1fr 300px;
+  grid-template-columns: 230px minmax(0, 1fr) 300px;
 }
 .template-annotate__props {
   overflow-y: auto;
@@ -10223,5 +10217,221 @@ pre::-webkit-scrollbar-thumb:hover {
 
   .ps5-video {
     min-height: 180px;
+  }
+}
+
+/* ===== 工作流管理 ===== */
+.workflow-manager-modal {
+  width: min(1180px, 94vw);
+  height: min(820px, 92vh);
+}
+
+.workflow-manager-modal .cloud-api-card {
+  transition: none;
+}
+
+.workflow-manager-modal .cloud-api-card:hover {
+  transform: none;
+}
+
+.workflow-manager-modal__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.workflow-manager-modal__section-head .cloud-delete-controls {
+  position: static;
+  flex-shrink: 0;
+}
+
+.workflow-manager-modal__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-row);
+  flex-shrink: 0;
+}
+
+.workflow-manager-modal__summary,
+.workflow-manager-modal__header-actions,
+.workflow-manager-modal__create-form,
+.workflow-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-col);
+}
+
+.workflow-manager-modal__count {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.workflow-manager-modal__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--gap-row);
+  padding: var(--space-5);
+  overflow-y: auto;
+}
+
+.workflow-manager-modal__create {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-5);
+}
+
+.workflow-manager-modal__create p,
+.workflow-manager-modal__current p {
+  margin: var(--space-2) 0 0;
+  color: var(--text-dark);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workflow-manager-modal__create-form {
+  flex: 0 1 520px;
+}
+
+.workflow-manager-modal__name-field {
+  flex: 1;
+}
+
+.workflow-manager-modal__error {
+  margin: 0;
+}
+
+.workflow-manager-modal__list {
+  display: grid;
+  gap: var(--gap-row);
+}
+
+.workflow-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.workflow-card:hover {
+  border-color: var(--border-input-hover);
+  background: var(--bg-panel-strong);
+}
+
+.workflow-card--active {
+  border-color: rgba(var(--rgb-accent), 0.45);
+  background: var(--bg-active);
+}
+
+.workflow-card__main {
+  min-width: 0;
+}
+
+.workflow-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-col);
+}
+
+.workflow-card h3,
+.workflow-manager-modal__current h3 {
+  margin: 0;
+  color: var(--text-bright);
+  font-size: 14px;
+}
+
+.workflow-card__badge {
+  padding: 3px 9px;
+  border: 1px solid rgba(var(--rgb-accent), 0.3);
+  border-radius: var(--radius-pill);
+  background: rgba(var(--rgb-accent), 0.12);
+  color: var(--color-accent-strong);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.workflow-card__meta {
+  margin-top: var(--space-2);
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.workflow-card__actions {
+  flex-shrink: 0;
+}
+
+.workflow-manager-modal__empty {
+  display: flex;
+  min-height: 250px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  padding: var(--space-6);
+  border: 1px dashed var(--border-input);
+  border-radius: var(--radius-panel);
+  background: var(--bg-panel);
+  text-align: center;
+}
+
+.workflow-manager-modal__empty-icon {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  margin-bottom: var(--space-4);
+  border: 1px solid rgba(var(--rgb-accent), 0.25);
+  border-radius: 50%;
+  background: rgba(var(--rgb-accent), 0.1);
+  color: var(--color-accent-strong);
+  font-size: 24px;
+}
+
+.workflow-manager-modal__empty h3 {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+
+.workflow-manager-modal__empty p {
+  margin: var(--space-2) 0 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.workflow-manager-modal__current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-top: auto;
+}
+
+@media (max-width: 760px) {
+  .workflow-manager-modal__toolbar,
+  .workflow-manager-modal__create,
+  .workflow-card,
+  .workflow-manager-modal__current {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow-manager-modal__header-actions,
+  .workflow-manager-modal__create-form,
+  .workflow-card__actions {
+    flex-wrap: wrap;
   }
 }

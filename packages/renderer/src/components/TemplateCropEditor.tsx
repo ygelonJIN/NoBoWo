@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ClickOffset, TemplateRect } from '@nobowo/core';
 
 type Point = { x: number; y: number };
-
-type Corner = 'nw' | 'ne' | 'sw' | 'se';
 
 type Props = {
   imageUrl: string;
@@ -16,25 +14,22 @@ type Props = {
 
 type DragState =
   | { kind: 'draw'; start: Point; current: Point }
-  | { kind: 'move'; start: Point; orig: TemplateRect }
-  | { kind: 'resize'; corner: Corner; start: Point; orig: TemplateRect }
   | { kind: 'offset'; start: Point; orig: ClickOffset; rect: TemplateRect }
   | { kind: 'pan'; start: Point; grab: Point }
   | null;
 
-const STAGE_MAX_H = 600;
 const MIN_CROP = 4;
-const OFFSET_HIT_PX = 14;
 const ZOOM_STEP = 1.15;
-const MAX_ZOOM = 24;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 64;
 
 export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange, onOffsetChange }: Props) {
   const [natural, setNatural] = useState<Point | null>(null);
   const [availW, setAvailW] = useState(640);
+  const [availH, setAvailH] = useState(480);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [draft, setDraft] = useState<TemplateRect | null>(null);
-  const panRef = useRef<Point>({ x: 0, y: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState>(null);
@@ -46,51 +41,69 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     img.src = imageUrl;
   }, [imageUrl]);
 
-  // 切换图片时重置缩放；居中由 surface 的 margin auto 负责
   useEffect(() => {
     setZoom(1);
-    panRef.current = { x: 0, y: 0 };
     setPan({ x: 0, y: 0 });
   }, [imageUrl]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = stageRef.current;
     if (!el) return;
+    const updateSize = () => {
+      setAvailW(Math.floor(el.clientWidth));
+      setAvailH(Math.floor(el.clientHeight));
+    };
+    updateSize();
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         setAvailW(Math.floor(entry.contentRect.width));
+        setAvailH(Math.floor(entry.contentRect.height));
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
-  const fitScale = natural ? Math.min(2, Math.max(0.5, Math.min((availW - 24) / natural.x, STAGE_MAX_H / natural.y))) : 1;
+  const fitScale = natural
+    ? Math.min(2, Math.max(0.01, Math.min((availW - 24) / natural.x, (availH - 24) / natural.y)))
+    : 1;
   const scale = fitScale * zoom;
-  const maxZoom = natural ? Math.max(4, Math.min(MAX_ZOOM, (1 / fitScale) * 2)) : 4;
+  const maxZoom = natural ? Math.max(8, Math.min(MAX_ZOOM, 8 / fitScale)) : 8;
   const displayW = natural ? Math.max(1, Math.round(natural.x * scale)) : 0;
   const displayH = natural ? Math.max(1, Math.round(natural.y * scale)) : 0;
 
-  // 滚轮缩放：以光标为中心
+  const centerStage = useCallback(() => setPan({ x: 0, y: 0 }), []);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(centerStage);
+    return () => cancelAnimationFrame(frame);
+  }, [centerStage, imageUrl, natural]);
+
   useEffect(() => {
     const stage = stageRef.current;
-    if (!stage || !natural) return;
+    const surface = surfaceRef.current;
+    if (!stage || !surface || !natural) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-      const nextZoom = Math.min(maxZoom, Math.max(1, zoom * factor));
+      const nextZoom = Math.min(maxZoom, Math.max(MIN_ZOOM, zoom * factor));
       if (nextZoom === zoom) return;
-      const rect = stage.getBoundingClientRect();
+      const surfaceBounds = surface.getBoundingClientRect();
+      const stageBounds = stage.getBoundingClientRect();
       const oldScale = fitScale * zoom;
       const newScale = fitScale * nextZoom;
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const nextPan = {
-        x: mouseX - (mouseX - panRef.current.x) * (newScale / oldScale),
-        y: mouseY - (mouseY - panRef.current.y) * (newScale / oldScale),
+      const imagePoint = {
+        x: (e.clientX - surfaceBounds.left) / oldScale,
+        y: (e.clientY - surfaceBounds.top) / oldScale,
       };
-      panRef.current = nextPan;
-      setPan(nextPan);
+      const viewportCenter = {
+        x: stageBounds.left + stageBounds.width / 2,
+        y: stageBounds.top + stageBounds.height / 2,
+      };
+      setPan({
+        x: e.clientX - (imagePoint.x - natural.x / 2) * newScale - viewportCenter.x,
+        y: e.clientY - (imagePoint.y - natural.y / 2) * newScale - viewportCenter.y,
+      });
       setZoom(nextZoom);
     };
     stage.addEventListener('wheel', onWheel, { passive: false });
@@ -115,59 +128,11 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     [scale],
   );
 
-  const moveRect = useCallback(
-    (orig: TemplateRect, dx: number, dy: number, n: Point): TemplateRect => ({
-      x: Math.max(0, Math.min(n.x - orig.width, orig.x + dx)),
-      y: Math.max(0, Math.min(n.y - orig.height, orig.y + dy)),
-      width: orig.width,
-      height: orig.height,
-    }),
-    [],
-  );
-
-  const resizeRect = useCallback((orig: TemplateRect, corner: Corner, p: Point, n: Point): TemplateRect => {
-    const min = MIN_CROP;
-    switch (corner) {
-      case 'nw': {
-        const x = Math.min(orig.x + orig.width - min, Math.max(0, p.x));
-        const y = Math.min(orig.y + orig.height - min, Math.max(0, p.y));
-        return { x, y, width: orig.x + orig.width - x, height: orig.y + orig.height - y };
-      }
-      case 'ne': {
-        const y = Math.min(orig.y + orig.height - min, Math.max(0, p.y));
-        return {
-          x: orig.x,
-          y,
-          width: Math.max(min, Math.min(n.x - orig.x, p.x - orig.x)),
-          height: orig.y + orig.height - y,
-        };
-      }
-      case 'sw': {
-        const x = Math.min(orig.x + orig.width - min, Math.max(0, p.x));
-        return {
-          x,
-          y: orig.y,
-          width: orig.x + orig.width - x,
-          height: Math.max(min, Math.min(n.y - orig.y, p.y - orig.y)),
-        };
-      }
-      case 'se': {
-        return {
-          x: orig.x,
-          y: orig.y,
-          width: Math.max(min, Math.min(n.x - orig.x, p.x - orig.x)),
-          height: Math.max(min, Math.min(n.y - orig.y, p.y - orig.y)),
-        };
-      }
-    }
-  }, []);
-
   const handleOffsetHandleDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0 || !natural || !rect) return;
       e.stopPropagation();
       e.preventDefault();
-      surfaceRef.current?.setPointerCapture(e.pointerId);
       const p = toImagePoint(e.clientX, e.clientY);
       dragRef.current = { kind: 'offset', start: p, orig: { ...offset }, rect: { ...rect } };
     },
@@ -178,49 +143,20 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
     (e: React.PointerEvent) => {
       if (e.button !== 0 || !natural) return;
       e.preventDefault();
-      surfaceRef.current?.setPointerCapture(e.pointerId);
       const p = toImagePoint(e.clientX, e.clientY);
       setDraft(null);
-
-      if (rect && !draft) {
-        const cx = rect.x + rect.width / 2 + offset.x;
-        const cy = rect.y + rect.height / 2 + offset.y;
-        const dist = Math.hypot((p.x - cx) * scale, (p.y - cy) * scale);
-        if (dist < OFFSET_HIT_PX) {
-          dragRef.current = { kind: 'offset', start: p, orig: { ...offset }, rect: { ...rect } };
-          return;
-        }
-      }
 
       if (tool === 'draw') {
         dragRef.current = { kind: 'draw', start: p, current: p };
         return;
       }
-      if (rect && p.x >= rect.x && p.x <= rect.x + rect.width && p.y >= rect.y && p.y <= rect.y + rect.height) {
-        dragRef.current = { kind: 'move', start: p, orig: rect };
-        return;
-      }
-      // 放大后拖拽图片本身或空白区域时平移画布
-      if (zoom > 1) {
-        dragRef.current = {
-          kind: 'pan',
-          start: { x: e.clientX, y: e.clientY },
-          grab: { x: e.clientX - panRef.current.x, y: e.clientY - panRef.current.y },
-        };
-      }
+      dragRef.current = {
+        kind: 'pan',
+        start: { x: e.clientX, y: e.clientY },
+        grab: { ...pan },
+      };
     },
-    [draft, natural, offset, rect, scale, toImagePoint, tool, zoom, pan],
-  );
-
-  const handleResizeDown = useCallback(
-    (e: React.PointerEvent, corner: Corner) => {
-      if (e.button !== 0 || !natural || !rect) return;
-      e.stopPropagation();
-      e.preventDefault();
-      surfaceRef.current?.setPointerCapture(e.pointerId);
-      dragRef.current = { kind: 'resize', corner, start: toImagePoint(e.clientX, e.clientY), orig: rect };
-    },
-    [natural, rect, toImagePoint],
+    [natural, pan, toImagePoint, tool],
   );
 
   const handlePointerMove = useCallback(
@@ -241,10 +177,6 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
             natural,
           ),
         );
-      } else if (drag.kind === 'move') {
-        onRectChange(moveRect(drag.orig, p.x - drag.start.x, p.y - drag.start.y, natural));
-      } else if (drag.kind === 'resize') {
-        onRectChange(resizeRect(drag.orig, drag.corner, p, natural));
       } else if (drag.kind === 'offset') {
         const dx = p.x - drag.start.x;
         const dy = p.y - drag.start.y;
@@ -255,15 +187,13 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
           y: Math.max(-boundY, Math.min(boundY, Math.round(drag.orig.y + dy))),
         });
       } else if (drag.kind === 'pan') {
-        const nextPan = {
-          x: e.clientX - drag.grab.x,
-          y: e.clientY - drag.grab.y,
-        };
-        panRef.current = nextPan;
-        setPan(nextPan);
+        setPan({
+          x: drag.grab.x + e.clientX - drag.start.x,
+          y: drag.grab.y + e.clientY - drag.start.y,
+        });
       }
     },
-    [clampRect, moveRect, natural, onOffsetChange, onRectChange, resizeRect, toImagePoint],
+    [clampRect, natural, onOffsetChange, toImagePoint],
   );
 
   const handlePointerUp = useCallback(
@@ -305,11 +235,9 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
   const hint =
     tool === 'draw'
       ? rect
-        ? '拖拽可重画选框 · 滚轮缩放'
-        : '在图片上拖拽，框选要识别的区域 · 滚轮缩放'
-      : rect
-        ? '拖拽选框可移动 · 四角调整大小 · 红点设置点击位置 · 滚轮缩放，放大后拖空白处平移'
-        : '当前没有选框，请切换到「框选」模式绘制 · 滚轮缩放';
+        ? '拖拽可重画选框 · 滚轮或按钮缩放'
+        : '在图片上拖拽框选目标区域 · 滚轮或按钮缩放'
+      : '拖动任意位置自由移动画布 · 红点设置点击位置 · 滚轮或按钮缩放';
 
   const offDesc = [
     offset.x > 0 ? `右 ${offset.x}` : offset.x < 0 ? `左 ${Math.abs(offset.x)}` : '',
@@ -321,22 +249,50 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
       <div className="crop-editor__bar">
         <span className="crop-editor__bar-hint">{hint}</span>
         <div className="crop-editor__bar-right">
+          <button
+            className="crop-editor__zoom-reset"
+            onClick={() => setZoom((current) => Math.max(MIN_ZOOM, current / ZOOM_STEP))}
+            disabled={zoom <= MIN_ZOOM}
+            title="缩小"
+            aria-label="缩小"
+          >
+            −
+          </button>
           <span className="crop-editor__zoom-label">{Math.round(scale * 100)}%</span>
-          <button className="crop-editor__zoom-reset" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} disabled={zoom <= 1}>
+          <button
+            className="crop-editor__zoom-reset"
+            onClick={() => setZoom((current) => Math.min(maxZoom, current * ZOOM_STEP))}
+            disabled={zoom >= maxZoom}
+            title="放大"
+            aria-label="放大"
+          >
+            +
+          </button>
+          <button className="crop-editor__zoom-reset" onClick={() => { setZoom(1); centerStage(); }} disabled={zoom === 1}>
             适配窗口
           </button>
         </div>
       </div>
-      <div className="crop-editor__stage" ref={stageRef}>
+      <div
+        className="crop-editor__stage"
+        ref={stageRef}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+      >
         {natural ? (
-          <div
-            className="crop-editor__surface"
-            ref={surfaceRef}
-            style={{ width: displayW, height: displayH, transform: `translate(${pan.x}px, ${pan.y}px)` }}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-          >
+          <div className="crop-editor__viewport">
+            <div
+              className="crop-editor__surface"
+              ref={surfaceRef}
+              style={{
+                width: displayW,
+                height: displayH,
+                left: `calc(50% + ${pan.x}px)`,
+                top: `calc(50% + ${pan.y}px)`,
+              }}
+              onPointerDown={handlePointerDown}
+            >
             <img src={imageUrl} style={{ width: displayW, height: displayH }} alt="" draggable={false} />
             {selection && (
               <>
@@ -350,17 +306,6 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
                 >
                   {Math.round(selection.width)} × {Math.round(selection.height)}
                 </div>
-                {tool === 'move' && !draft && (
-                  <>
-                    {(['nw', 'ne', 'sw', 'se'] as Corner[]).map((corner) => (
-                      <span
-                        key={corner}
-                        className={`crop-editor__handle crop-editor__handle--${corner}`}
-                        onPointerDown={(e) => handleResizeDown(e, corner)}
-                      />
-                    ))}
-                  </>
-                )}
               </>
             )}
             {rect && !draft && (
@@ -376,30 +321,36 @@ export function TemplateCropEditor({ imageUrl, rect, offset, tool, onRectChange,
                 {isOffsetCenter && <span className="crop-editor__click-point-badge">中心</span>}
               </div>
             )}
+            </div>
           </div>
         ) : (
           <div className="crop-editor__loading">图片加载中…</div>
         )}
       </div>
 
-      {rect && !draft && (
-        <div className="crop-editor__status">
-          <span className="crop-editor__status-item">
-            <span className="crop-editor__status-label">选框</span>
-            <span className="crop-editor__status-value">{Math.round(rect.width)} × {Math.round(rect.height)}</span>
-          </span>
-          <span className="crop-editor__status-sep" aria-hidden="true" />
-          <span className="crop-editor__status-item">
-            <span className="crop-editor__status-label">点击点</span>
-            <span className="crop-editor__status-value">({offset.x}, {offset.y})</span>
-            {!isOffsetCenter && offDesc && <span className="crop-editor__status-sub">距中心 {offDesc}</span>}
-          </span>
-          <span className="crop-editor__status-tip">拖动红色点调整点击位置</span>
-          <button className="crop-editor__offset-reset" onClick={() => onOffsetChange({ x: 0, y: 0 })} disabled={isOffsetCenter}>
-            回中心
-          </button>
-        </div>
-      )}
+      <div
+        className={`crop-editor__status ${rect && !draft ? '' : 'crop-editor__status--hidden'}`}
+        aria-hidden={!rect || Boolean(draft)}
+      >
+        {rect && (
+          <>
+            <span className="crop-editor__status-item">
+              <span className="crop-editor__status-label">选框</span>
+              <span className="crop-editor__status-value">{Math.round(rect.width)} × {Math.round(rect.height)}</span>
+            </span>
+            <span className="crop-editor__status-sep" aria-hidden="true" />
+            <span className="crop-editor__status-item">
+              <span className="crop-editor__status-label">点击点</span>
+              <span className="crop-editor__status-value">({offset.x}, {offset.y})</span>
+              {!isOffsetCenter && offDesc && <span className="crop-editor__status-sub">距中心 {offDesc}</span>}
+            </span>
+            <span className="crop-editor__status-tip">拖动红色点调整点击位置</span>
+            <button className="crop-editor__offset-reset" onClick={() => onOffsetChange({ x: 0, y: 0 })} disabled={isOffsetCenter}>
+              回中心
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

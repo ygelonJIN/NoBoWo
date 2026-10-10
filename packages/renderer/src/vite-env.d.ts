@@ -21,6 +21,7 @@ import type {
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
+  TemplateLibraryListResult,
   TemplateUpdatePatch,
   WorkflowDocument,
   WorkflowRunEvent,
@@ -107,7 +108,7 @@ declare global {
       setStick: (stick: 'left' | 'right', x: number, y: number) => Promise<{ stick: string; x: number; y: number }>;
     };
     templateAPI: {
-      list: () => Promise<{ folders: TemplateFolder[]; templates: TemplateDefinition[] }>;
+      list: () => Promise<TemplateLibraryListResult>;
       create: (payload: TemplateCreatePayload) => Promise<TemplateDefinition>;
       update: (id: string, patch: TemplateUpdatePatch) => Promise<TemplateDefinition | null>;
       createFolder: (payload: { name: string; parentId?: string | null }) => Promise<TemplateFolder>;

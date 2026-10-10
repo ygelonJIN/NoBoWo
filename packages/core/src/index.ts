@@ -408,6 +408,21 @@ export type TemplateCreatePayload = {
   sourceDataUrl?: string;
 };
 
+export type TemplateLibraryStats = {
+  indexedCount: number;
+  detectedCount: number;
+  libraryCount: number;
+  unclassifiedCount: number;
+  missingCount: number;
+  detectedAt: number;
+};
+
+export type TemplateLibraryListResult = {
+  folders: TemplateFolder[];
+  templates: TemplateDefinition[];
+  stats: TemplateLibraryStats;
+};
+
 export type TemplateUpdatePatch = Partial<Omit<TemplateCreatePayload, 'imageDataUrl'>> & {
   imageDataUrl?: string;
   enabled?: boolean;

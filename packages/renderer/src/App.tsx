@@ -18,6 +18,15 @@ import { StreamManagerModal } from './components/StreamManagerModal';
 import { Ps5FloatingViewer } from './components/Ps5FloatingViewer';
 import { DebugPanel } from './components/DebugPanel';
 import { RecognizeTestModal } from './components/RecognizeTestModal';
+import { WorkflowManagerModal } from './components/WorkflowManagerModal';
+import {
+  ensureActiveStoredWorkflow,
+  readActiveWorkflowId,
+  readWorkflowLibrary,
+  updateStoredWorkflowDocument,
+  writeActiveWorkflowId,
+  type StoredWorkflow,
+} from './lib/workflowLibrary';
 import type { WorkflowRunSnapshot } from '@nobowo/core';
 
 const STORAGE_KEY = 'nobowo.workflow.document.v1';
@@ -39,6 +48,12 @@ const defaultSeedNodes: WorkflowNode[] = [createDefaultNode('click', 1), createD
 function readInitialDocument(): WorkflowDocument {
   if (typeof window === 'undefined') {
     return { ...defaultWorkflowDocument(), nodes: defaultSeedNodes };
+  }
+
+  const activeWorkflowId = readActiveWorkflowId();
+  const activeWorkflow = readWorkflowLibrary().find((workflow) => workflow.id === activeWorkflowId);
+  if (activeWorkflow) {
+    return activeWorkflow.document;
   }
 
   const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -237,6 +252,8 @@ export function App() {
   const [isAutosaved, setIsAutosaved] = useState(true);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [globalEnvOpen, setGlobalEnvOpen] = useState(false);
+  const [workflowManagerOpen, setWorkflowManagerOpen] = useState(false);
+  const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(() => readActiveWorkflowId());
   const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [templateVersion, setTemplateVersion] = useState(0);
   const [yoloManagerOpen, setYoloManagerOpen] = useState(false);
@@ -278,7 +295,6 @@ export function App() {
   const [connecting, setConnecting] = useState<{ sourceId: string; point: Point; snapTargetId?: string; sourceHandleId?: string; targetHandleId?: string } | null>(null);
   const [, setHistoryVersion] = useState(0);
   const canvasRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const autosaveTimer = useRef<number | null>(null);
   const historyRef = useRef<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }[]>([]);
   const futureRef = useRef<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }[]>([]);
@@ -498,9 +514,10 @@ export function App() {
     autosaveTimer.current = window.setTimeout(() => {
       const document: WorkflowDocument = { version: 1, nodes, edges };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(document, null, 2));
+      if (activeWorkflowId) updateStoredWorkflowDocument(activeWorkflowId, document);
       setIsAutosaved(true);
     }, 600);
-  }, [edges, nodes]);
+  }, [activeWorkflowId, edges, nodes]);
 
   useEffect(() => {
     markChanged();
@@ -778,16 +795,6 @@ export function App() {
     setZoom(nextZoom);
   }, [zoom]);
 
-  const exportWorkflow = useCallback(() => {
-    const blob = new Blob([JSON.stringify({ version: 1, nodes, edges }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'workflow.json';
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }, [edges, nodes]);
-
   const runWorkflow = useCallback(async () => {
     if (!window.workflowAPI) {
       setWorkflowRunNotice({
@@ -855,31 +862,31 @@ export function App() {
     holdTimerRef.current = requestAnimationFrame(step);
   }, [cancelHold, finishHold]);
 
-  const importWorkflow = useCallback((file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result)) as WorkflowDocument;
-        if (parsed?.version === 1 && Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
-          setNodes(parsed.nodes);
-          setEdges(parsed.edges);
-          setSelectedNodeId(null);
-          setSelectedEdgeId(null);
-          setContextMenu(null);
-          historyRef.current = [];
-          futureRef.current = [];
-          const snapshot = JSON.stringify(parsed);
-          lastSnapshotRef.current = snapshot;
-          previousStateRef.current = { nodes: parsed.nodes, edges: parsed.edges };
-        } else {
-          window.alert('无法识别的文件格式，请选择导出的 workflow.json');
-        }
-      } catch {
-        window.alert('文件解析失败，请选择导出的 workflow.json');
-      }
-    };
-    reader.readAsText(file);
+  const openWorkflow = useCallback((workflow: StoredWorkflow) => {
+    const nextDocument = workflow.document;
+    const snapshot = JSON.stringify({ nodes: nextDocument.nodes, edges: nextDocument.edges });
+    historyRef.current = [];
+    futureRef.current = [];
+    previousStateRef.current = { nodes: nextDocument.nodes, edges: nextDocument.edges };
+    lastSnapshotRef.current = snapshot;
+    setNodes(nextDocument.nodes);
+    setEdges(nextDocument.edges);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setContextMenu(null);
+    setConnecting(null);
+    setHistoryVersion((version) => version + 1);
   }, []);
+
+  const changeActiveWorkflow = useCallback((id: string | null) => {
+    setActiveWorkflowId(id);
+    writeActiveWorkflowId(id);
+  }, []);
+
+  useEffect(() => {
+    const workflow = ensureActiveStoredWorkflow({ version: 1, nodes, edges });
+    changeActiveWorkflow(workflow.id);
+  }, [changeActiveWorkflow]);
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -1015,6 +1022,7 @@ export function App() {
             <div className="toolbar-tools">
               <div className="toolbar-tools__title">工具配置</div>
               <div className="toolbar-tools__actions">
+                <button onClick={() => setWorkflowManagerOpen(true)}>工作流管理</button>
                 <button onClick={() => setGlobalEnvOpen(true)}>全局环境依赖</button>
                 <button onClick={() => setYoloManagerOpen(true)}>YOLO 训练</button>
                 <button onClick={() => setTemplateManagerOpen(true)}>模板管理</button>
@@ -1042,24 +1050,10 @@ export function App() {
                 {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad'] as WorkflowNode['type'][]).map((type) => (
                   <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type === 'liveVision' ? 'liveVision' : type}</button>
                 ))}
-                <button onClick={exportWorkflow}>导出</button>
-                <button onClick={() => fileInputRef.current?.click()}>导入</button>
               </div>
             </div>
           </div>
         </div>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".json,application/json"
-          style={{ display: 'none' }}
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) importWorkflow(file);
-            event.target.value = '';
-          }}
-        />
 
         <svg className="workflow-edges" width="100%" height="100%">
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${zoom})`}>
@@ -1234,6 +1228,15 @@ export function App() {
           />
         )}
       </div>
+      {workflowManagerOpen && (
+        <WorkflowManagerModal
+          currentDocument={{ version: 1, nodes, edges }}
+          activeWorkflowId={activeWorkflowId}
+          onClose={() => setWorkflowManagerOpen(false)}
+          onOpenWorkflow={openWorkflow}
+          onActiveWorkflowChange={changeActiveWorkflow}
+        />
+      )}
       {globalEnvOpen && (
         <GlobalEnvModal
           onClose={() => setGlobalEnvOpen(false)}

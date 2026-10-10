@@ -25,6 +25,7 @@ import type {
   TemplateCreatePayload,
   TemplateDefinition,
   TemplateFolder,
+  TemplateLibraryListResult,
   TemplateUpdatePatch,
   YoloAnnotation,
   YoloClassDefinition,
@@ -138,6 +139,23 @@ async function loadIndex(): Promise<TemplateIndex> {
 async function saveIndex(index: TemplateIndex) {
   await ensureTemplatesDir();
   await writeFile(indexFile(), JSON.stringify(index, null, 2), 'utf8');
+}
+
+async function detectStoredTemplates(templates: TemplateDefinition[]): Promise<{ templates: TemplateDefinition[]; missingCount: number }> {
+  const detected = await Promise.all(
+    templates.map(async (template) => {
+      try {
+        const imageStat = await stat(path.join(templateImagesDir(), path.basename(template.imageFile)));
+        return imageStat.isFile() ? template : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return {
+    templates: detected.filter((template): template is TemplateDefinition => template !== null),
+    missingCount: detected.filter((template) => template === null).length,
+  };
 }
 
 type CloudApiIndex = {
@@ -1212,11 +1230,22 @@ function registerOcrIpc() {
 }
 
 function registerTemplateIpc() {
-  ipcMain.handle('templates:list', async (): Promise<{ folders: TemplateFolder[]; templates: TemplateDefinition[] }> => {
+  ipcMain.handle('templates:list', async (): Promise<TemplateLibraryListResult> => {
     const index = await loadIndex();
+    const detected = await detectStoredTemplates(index.templates);
+    const folderIds = new Set(index.folders.map((folder) => folder.id));
+    const libraryTemplates = detected.templates.filter((template) => template.folderId && folderIds.has(template.folderId));
     return {
       folders: index.folders.sort((a, b) => a.name.localeCompare(b.name)),
-      templates: index.templates.sort((a, b) => b.updatedAt - a.updatedAt),
+      templates: detected.templates.sort((a, b) => b.updatedAt - a.updatedAt),
+      stats: {
+        indexedCount: index.templates.length,
+        detectedCount: detected.templates.length,
+        libraryCount: libraryTemplates.length,
+        unclassifiedCount: detected.templates.length - libraryTemplates.length,
+        missingCount: detected.missingCount,
+        detectedAt: Date.now(),
+      },
     };
   });
 
