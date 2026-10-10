@@ -1,4 +1,4 @@
-import type { CloudApiProfile, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import type { CloudApiProfile, ConditionType, GamepadAction, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
 import { ModelPicker } from './ModelPicker';
@@ -7,6 +7,7 @@ import { TemplatePicker } from './TemplatePicker';
 type Props = {
   node: WorkflowNode | null;
   onChangeNode: (node: WorkflowNode) => void;
+  allNodes?: WorkflowNode[];
   style?: CSSProperties;
   templateVersion: number;
   cloudApiVersion?: number;
@@ -152,6 +153,7 @@ function recordKeyPress(e: { code: string; key: string }): { id: string; label: 
 export function PropertiesPanel({
   node,
   onChangeNode,
+  allNodes = [],
   style,
   templateVersion,
   cloudApiVersion = 0,
@@ -183,6 +185,7 @@ export function PropertiesPanel({
   const [apiProfiles, setApiProfiles] = useState<CloudApiProfile[]>([]);
   const [streamSources, setStreamSources] = useState<StreamSourceProfile[]>([]);
   const [streamSourceLoading, setStreamSourceLoading] = useState(false);
+  const isDirectStream = (id?: string) => Boolean(id && streamSources.find((source) => source.id === id)?.transport === 'ps5Direct');
   const [windows, setWindows] = useState<StreamWindowInfo[]>([]);
   const [probingWindows, setProbingWindows] = useState(false);
   const [keyRecording, setKeyRecording] = useState(false);
@@ -732,18 +735,93 @@ export function PropertiesPanel({
           </section>
         )}
 
-        {node.type === 'if' && (
-          <section className="properties-panel__group">
-            <h3>判断配置</h3>
-            <label>
-              表达式
-              <input
-                value={node.data.expression}
-                onChange={(e) => onChangeNode(updateNodeData(node, { expression: e.target.value }))}
-              />
-            </label>
-          </section>
-        )}
+        {node.type === 'if' && (() => {
+          const conditionType = node.data.conditionType ?? 'lastOk';
+          const conditionOptions: { value: ConditionType; label: string; description: string }[] = [
+            { value: 'lastOk', label: '上一次节点', description: '检查前面连线的节点是否执行成功' },
+            { value: 'nodeCheck', label: '指定节点', description: '监视某个节点的状态（不需要连线）' },
+            { value: 'custom', label: '自定义表达式', description: '手写JavaScript表达式（高级模式）' },
+          ];
+          const currentOption = conditionOptions.find((opt) => opt.value === conditionType) ?? conditionOptions[0];
+
+          // Auto-generate expression based on conditionType
+          const getExpression = (type: ConditionType): string => {
+            switch (type) {
+              case 'lastOk': return 'ctx.lastOk';
+              case 'nodeCheck': {
+                // Find node by title
+                const targetTitle = node.data.targetNodeTitle ?? '';
+                const targetNode = allNodes.find((n) => n.title === targetTitle);
+                return targetNode ? `ctx.results['${targetNode.id}']?.status === 'ok'` : 'ctx.lastOk';
+              }
+              case 'custom': return node.data.expression ?? 'true';
+              default: return 'ctx.lastOk';
+            }
+          };
+
+          const handleConditionTypeChange = (type: ConditionType) => {
+            const expr = getExpression(type);
+            onChangeNode(updateNodeData(node, { conditionType: type, expression: expr }));
+          };
+
+          return (
+            <section className="properties-panel__group">
+              <h3>判断配置</h3>
+              <label>
+                条件类型
+                <CustomSelect
+                  value={conditionType}
+                  options={conditionOptions.map((opt) => ({ value: opt.value, label: opt.label }))}
+                  onChange={(v) => handleConditionTypeChange(v as ConditionType)}
+                />
+              </label>
+              <p className="properties-panel__hint">{currentOption.description}</p>
+
+              {conditionType === 'custom' ? (
+                <>
+                  <label>
+                    表达式
+                    <input
+                      value={node.data.expression ?? ''}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { expression: e.target.value }))}
+                      placeholder="例如：ctx.lastOk && ctx.last.x > 300"
+                    />
+                  </label>
+                  <div className="properties-panel__hint">
+                    <p>可用变量：</p>
+                    <ul>
+                      <li><code>ctx.lastOk</code> — 上一次检测是否成功</li>
+                      <li><code>ctx.last</code> — 上一次检测结果（含 x, y, nodeId）</li>
+                      <li><code>ctx.frame</code> — 是否有截图</li>
+                      <li><code>ctx.results</code> — 所有节点的执行结果</li>
+                    </ul>
+                  </div>
+                </>
+              ) : null}
+              {conditionType === 'nodeCheck' ? (
+                <label>
+                  选择节点
+                  <CustomSelect
+                    value={node.data.targetNodeTitle ?? ''}
+                    options={[
+                      { value: '', label: '请选择节点' },
+                      ...allNodes
+                        .filter((n) => n.id !== node.id)
+                        .map((n) => ({ value: n.title, label: n.title }))
+                    ]}
+                    onChange={(v) => {
+                      const expr = getExpression(conditionType);
+                      onChangeNode(updateNodeData(node, { targetNodeTitle: v, expression: expr }));
+                    }}
+                  />
+                </label>
+              ) : null}
+              <p className="properties-panel__hint" style={{ fontSize: '11px', opacity: 0.6 }}>
+                映射表达式：{node.data.expression ?? getExpression(conditionType)}
+              </p>
+            </section>
+          );
+        })()}
 
         {node.type === 'loop' && (
           <section className="properties-panel__group">
@@ -835,6 +913,44 @@ export function PropertiesPanel({
         {node.type === 'keyboard' && (
           <section className="properties-panel__group">
             <h3>键盘配置</h3>
+            <label>
+              发送目标
+              <CustomSelect
+                value={node.data.target ?? 'global'}
+                options={[
+                  { value: 'global', label: '系统全局' },
+                  { value: 'stream', label: '指定串流设备' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { target: v as 'global' | 'stream' }))}
+              />
+            </label>
+            {(node.data.target ?? 'global') === 'stream' && (
+              <>
+                <label>
+                  串流设备
+                  <CustomSelect
+                    value={node.data.streamSourceId ?? ''}
+                    options={[{ value: '', label: '未选择' }, ...streamSources.map((s) => ({ value: s.id, label: s.name || s.windowHint || s.id }))]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                  />
+                </label>
+                {!isDirectStream(node.data.streamSourceId) && (
+                  <label>
+                    窗口标题关键字（可选）
+                    <input
+                      value={node.data.streamWindowHint ?? ''}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { streamWindowHint: e.target.value }))}
+                      placeholder="例如：Remote Play / Chiaki / Xbox"
+                    />
+                  </label>
+                )}
+                <p className="properties-panel__hint">
+                  {isDirectStream(node.data.streamSourceId)
+                    ? 'PS5 直连设备：键盘事件直接映射为 Remote Play 协议控制器事件，不依赖窗口焦点。'
+                    : '外部窗口设备：按键发送到对应串流窗口；若未找到窗口，将回退到系统全局按键。'}
+                </p>
+              </>
+            )}
             {node.data.mode !== 'type' ? (
               <>
                 <button
@@ -906,6 +1022,301 @@ export function PropertiesPanel({
                 ? '逐字符输入：ABCD 打大写，{enter}、{tab}、{esc} 表示特殊键'
                 : '推荐用上方「录制按键」录入；也可手动写：A、command+left、enter'}
             </p>
+          </section>
+        )}
+
+
+        {node.type === 'gamepad' && (
+          <section className="properties-panel__group">
+            <h3>手柄配置</h3>
+            <label>
+              手柄按键
+              <CustomSelect
+                value={node.data.action}
+                options={[
+                  { value: 'pressA', label: 'A' },
+                  { value: 'pressB', label: 'B' },
+                  { value: 'pressX', label: 'X' },
+                  { value: 'pressY', label: 'Y' },
+                  { value: 'pressRT', label: 'RT' },
+                  { value: 'pressLT', label: 'LT' },
+                  { value: 'pressRB', label: 'RB' },
+                  { value: 'pressLB', label: 'LB' },
+                  { value: 'pressSTART', label: 'START' },
+                  { value: 'pressBACK', label: 'BACK' },
+                  { value: 'pressHOME', label: 'HOME' },
+                  { value: 'pressDPADU', label: '↑' },
+                  { value: 'pressDPADD', label: '↓' },
+                  { value: 'pressDPADL', label: '←' },
+                  { value: 'pressDPADR', label: '→' },
+                  { value: 'pressLU', label: 'L↑' },
+                  { value: 'pressLD', label: 'L↓' },
+                  { value: 'pressLL', label: 'L←' },
+                  { value: 'pressLR', label: 'L→' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { action: v as GamepadAction }))}
+              />
+            </label>
+            <label>
+              发送目标
+              <CustomSelect
+                value={node.data.target ?? 'global'}
+                options={[
+                  { value: 'global', label: '系统全局' },
+                  { value: 'stream', label: '指定串流设备' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { target: v as 'global' | 'stream' }))}
+              />
+            </label>
+            {(node.data.target ?? 'global') === 'stream' && (
+              <>
+                <label>
+                  串流设备
+                  <CustomSelect
+                    value={node.data.streamSourceId ?? ''}
+                    options={[{ value: '', label: '未选择' }, ...streamSources.map((s) => ({ value: s.id, label: s.name || s.windowHint || s.id }))]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                  />
+                </label>
+                {!isDirectStream(node.data.streamSourceId) && (
+                  <label>
+                    窗口标题关键字（可选）
+                    <input
+                      value={node.data.streamWindowHint ?? ''}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { streamWindowHint: e.target.value }))}
+                      placeholder="例如：Remote Play / Chiaki / Xbox"
+                    />
+                  </label>
+                )}
+                <p className="properties-panel__hint">
+                  {isDirectStream(node.data.streamSourceId)
+                    ? 'PS5 直连设备：键盘事件直接映射为 Remote Play 协议控制器事件，不依赖窗口焦点。'
+                    : '外部窗口设备：按键发送到对应串流窗口；若未找到窗口，将回退到系统全局按键。'}
+                </p>
+              </>
+            )}
+            <label>
+              按键持续时间（毫秒）
+              <input
+                type="number"
+                min={0}
+                max={10000}
+                value={node.data.durationMs ?? 0}
+                onChange={(e) => onChangeNode(updateNodeData(node, { durationMs: Math.max(0, Number(e.target.value) || 0) }))}
+              />
+            </label>
+            <label>
+              按键后延迟（毫秒）
+              <input
+                type="number"
+                min={0}
+                max={10000}
+                value={node.data.delayMs ?? 100}
+                onChange={(e) => onChangeNode(updateNodeData(node, { delayMs: Math.max(0, Number(e.target.value) || 0) }))}
+              />
+            </label>
+            {!isDirectStream(node.data.streamSourceId) && (
+              <>
+            <label>
+              使用CDP协议
+              <CustomSelect
+                value={node.data.useCdp ? 'true' : 'false'}
+                options={[
+                  { value: 'false', label: '否（使用键盘映射）' },
+                  { value: 'true', label: '是（使用CDP协议）' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { useCdp: v === 'true' }))}
+              />
+            </label>
+            {node.data.useCdp && (
+              <label>
+                CDP调试端口
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={node.data.cdpPort ?? 9222}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { cdpPort: Math.max(1, Number(e.target.value) || 9222) }))}
+                />
+              </label>
+            )}
+            <label>
+              使用SharedMemory
+              <CustomSelect
+                value={node.data.useSharedMemory ? 'true' : 'false'}
+                options={[
+                  { value: 'false', label: '否（使用键盘映射）' },
+                  { value: 'true', label: '是（使用SharedMemory）' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { useSharedMemory: v === 'true' }))}
+              />
+            </label>
+            {node.data.useSharedMemory && (
+              <p className="properties-panel__hint">
+                SharedMemory模式：通过共享内存直接发送手柄按键到Chiaki-ng，延迟更低。
+              </p>
+            )}
+              </>
+            )}
+            <p className="properties-panel__hint">
+              {isDirectStream(node.data.streamSourceId)
+                ? 'PS5 直连设备：所有手柄动作直接发送到主机协议会话。'
+                : node.data.useCdp
+                  ? 'CDP协议：直接发送手柄按键到串流窗口，需要串流软件支持CDP调试端口'
+                  : '键盘映射：将手柄按键映射到键盘按键，然后发送到串流窗口'}
+            </p>
+          </section>
+        )}
+
+        {node.type === 'liveVision' && (
+          <section className="properties-panel__group">
+            <h3>实时检测配置</h3>
+            <label>
+              画面来源
+              <CustomSelect
+                value={node.data.source ?? 'stream'}
+                options={[
+                  { value: 'screen', label: '系统屏幕' },
+                  { value: 'window', label: '本机指定窗口' },
+                  { value: 'stream', label: '串流窗口' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { source: v as 'screen' | 'window' | 'stream' }))}
+              />
+            </label>
+
+            {node.data.source === 'stream' && (
+              <>
+                <label>
+                  串流设备
+                  <CustomSelect
+                    value={node.data.streamSourceId ?? ''}
+                    options={[{ value: '', label: '未选择' }, ...streamSources.map((s) => ({ value: s.id, label: s.name || s.windowHint || s.id }))]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                  />
+                </label>
+                <label>
+                  串流窗口标题关键字（可选）
+                  <input
+                    value={node.data.windowHint ?? ''}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { windowHint: e.target.value }))}
+                    placeholder="例如：PS Remote Play / Chiaki / Xbox"
+                  />
+                </label>
+              </>
+            )}
+            <div className="grid-two">
+              <label>
+                目标帧率（FPS）
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={node.data.fps ?? 10}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { fps: Math.max(1, Math.min(60, Number(e.target.value) || 10)) }))}
+                />
+              </label>
+              <label>
+                检测超时（ms）
+                <input
+                  type="number"
+                  min={500}
+                  step={100}
+                  value={node.data.timeoutMs ?? 5000}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { timeoutMs: Math.max(500, Number(e.target.value) || 5000) }))}
+                />
+              </label>
+            </div>
+            <label>
+              检测方式
+              <CustomSelect
+                value={node.data.detectMode ?? 'yolo'}
+                options={[
+                  { value: 'yolo', label: 'YOLO 检测' },
+                  { value: 'template', label: '模板匹配' },
+                  { value: 'both', label: 'YOLO + 模板' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { detectMode: v as 'yolo' | 'template' | 'both' }))}
+              />
+            </label>
+            {node.data.detectMode !== 'template' && (
+              <>
+                <label>
+                  YOLO 模型
+                  <ModelPicker
+                    value={node.data.yoloModelPath}
+                    onChange={(model) => onChangeNode(updateNodeData(node, { yoloModelPath: model.path }))}
+                    refreshKey={yoloVersion ?? 0}
+                  />
+                </label>
+                {onOpenYoloManager && (
+                  <button className="properties-panel__ghost-button" onClick={onOpenYoloManager}>
+                    管理模型…
+                  </button>
+                )}
+                <label>
+                  目标标签（可选）
+                  <input
+                    value={node.data.yoloLabel ?? ''}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { yoloLabel: e.target.value }))}
+                    placeholder="留空表示匹配任意类别"
+                  />
+                </label>
+                <label>
+                  YOLO 置信阈值
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={node.data.yoloThreshold ?? 60}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { yoloThreshold: Math.max(1, Math.min(100, Number(e.target.value) || 60)) }))}
+                  />
+                </label>
+              </>
+            )}
+            {/* 模板匹配配置 */}
+            {(node.data.detectMode === 'template' || node.data.detectMode === 'both') && (
+              <>
+                <label>
+                  匹配模板
+                  <TemplatePicker
+                    templates={templates}
+                    folders={folders}
+                    value={node.data.templatePath ?? ''}
+                    onChange={(templateId) => {
+                      const tpl = templates.find((t) => t.id === templateId);
+                      onChangeNode(updateNodeData(node, { templatePath: tpl?.imageFile ? templateId : templateId }));
+                    }}
+                  />
+                </label>
+                <label>
+                  模板置信阈值
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={node.data.templateThreshold ?? 80}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { templateThreshold: Math.max(1, Math.min(100, Number(e.target.value) || 80)) }))}
+                  />
+                </label>
+                {onOpenTemplateManager && (
+                  <button className="properties-panel__ghost-button" onClick={onOpenTemplateManager}>
+                    管理模板…
+                  </button>
+                )}
+              </>
+            )}
+            <label>
+              检测到目标后
+              <CustomSelect
+                value={node.data.action ?? 'returnCoords'}
+                options={[
+                  { value: 'returnCoords', label: '返回坐标（交给后续节点处理）' },
+                  { value: 'click', label: '直接点击检测到的目标' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { action: v as 'returnCoords' | 'click' }))}
+              />
+            </label>
+            <p className="properties-panel__hint">实时检测会按目标帧率持续读取画面，命中目标后立刻返回坐标或点击；未命中则持续检测直到超时。</p>
           </section>
         )}
 

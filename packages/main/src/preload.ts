@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   OcrEngine,
+  Ps5AccountProfile,
+  Ps5Frame,
+  Ps5HostInfo,
+  Ps5HostTestResult,
+  Ps5RuntimeStatus,
+  Ps5StreamResolution,
   StreamSourceProfile,
   TemplateCreatePayload,
   TemplateDefinition,
@@ -101,12 +107,42 @@ contextBridge.exposeInMainWorld('streamAPI', {
     ipcRenderer.invoke('stream:captureScreenshot', payload),
 });
 
+contextBridge.exposeInMainWorld('ps5API', {
+  status: (): Promise<Ps5RuntimeStatus> => ipcRenderer.invoke('ps5:status'),
+  discover: (timeout?: number): Promise<{ devices: Ps5HostInfo[] }> => ipcRenderer.invoke('ps5:discover', timeout),
+  getPsnLoginUrl: (): Promise<{ url: string }> => ipcRenderer.invoke('ps5:getPsnLoginUrl'),
+  loginAndLookup: (): Promise<{ onlineId: string; accountId: string; source: string }> =>
+    ipcRenderer.invoke('ps5:loginAndLookup'),
+  lookupAccountIdFromRedirect: (redirectUrl: string): Promise<{ onlineId: string; accountId: string; source: string }> =>
+    ipcRenderer.invoke('ps5:lookupAccountIdFromRedirect', redirectUrl),
+  listAccounts: (): Promise<{ accounts: Ps5AccountProfile[] }> => ipcRenderer.invoke('ps5:listAccounts'),
+  saveAccount: (payload: Partial<Ps5AccountProfile> & { onlineId: string; accountId: string }): Promise<{ account: Ps5AccountProfile }> =>
+    ipcRenderer.invoke('ps5:saveAccount', payload),
+  removeAccount: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('ps5:removeAccount', id),
+  listHosts: (): Promise<{ hosts: Array<{ host: string; accountId: string; updatedAt: number }> }> =>
+    ipcRenderer.invoke('ps5:listHosts'),
+  testHost: (host: string): Promise<Ps5HostTestResult> => ipcRenderer.invoke('ps5:testHost', host),
+  pair: (payload: { host: string; accountId: string; pin: string }): Promise<{ host: string; accountId: string }> =>
+    ipcRenderer.invoke('ps5:pair', payload),
+  connect: (payload: { host: string; accountId: string; resolution?: Ps5StreamResolution; fps?: number; quality?: string }): Promise<Ps5RuntimeStatus> =>
+    ipcRenderer.invoke('ps5:connect', payload),
+  disconnect: (): Promise<{ connected: boolean }> => ipcRenderer.invoke('ps5:disconnect'),
+  getFrame: (): Promise<Ps5Frame> => ipcRenderer.invoke('ps5:getFrame'),
+  sendKey: (key: string, down: boolean): Promise<{ key: string; button: string; down: boolean }> =>
+    ipcRenderer.invoke('ps5:sendKey', key, down),
+  sendButton: (action: string, pressed?: boolean, durationMs = 0): Promise<{ action: string; button: string }> =>
+    ipcRenderer.invoke('ps5:sendButton', action, pressed, durationMs),
+  setStick: (stick: 'left' | 'right', x: number, y: number): Promise<{ stick: string; x: number; y: number }> =>
+    ipcRenderer.invoke('ps5:setStick', stick, x, y),
+});
+
 contextBridge.exposeInMainWorld('engineAPI', {
   envInfo: () => ipcRenderer.invoke('engine:envInfo'),
   templateMatch: (payload: { imageDataUrl: string; templateId?: string; templatePath?: string; threshold?: number }) =>
     ipcRenderer.invoke('engine:templateMatch', payload),
   yoloDetect: (payload: { imageDataUrl: string; modelId?: string; modelPath?: string; threshold?: number }) =>
     ipcRenderer.invoke('engine:yoloDetect', payload),
+  installChiaki: (platform: string) => ipcRenderer.invoke('engine:installChiaki', platform),
 });
 
 contextBridge.exposeInMainWorld('templateAPI', {
@@ -150,6 +186,8 @@ contextBridge.exposeInMainWorld('yoloAPI', {
   exportModel: (id: string, format: 'onnx' | 'tflite' | 'openvino', imageSize: number) => ipcRenderer.invoke('yolo:exportModel', id, format, imageSize),
   removeModel: (id: string) => ipcRenderer.invoke('yolo:removeModel', id),
   setActiveModel: (id: string) => ipcRenderer.invoke('yolo:setActiveModel', id),
+  importModel: (payload: { file: string; name: string; baseModel?: string; imageSize?: number; numClasses?: number }) => ipcRenderer.invoke("yolo:importModel", payload),
+  pickModelFile: () => ipcRenderer.invoke("yolo:pickModelFile"),
   getEnvInfo: () => ipcRenderer.invoke('yolo:getEnvInfo'),
   installPackage: (packageName: string) => ipcRenderer.invoke('yolo:installPackage', packageName),
   getYoloxPath: () => ipcRenderer.invoke('yolo:getYoloxPath'),

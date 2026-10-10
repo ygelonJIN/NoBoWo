@@ -13,6 +13,7 @@ import type {
   RecognizeStrategyKey,
   RecognizeStrategyRun,
   ScreenshotNode,
+  StreamSourceProfile,
   TemplateDefinition,
   WorkflowDocument,
   WorkflowNode,
@@ -23,6 +24,7 @@ import type {
   YoloModel,
 } from '@nobowo/core';
 import { runVisionEngine, writeImageToTemp } from './engine';
+import { getPs5RuntimeClient } from './ps5Runtime';
 
 const STRATEGY_NAMES: Record<RecognizeStrategyKey, string> = {
   coords: '坐标回放',
@@ -62,15 +64,15 @@ async function loadCloudApiIndex(): Promise<{ profiles: CloudApiProfile[] }> {
 
 const streamSourcesFile = () => join(app.getPath('userData'), 'stream-sources.json');
 
-async function loadStreamSources(): Promise<{ sources: Array<{ id: string; type: string; windowHint?: string }> }> {
+async function loadStreamSources(): Promise<{ sources: Array<Pick<StreamSourceProfile, 'id' | 'type' | 'windowHint' | 'transport' | 'ps5AccountId' | 'host'>> }> {
   try {
     const raw = await readFile(streamSourcesFile(), 'utf8');
     const parsed = JSON.parse(raw) as { sources?: unknown[] } | unknown[];
     if (Array.isArray(parsed)) {
-      return { sources: parsed as Array<{ id: string; type: string; windowHint?: string }> };
+      return { sources: parsed as Array<Pick<StreamSourceProfile, 'id' | 'type' | 'windowHint' | 'transport' | 'ps5AccountId' | 'host'>> };
     }
     const obj = parsed as { sources?: unknown[] };
-    return { sources: (obj.sources ?? []) as Array<{ id: string; type: string; windowHint?: string }> };
+    return { sources: (obj.sources ?? []) as Array<Pick<StreamSourceProfile, 'id' | 'type' | 'windowHint' | 'transport' | 'ps5AccountId' | 'host'>> };
   } catch {
     return { sources: [] };
   }
@@ -772,7 +774,25 @@ export class WorkflowExecutor {
       }
 
       case 'if': {
-        const expr = node.data.expression?.trim() || 'true';
+        const conditionType = node.data.conditionType ?? 'lastDetectOk';
+        let expr = node.data.expression?.trim() || 'true';
+
+        // Auto-generate expression based on conditionType if not custom
+        if (conditionType !== 'custom') {
+          switch (conditionType) {
+            case 'lastOk':
+              expr = 'ctx.lastOk';
+              break;
+            case 'nodeCheck': {
+              // Find node by title
+              const targetTitle = node.data.targetNodeTitle ?? '';
+              const targetNode = this.workflow?.nodes.find((n) => n.title === targetTitle);
+              expr = targetNode ? `ctx.results['${targetNode.id}']?.status === 'ok'` : 'ctx.lastOk';
+              break;
+            }
+          }
+        }
+
         let branch: 'true' | 'false';
         try {
           branch = this.evalExpression(expr) ? 'true' : 'false';
@@ -783,8 +803,13 @@ export class WorkflowExecutor {
             message: `表达式求值失败：${err instanceof Error ? err.message : String(err)}`,
           };
         }
-        log('info', `条件「${expr}」为${branch === 'true' ? '真' : '假'}`);
-        return { nodeId: node.id, status: 'ok', branch, message: `条件「${expr}」→ ${branch === 'true' ? '真' : '假'}` };
+
+        const conditionLabel = conditionType === 'lastOk' ? '上一次节点' :
+          conditionType === 'nodeCheck' ? `指定节点：${node.data.targetNodeTitle ?? '未选择'}` :
+          '自定义条件';
+
+        log('info', `条件「${conditionLabel}」为${branch === 'true' ? '真' : '假'}`);
+        return { nodeId: node.id, status: 'ok', branch, message: `条件「${conditionLabel}」→ ${branch === 'true' ? '真' : '假'}` };
       }
 
       case 'loop':
@@ -809,9 +834,38 @@ export class WorkflowExecutor {
       }
 
       case 'keyboard': {
-        const { keys, mode } = node.data;
+        const { keys, mode, target, streamSourceId } = node.data;
         if (!keys) return { nodeId: node.id, status: 'fail', message: '按键内容为空' };
         log('info', `按键：${keys}（${mode}${mode === 'type' ? ` · 间隔 ${node.data.interval ?? 200}ms` : ''}）`);
+
+        if (target === 'stream' && streamSourceId) {
+          const profile = (await loadStreamSources()).sources.find((source) => source.id === streamSourceId);
+          if (profile?.transport === 'ps5Direct') {
+            try {
+              const api = getPs5RuntimeClient();
+              const keyNames = keys.split('+').map((key) => key.trim()).filter(Boolean);
+              if (mode === 'hold') {
+                for (const key of keyNames) await api.sendKey(key, true);
+              } else if (mode === 'type') {
+                const interval = node.data.interval ?? 200;
+                for (const key of keys) {
+                  await api.sendKey(key, true);
+                  await api.sendKey(key, false);
+                  if (interval > 0) await new Promise((resolve) => setTimeout(resolve, interval));
+                }
+              } else {
+                for (const key of keyNames) {
+                  await api.sendKey(key, true);
+                  await api.sendKey(key, false);
+                }
+              }
+              return { nodeId: node.id, status: 'ok', message: `PS5 协议按键：${keys}（${mode}）` };
+            } catch (err) {
+              return { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
+            }
+          }
+        }
+
         const res = await runVisionEngine(
           'input',
           {
@@ -824,6 +878,171 @@ export class WorkflowExecutor {
         );
         if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '按键失败' };
         return { nodeId: node.id, status: 'ok', message: `按键：${keys}（${mode}）` };
+      }
+
+      case 'gamepad': {
+        const { action, target, streamSourceId, streamWindowHint, durationMs, delayMs, useCdp, cdpPort, useSharedMemory } = node.data;
+        if (!action) return { nodeId: node.id, status: 'fail', message: '手柄动作为空' };
+
+        log('info', `手柄按键：${action}（目标：${target}${target === 'stream' ? ` → ${streamWindowHint ?? streamSourceId}` : ''}，CDP：${useCdp ? '是' : '否'}，SharedMemory：${useSharedMemory ? '是' : '否'}）`);
+
+        // 获取串流窗口信息
+        let windowHint = streamWindowHint;
+        let streamProfile: Pick<StreamSourceProfile, 'id' | 'type' | 'windowHint' | 'transport' | 'ps5AccountId' | 'host'> | undefined;
+        if (target === 'stream' && streamSourceId) {
+          const index = await loadStreamSources();
+          streamProfile = index.sources.find((s) => s.id === streamSourceId);
+          if (streamProfile?.windowHint) {
+            windowHint = streamProfile.windowHint;
+          }
+        }
+
+        if (streamProfile?.transport === 'ps5Direct') {
+          try {
+            const result = await getPs5RuntimeClient().sendButton(action, undefined, durationMs ?? 0);
+            if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            return { nodeId: node.id, status: 'ok', message: `PS5 协议手柄：${action} → ${result.button}` };
+          } catch (err) {
+            return { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
+          }
+        }
+
+        const res = await runVisionEngine(
+          'gamepad',
+          {
+            action,
+            target,
+            streamType: streamProfile?.type === 'xbox' ? 'xbox' : 'ps5',
+            windowHint,
+            durationMs: durationMs ?? 0,
+            delayMs: delayMs ?? 100,
+            useCdp: useCdp ?? false,
+            cdpPort: cdpPort ?? 9222,
+            useSharedMemory: useSharedMemory ?? false,
+          },
+          15000,
+        );
+
+        if (!res.ok) return { nodeId: node.id, status: 'fail', message: res.message ?? '手柄按键失败' };
+        return { nodeId: node.id, status: 'ok', message: `手柄按键：${action}` };
+      }
+
+      case 'liveVision': {
+        const source = node.data.source ?? 'stream';
+        const fps = Math.max(1, Math.min(60, node.data.fps ?? 10));
+        const timeoutMs = Math.max(500, node.data.timeoutMs ?? 5000);
+        const detectMode = node.data.detectMode ?? 'yolo';
+        const action = node.data.action ?? 'returnCoords';
+
+        log('info', `实时检测：来源 ${source}，${fps} FPS，${timeoutMs}ms 超时，模式 ${detectMode}`);
+        const start = Date.now();
+        const frameInterval = Math.round(1000 / fps);
+        let frames = 0;
+        let hits = 0;
+        let latestHit: { x: number; y: number; label?: string; confidence?: number } | null = null;
+
+        const cap = await this.captureNodeImage({ id: `${node.id}-cap`, type: 'screenshot', title: `${node.title} Frame`, position: node.position, enabled: true, data: {
+          regionMode: 'full',
+          source,
+          streamSourceId: node.data.streamSourceId,
+          windowHint: node.data.windowHint,
+          windowId: node.data.windowId,
+          windowApp: node.data.windowApp,
+        } } as ScreenshotNode);
+        if (!cap.ok || !cap.frame) {
+          return { nodeId: node.id, status: 'fail', message: cap.message ?? '实时检测：无法获取画面' };
+        }
+
+        while (!this.stopped && this.runGeneration === generation) {
+          if (Date.now() - start > timeoutMs) {
+            return { nodeId: node.id, status: 'fail', message: `实时检测超时（${timeoutMs}ms）`, liveFps: Math.round(frames / Math.max(0.001, (Date.now() - start) / 1000)), liveFrameCount: frames, liveHitCount: hits, liveHitRate: frames > 0 ? hits / frames : 0, liveLatestHit: latestHit ?? undefined };
+          }
+
+          frames += 1;
+          let hit: { x: number; y: number; label?: string; confidence?: number } | null = null;
+
+          if (detectMode === 'yolo' || detectMode === 'both') {
+            const imagePath = await writeImageToTemp(cap.frame!);
+            if (imagePath) {
+              const res = await runVisionEngine(
+                'yolo',
+                {
+                  imagePath,
+                  modelPath: node.data.yoloModelPath,
+                  confThre: (node.data.yoloThreshold ?? 60) / 100,
+                  nmsThre: 0.45,
+                  classNames: node.data.yoloLabel ? [node.data.yoloLabel] : [],
+                },
+                20000,
+              );
+              if (res.ok) {
+                const result = res as { detections?: Array<{ label?: string; confidence?: number; box?: [number, number, number, number] }> };
+                const det = result.detections?.[0];
+                if (det?.box) {
+                  const [bx, by, bw, bh] = det.box;
+                  hit = { x: bx + bw / 2, y: by + bh / 2, label: det.label, confidence: det.confidence };
+                }
+              }
+            }
+          }
+
+          // Template matching
+          if (!hit && (detectMode === 'template' || detectMode === 'both')) {
+            const templateIdOrPath = node.data.templatePath;
+            if (templateIdOrPath) {
+              const imagePath = await writeImageToTemp(cap.frame!);
+              if (imagePath) {
+                // Resolve template ID to file path
+                let templateFilePath = templateIdOrPath;
+                try {
+                  const idx = await loadTemplateIndex();
+                  const tplDef = idx.templates.find((t: any) => t.id === templateIdOrPath) as any;
+                  if (tplDef?.imageFile) {
+                    templateFilePath = join(templateImagesDir(), tplDef.imageFile);
+                  }
+                } catch {}
+                const res = await runVisionEngine(
+                  'template',
+                  {
+                    imagePath,
+                    templatePath: templateFilePath,
+                    threshold: node.data.templateThreshold ?? 80,
+                  },
+                  20000,
+                );
+                if (res.ok) {
+                  const result = res as { ok?: boolean; confidence?: number; clickX?: number; clickY?: number; x?: number; y?: number; width?: number; height?: number };
+                  if (result.ok && result.clickX !== undefined && result.clickY !== undefined) {
+                    hit = { x: result.clickX, y: result.clickY, label: templateIdOrPath, confidence: result.confidence };
+                  }
+                }
+              }
+            }
+          }
+
+
+          if (hit) {
+            hits += 1;
+            latestHit = hit;
+            const hitLabel = hit.label ? `：${hit.label}` : '';
+            const hitConf = typeof hit.confidence === 'number' ? `（${hit.confidence}%）` : '';
+            const metrics = { liveFps: Math.round(frames / Math.max(0.001, (Date.now() - start) / 1000)), liveFrameCount: frames, liveHitCount: hits, liveHitRate: frames > 0 ? hits / frames : 0, liveLatestHit: hit };
+            if (action === 'returnCoords') {
+              return { nodeId: node.id, status: 'ok', hitCoords: { x: hit.x, y: hit.y }, message: `检测到目标${hitLabel}${hitConf}`, ...metrics };
+            }
+            const clickRes = await runVisionEngine(
+              'input',
+              { action: 'click_window', windowId: cap.windowId, windowHint: node.data.windowHint, x: hit.x, y: hit.y },
+              15000,
+            );
+            if (!clickRes.ok) return { nodeId: node.id, status: 'fail', message: clickRes.message ?? '检测到目标但点击失败', ...metrics };
+            return { nodeId: node.id, status: 'ok', message: `检测到目标${hitLabel}${hitConf}并点击`, ...metrics };
+          }
+
+          await sleep(frameInterval);
+        }
+
+        return { nodeId: node.id, status: 'fail', message: '实时检测被中止', liveFps: Math.round(frames / Math.max(0.001, (Date.now() - start) / 1000)), liveFrameCount: frames, liveHitCount: hits, liveHitRate: frames > 0 ? hits / frames : 0, liveLatestHit: latestHit ?? undefined };
       }
 
       case 'recognize': {
@@ -1446,6 +1665,23 @@ export class WorkflowExecutor {
         const profile = index.sources.find((source) => source.id === node.data.streamSourceId);
         if (!profile) {
           return { ok: false, message: '找不到串流设备配置，请在「串流设备」中先创建并保存设备' };
+        }
+        if (profile.transport === 'ps5Direct') {
+          try {
+            const frame = await getPs5RuntimeClient().getFrame();
+            return {
+              ok: true,
+              frame: frame.frame,
+              width: frame.width,
+              height: frame.height,
+              originX: 0,
+              originY: 0,
+              scaleX: 1,
+              scaleY: 1,
+            };
+          } catch (err) {
+            return { ok: false, message: err instanceof Error ? err.message : String(err) };
+          }
         }
         if (profile.type === 'local') {
           return profile.windowHint?.trim()

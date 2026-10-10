@@ -1,0 +1,10 @@
+# PS5 direct Remote Play runtime
+pyremoteplay==0.7.6
+av>=15,<16
+numpy>=1.26,<3
+opencv-python>=4.8
+pycryptodomex
+cryptography
+netifaces
+pyee==8.2.2
+requests

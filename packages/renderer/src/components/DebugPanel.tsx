@@ -12,6 +12,7 @@ const NODE_TYPE_LABELS: Record<string, string> = {
   keyboard: '按键',
   if: '条件',
   loop: '循环',
+  liveVision: '实时检测',
 };
 const STATUS_LABELS: Record<string, string> = {
   pending: '待执行',
@@ -128,9 +129,13 @@ function getNodeLabel(node: WorkflowNode): string {
       return `滚动 ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;
     }
     case 'keyboard':
-      return node.data.keys ? `按键：${node.data.keys}` : '空按键';
+      return node.data.keys ? `按键：${node.data.keys}${(node.data.target ?? 'global') === 'stream' ? ' → 串流窗口' : ''}` : `空按键${(node.data.target ?? 'global') === 'stream' ? ' → 串流窗口' : ''}`;
+    case 'liveVision':
+      return `实时检测 · ${node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${node.data.fps ?? 10} FPS`;
     case 'recognize':
       return '识别目标（五级策略栈）';
+    default:
+      return (node as { title?: string }).title ?? '';
   }
 }
 
@@ -318,6 +323,21 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
 
   const renderNodeDetails = (node: WorkflowNode, result?: NodeRunResult): ReactNode => {
     if (!result) return null;
+    if (node.type === 'liveVision') {
+      const hits = result.liveHitCount ?? 0;
+      const fps = result.liveFps ?? 0;
+      const hitRate = typeof result.liveHitRate === 'number' ? `${Math.round(result.liveHitRate * 100)}%` : '-';
+      const parts = [`FPS ${fps}`, `命中 ${hits}/${result.liveFrameCount ?? 0}`, `命中率 ${hitRate}`];
+      const latest = result.liveLatestHit;
+      const latestLine = latest ? `最近命中：${latest.label ?? '目标'}${typeof latest.confidence === 'number' ? `（${latest.confidence}%）` : ''} @ (${Math.round(latest.x)}, ${Math.round(latest.y)})` : null;
+      return (
+        <>
+          <div className="debug-panel__shot-detail-line">{parts.join(' · ')}</div>
+          {latestLine && <div className="debug-panel__shot-detail-line">{latestLine}</div>}
+          {result.message && <div className="debug-panel__shot-detail-line">{result.message}</div>}
+        </>
+      );
+    }
     if (node.type === 'recognize') {
       if (!result.strategies || result.strategies.length === 0) {
         return <div className="debug-panel__shot-detail-line">{result.message ?? '识别节点未返回策略明细'}</div>;
@@ -470,6 +490,47 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
           {summaryRows.length === 0 && <div className="debug-panel__empty">画布还没有节点</div>}
         </div>
       </section>
+
+      {/* Live metrics (仅 liveVision 运行态) */}
+      {currentStep?.type === 'liveVision' && (() => {
+        const r = runResults[currentStep.id];
+        const hits = r?.liveHitCount ?? 0;
+        const fps = r?.liveFps ?? 0;
+        const hitRate = typeof r?.liveHitRate === 'number' ? `${Math.round(r.liveHitRate * 100)}%` : '-';
+        const latest = r?.liveLatestHit;
+        return (
+          <section className="debug-panel__section">
+            <div className="debug-panel__section-title">实时检测指标</div>
+            <div className="live-metrics">
+              <div className="live-metric">
+                <div className="live-metric__label">FPS</div>
+                <div className="live-metric__value">{fps}</div>
+              </div>
+              <div className={`live-metric ${hits > 0 ? 'live-metric--hit' : ''}`}>
+                <div className="live-metric__label">命中 / 总帧</div>
+                <div className="live-metric__value">{hits} / {r?.liveFrameCount ?? 0}</div>
+              </div>
+              <div className={`live-metric ${hits > 0 ? 'live-metric--hit' : 'live-metric--danger'}`}>
+                <div className="live-metric__label">命中率</div>
+                <div className="live-metric__value">{hitRate}</div>
+              </div>
+            </div>
+            {latest && (
+              <div className="live-hits" style={{ marginTop: 10 }}>
+                <div className="live-hit live-hit--latest">
+                  <div className="live-hit__main">
+                    <div className="live-hit__label">最近命中：{latest.label ?? '目标'}</div>
+                    <div className="live-hit__sub">坐标 ({Math.round(latest.x)}, {Math.round(latest.y)})</div>
+                  </div>
+                  {typeof latest.confidence === 'number' && (
+                    <div className="live-hit__confidence">{latest.confidence}%</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        );
+      })()}
 
       {/* Engine logs */}
       <div className="debug-panel__logs">

@@ -7,6 +7,12 @@ import type {
   EngineRunResult,
   OcrEngine,
   OcrResult,
+  Ps5AccountProfile,
+  Ps5Frame,
+  Ps5HostInfo,
+  Ps5HostTestResult,
+  Ps5RuntimeStatus,
+  Ps5StreamResolution,
   StreamConnectionTestResult,
   StreamMotionResult,
   StreamProbeResult,
@@ -80,7 +86,25 @@ declare global {
       captureWindow: (sourceId: string) => Promise<StreamMotionResult>;
       captureSource: (sourceId: string) => Promise<StreamMotionResult>;
       captureScreenshot: (payload: { source: 'screen' | 'window' | 'stream'; streamSourceId?: string; windowHint?: string }) => Promise<StreamScreenshotResult>;
-      captureSource: (sourceId: string) => Promise<StreamMotionResult>;
+    };
+    ps5API?: {
+      status: () => Promise<Ps5RuntimeStatus>;
+      discover: (timeout?: number) => Promise<{ devices: Ps5HostInfo[] }>;
+      getPsnLoginUrl: () => Promise<{ url: string }>;
+      loginAndLookup: () => Promise<{ onlineId: string; accountId: string; source: string }>;
+      lookupAccountIdFromRedirect: (redirectUrl: string) => Promise<{ onlineId: string; accountId: string; source: string }>;
+      listAccounts: () => Promise<{ accounts: Ps5AccountProfile[] }>;
+      saveAccount: (payload: Partial<Ps5AccountProfile> & { onlineId: string; accountId: string }) => Promise<{ account: Ps5AccountProfile }>;
+      removeAccount: (id: string) => Promise<{ ok: boolean }>;
+      listHosts: () => Promise<{ hosts: Array<{ host: string; accountId: string; updatedAt: number }> }>;
+      testHost: (host: string) => Promise<Ps5HostTestResult>;
+      pair: (payload: { host: string; accountId: string; pin: string }) => Promise<{ host: string; accountId: string }>;
+      connect: (payload: { host: string; accountId: string; resolution?: Ps5StreamResolution; fps?: number; quality?: string }) => Promise<Ps5RuntimeStatus>;
+      disconnect: () => Promise<{ connected: boolean }>;
+      getFrame: () => Promise<Ps5Frame>;
+      sendKey: (key: string, down: boolean) => Promise<{ key: string; button: string; down: boolean }>;
+      sendButton: (action: string, pressed?: boolean, durationMs?: number) => Promise<{ action: string; button: string }>;
+      setStick: (stick: 'left' | 'right', x: number, y: number) => Promise<{ stick: string; x: number; y: number }>;
     };
     templateAPI: {
       list: () => Promise<{ folders: TemplateFolder[]; templates: TemplateDefinition[] }>;
@@ -119,6 +143,8 @@ declare global {
       exportModel: (id: string, format: 'onnx' | 'tflite' | 'openvino', imageSize: number) => Promise<{ started: boolean; message?: string }>;
       removeModel: (id: string) => Promise<void>;
       setActiveModel: (id: string) => Promise<void>;
+      importModel: (payload: { file: string; name: string; baseModel?: string; imageSize?: number; numClasses?: number }) => Promise<YoloModel>;
+      pickModelFile: () => Promise<string | null>;
       getEnvInfo: () => Promise<YoloEnvInfo>;
       installPackage: (packageName: string) => Promise<{ started: boolean; message?: string }>;
       getYoloxPath: () => Promise<string | null>;

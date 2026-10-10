@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { StreamSourceProfile, StreamSourceType, StreamWindowInfo } from '@nobowo/core';
+import type { StreamSourceProfile, StreamSourceType, StreamTransport, StreamWindowInfo } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
+import { Ps5DirectPanel } from './Ps5DirectPanel';
 
 const STREAM_TYPE_OPTIONS: { value: StreamSourceType; label: string }[] = [
   { value: 'local', label: '本机（当前电脑）' },
@@ -20,7 +21,7 @@ const STREAM_TYPE_LABEL: Record<StreamSourceType, string> = {
 
 const TYPE_HELP: Record<StreamSourceType, string> = {
   local: '直接截取本机屏幕，不需要串流窗口或主机地址。适合自动化本机上的游戏、办公软件。',
-  ps5: '用 PS Remote Play 或 Chiaki 连接 PS5 后，串流画面会显示在本地窗口里。',
+  ps5: '优先使用内置 PS5 Remote Play 协议；也可以继续匹配 PS Remote Play / Chiaki 外部窗口。',
   xbox: '用 Xbox 应用或浏览器远程串流后，选择对应的串流窗口即可。',
   secondPc: '用 Parsec / Moonlight / Steam / 向日葵 等把第二台电脑的画面投到本机。',
   otherDevice: '手机、平板或其他设备投屏到本机后，选择对应的投屏窗口即可。',
@@ -29,6 +30,9 @@ const TYPE_HELP: Record<StreamSourceType, string> = {
 const blankProfile = (): Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updatedAt'> => ({
   name: '',
   type: 'ps5',
+  transport: 'ps5Direct',
+  ps5Resolution: '720p',
+  ps5Fps: 60,
   host: '',
   port: undefined,
   url: '',
@@ -206,6 +210,10 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
       setDraft({
         name: selected.name,
         type: selected.type,
+        transport: selected.transport ?? (selected.type === 'ps5' ? 'externalWindow' : undefined),
+        ps5AccountId: selected.ps5AccountId,
+        ps5Resolution: selected.ps5Resolution ?? '720p',
+        ps5Fps: selected.ps5Fps ?? 60,
         host: selected.host ?? '',
         port: selected.port ?? undefined,
         url: selected.url ?? '',
@@ -250,6 +258,10 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
   const buildPayload = () => ({
     name: draft.name.trim(),
     type: draft.type,
+    transport: draft.type === 'ps5' ? (draft.transport ?? 'ps5Direct') : undefined,
+    ps5AccountId: draft.ps5AccountId,
+    ps5Resolution: draft.ps5Resolution,
+    ps5Fps: draft.ps5Fps,
     host: draft.host?.trim() || undefined,
     port: typeof draft.port === 'number' && draft.port > 0 ? draft.port : undefined,
     url: draft.url?.trim() || undefined,
@@ -495,15 +507,34 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                     设备类型
                     <CustomSelect value={draft.type} options={STREAM_TYPE_OPTIONS} onChange={(v) => setDraft((prev) => ({ ...prev, type: v as StreamSourceType }))} maxHeight={220} />
                   </div>
-                  <label className="template-form__field stream-form__wide">
-                    窗口标题关键字
-                    <input value={draft.windowHint ?? ''} onChange={(e) => setDraft((prev) => ({ ...prev, windowHint: e.target.value }))} placeholder="例如：Remote Play / Xbox / Moonlight" />
-                  </label>
+                  {draft.type === 'ps5' && (
+                    <div className="template-form__field">
+                      接入方式
+                      <CustomSelect
+                        value={draft.transport ?? 'ps5Direct'}
+                        options={[
+                          { value: 'ps5Direct', label: 'PS5 协议直连（推荐）' },
+                          { value: 'externalWindow', label: '外部串流窗口' },
+                        ]}
+                        onChange={(v) => setDraft((prev) => ({ ...prev, transport: v as StreamTransport }))}
+                      />
+                    </div>
+                  )}
+                  {(draft.type !== 'ps5' || draft.transport !== 'ps5Direct') && (
+                    <label className="template-form__field stream-form__wide">
+                      窗口标题关键字
+                      <input value={draft.windowHint ?? ''} onChange={(e) => setDraft((prev) => ({ ...prev, windowHint: e.target.value }))} placeholder="例如：Remote Play / Xbox / Moonlight" />
+                    </label>
+                  )}
                   <div className="stream-form__help">{TYPE_HELP[draft.type]}</div>
                 </div>
               </div>
 
-              {draft.type !== 'local' && (
+              {draft.type === 'ps5' && draft.transport === 'ps5Direct' && (
+                <Ps5DirectPanel profile={draft} onChange={(patch) => setDraft((prev) => ({ ...prev, ...patch }))} />
+              )}
+
+              {draft.type !== 'local' && draft.transport !== 'ps5Direct' && (
                 <>
               <div className="template-modal__step">2 · 连通性测试（可选）</div>
               <div className="stream-modal__test">
@@ -600,6 +631,9 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
               </div>
             </div>
 
+            {draft.type === 'ps5' && draft.transport === 'ps5Direct' ? (
+              <div id="ps5-direct-live-slot" className="stream-modal__live ps5-direct-live-slot" />
+            ) : draft.transport !== 'ps5Direct' && (
             <div className="stream-modal__live">
               <div className="stream-modal__live-head">
                 <div className="stream-modal__live-info">
@@ -650,6 +684,7 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                 )}
               </div>
             </div>
+            )}
           </section>
         </div>
       </div>

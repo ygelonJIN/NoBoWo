@@ -15,6 +15,7 @@ import { YoloManagerModal } from './components/YoloManagerModal';
 import { CloudApiManagerModal } from './components/CloudApiManagerModal';
 import { OcrTestModal } from './components/OcrTestModal';
 import { StreamManagerModal } from './components/StreamManagerModal';
+import { Ps5FloatingViewer } from './components/Ps5FloatingViewer';
 import { DebugPanel } from './components/DebugPanel';
 import { RecognizeTestModal } from './components/RecognizeTestModal';
 import type { WorkflowRunSnapshot } from '@nobowo/core';
@@ -73,8 +74,20 @@ function cloneNode(node: WorkflowNode, offset = 40): WorkflowNode {
   return cloned;
 }
 
-function getSourcePoint(node: WorkflowNode): Point {
-  return { x: node.position.x + (node.width ?? NODE_WIDTH), y: node.position.y + (node.height ?? NODE_HEIGHT) / 2 };
+function getSourcePoint(node: WorkflowNode, sourcePort?: string): Point {
+  const x = node.position.x + (node.width ?? NODE_WIDTH);
+  const centerY = node.position.y + (node.height ?? NODE_HEIGHT) / 2;
+
+  if (node.type === 'if' && sourcePort) {
+    const nodeHeight = node.height ?? NODE_HEIGHT;
+    if (sourcePort === 'true') {
+      return { x, y: node.position.y + nodeHeight * 0.25 };
+    } else if (sourcePort === 'false') {
+      return { x, y: node.position.y + nodeHeight * 0.75 };
+    }
+  }
+
+  return { x, y: centerY };
 }
 
 function getTargetPoint(node: WorkflowNode): Point {
@@ -171,11 +184,19 @@ function getNodeSummary(node: WorkflowNode): string {
       const presetLabel = node.data.preset === 'small' ? '小幅' : node.data.preset === 'medium' ? '中幅' : node.data.preset === 'large' ? '大幅' : '自定义';
       return `滚动${directionLabel(node.data.direction)} · ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;
     }
-    case 'keyboard':
+    case 'keyboard': {
+      const targetHint = (node.data.target ?? 'global') === 'stream' ? ' → 串流窗口' : '';
       if (node.data.mode === 'type') {
-        return node.data.keys ? `连续输入：${node.data.keys}（间隔 ${node.data.interval ?? 200}ms）` : '空输入';
+        return node.data.keys ? `连续输入：${node.data.keys}（间隔 ${node.data.interval ?? 200}ms）${targetHint}` : `空输入${targetHint}`;
       }
-      return node.data.keys ? `按键：${node.data.keys}` : '空按键';
+      return node.data.keys ? `按键：${node.data.keys}${targetHint}` : `空按键${targetHint}`;
+    }
+    case 'gamepad': {
+      const targetHint = node.data.target === 'stream' ? ' → 串流窗口' : '';
+      return `手柄：${node.data.action}${targetHint}`;
+    }
+    case 'liveVision':
+      return `实时检测 · ${node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${node.data.fps ?? 10} FPS`;
     case 'recognize':
       return '';
   }
@@ -981,7 +1002,7 @@ export function App() {
                   {workflowRunPercent}%
                 </div>
               </div>
-              
+
               <div className="toolbar-run-card__actions">
                 <button className="toolbar-run-card__primary" onClick={runWorkflow}>运行</button>
                 <button onClick={pauseWorkflow} disabled={workflowRunState?.status !== 'running'}>暂停</button>
@@ -1018,8 +1039,8 @@ export function App() {
                 </div>
               </div>
               <div className="toolbar__actions">
-                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard'] as WorkflowNode['type'][]).map((type) => (
-                  <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type}</button>
+                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad'] as WorkflowNode['type'][]).map((type) => (
+                  <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type === 'liveVision' ? 'liveVision' : type}</button>
                 ))}
                 <button onClick={exportWorkflow}>导出</button>
                 <button onClick={() => fileInputRef.current?.click()}>导入</button>
@@ -1046,7 +1067,7 @@ export function App() {
               const source = nodes.find((node) => node.id === edge.source);
               const target = nodes.find((node) => node.id === edge.target);
               if (!source || !target) return null;
-              const start = getSourcePoint(source);
+              const start = getSourcePoint(source, edge.sourcePort);
               const end = getTargetPoint(target);
               const isSelected = selectedEdgeId === edge.id;
               const isDisabled = source.enabled === false || target.enabled === false;
@@ -1182,6 +1203,7 @@ export function App() {
             <PropertiesPanel
               node={selectedNode}
               onChangeNode={updateNode}
+              allNodes={nodes}
               templateVersion={templateVersion}
               cloudApiVersion={cloudApiVersion}
               onOpenTemplateManager={() => setTemplateManagerOpen(true)}
@@ -1257,6 +1279,7 @@ export function App() {
           onChanged={() => setStreamVersion((version) => version + 1)}
         />
       )}
+      <Ps5FloatingViewer />
     </div>
   );
 }

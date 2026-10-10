@@ -1,4 +1,5 @@
 export type NodeType =
+  | 'liveVision'
   | 'click'
   | 'wait'
   | 'screenshot'
@@ -6,7 +7,8 @@ export type NodeType =
   | 'loop'
   | 'recognize'
   | 'scroll'
-  | 'keyboard';
+  | 'keyboard'
+  | 'gamepad';
 
 export type PortDirection = 'input' | 'output';
 
@@ -59,8 +61,16 @@ export type ScreenshotNode = WorkflowNodeBase<'screenshot', {
   region?: TemplateRect;
 }>;
 
+export type ConditionType =
+  | 'lastOk'            // 上一次节点（检查前面连线的节点）
+  | 'nodeCheck'         // 指定节点（通过标题选择）
+  | 'custom';           // 自定义表达式
+
 export type IfNode = WorkflowNodeBase<'if', {
+  conditionType?: ConditionType;
   expression: string;
+  targetNodeId?: string;
+  targetNodeTitle?: string;
 }>;
 
 export type LoopNode = WorkflowNodeBase<'loop', {
@@ -84,6 +94,40 @@ export type KeyboardNode = WorkflowNodeBase<'keyboard', {
   mode: 'tap' | 'hold' | 'type';
   /** 连续输入时每个字符之间的间隔（毫秒） */
   interval?: number;
+  /** 按键发送目标：系统全局 / 指定串流窗口 */
+  target?: 'global' | 'stream';
+  /** target=stream 时：串流设备 id */
+  streamSourceId?: string;
+  /** target=stream 时：窗口标题关键字 */
+  streamWindowHint?: string;
+}>;
+
+
+export type GamepadAction =
+  | 'pressA' | 'pressB' | 'pressX' | 'pressY'
+  | 'pressRT' | 'pressLT' | 'pressRB' | 'pressLB'
+  | 'pressSTART' | 'pressBACK' | 'pressHOME'
+  | 'pressDPADL' | 'pressDPADR' | 'pressDPADU' | 'pressDPADD'
+  | 'pressLU' | 'pressLD' | 'pressLL' | 'pressLR';
+
+export type GamepadNode = WorkflowNodeBase<'gamepad', {
+  action: GamepadAction;
+  /** 按键发送目标：系统全局 / 指定串流窗口 */
+  target: 'global' | 'stream';
+  /** target=stream 时：串流设备 id */
+  streamSourceId?: string;
+  /** target=stream 时：窗口标题关键字 */
+  streamWindowHint?: string;
+  /** 按键持续时间（毫秒），0表示瞬间按下 */
+  durationMs?: number;
+  /** 按键后延迟（毫秒） */
+  delayMs?: number;
+  /** 是否使用CDP协议发送按键 */
+  useCdp?: boolean;
+  /** CDP调试端口 */
+  cdpPort?: number;
+  /** 是否使用SharedMemoryGamepad发送按键 */
+  useSharedMemory?: boolean;
 }>;
 
 export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
@@ -128,10 +172,66 @@ export type OcrResult = {
 
 export type StreamSourceType = 'ps5' | 'xbox' | 'secondPc' | 'local' | 'otherDevice';
 
+export type StreamTransport = 'externalWindow' | 'ps5Direct';
+
+export type Ps5StreamResolution = '360p' | '540p' | '720p' | '1080p';
+
+export type Ps5AccountProfile = {
+  id: string;
+  name: string;
+  onlineId: string;
+  /** 8 字节 Account ID 的 Base64 表示 */
+  accountId: string;
+  accountIdSource: 'manual' | 'lookup';
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type Ps5HostInfo = {
+  host: string;
+  hostId?: string;
+  hostType?: string;
+  name?: string;
+  status?: string;
+  macAddress?: string;
+  systemVersion?: string;
+};
+
+export type Ps5HostTestResult = {
+  host: string;
+  status: string;
+  online: boolean;
+  latencyMs: number;
+};
+
+export type Ps5RuntimeStatus = {
+  version: string;
+  fake: boolean;
+  connected: boolean;
+  host?: string | null;
+  accountId?: string | null;
+  state: string;
+  ready: boolean;
+  frameCount: number;
+};
+
+export type Ps5Frame = {
+  frame: string;
+  width: number;
+  height: number;
+  timestamp: number;
+};
+
 export type StreamSourceProfile = {
   id: string;
   name: string;
   type: StreamSourceType;
+  /** PS5 使用内置协议会话，或继续匹配外部串流窗口 */
+  transport?: StreamTransport;
+  /** transport=ps5Direct 时绑定的 PS5 账号 */
+  ps5AccountId?: string;
+  ps5Resolution?: Ps5StreamResolution;
+  ps5Fps?: number;
   /** 主机地址（IP / 主机名），用于连通性测试 */
   host?: string;
   /** 测试端口 */
@@ -210,7 +310,29 @@ export type RecognizeNode = WorkflowNodeBase<'recognize', {
   strategyOrder: ('coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi')[];
 }>;
 
-export type WorkflowNode = ClickNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode | ScrollNode | KeyboardNode;
+export type LiveVisionNode = WorkflowNodeBase<'liveVision', {
+  /** 画面来源 */
+  source: 'screen' | 'window' | 'stream';
+  streamSourceId?: string;
+  windowHint?: string;
+  windowId?: number;
+  windowApp?: string;
+  /** 目标帧率 */
+  fps: number;
+  /** 检测超时毫秒 */
+  timeoutMs: number;
+  /** 检测方式 */
+  detectMode: 'yolo' | 'template' | 'both';
+  /** 检测到目标后的动作 */
+  action: 'returnCoords' | 'click';
+  yoloModelPath?: string;
+  yoloLabel?: string;
+  yoloThreshold?: number;
+  templatePath?: string;
+  templateThreshold?: number;
+}>;
+
+export type WorkflowNode = ClickNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode | ScrollNode | KeyboardNode | LiveVisionNode | GamepadNode;
 
 export type WorkflowEdge = {
   id: string;
@@ -304,6 +426,10 @@ export type EngineEnvInfo = {
   pyautogui: string | null;
   /** PaddleOCR 版本号，未安装为 null */
   paddleocr: string | null;
+  /** Chiaki-ng 可执行文件路径，未找到为 null */
+  chiakiPath: string | null;
+  /** SharedMemory 是否可用 */
+  sharedMemoryAvailable: boolean;
   cuda: boolean;
   mps: boolean;
   device: string;
@@ -404,6 +530,16 @@ export type NodeRunResult = {
   strategy?: RecognizeStrategyKey;
   /** 调试图路径（仅用于模板等策略的可视化调试） */
   debugImagePath?: string;
+  /** liveVision 运行态指标：每秒帧数 */
+  liveFps?: number;
+  /** liveVision 运行态指标：累计帧数 */
+  liveFrameCount?: number;
+  /** liveVision 运行态指标：命中次数 */
+  liveHitCount?: number;
+  /** liveVision 运行态指标：命中率 0-1 */
+  liveHitRate?: number;
+  /** liveVision 运行态指标：最近一次命中 */
+  liveLatestHit?: { x: number; y: number; label?: string; confidence?: number };
 };
 
 export type WorkflowRunEvent =
@@ -481,6 +617,11 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
       ];
     case 'keyboard':
+      return [
+        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
+        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
+      ];
+    case 'gamepad':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
@@ -727,7 +868,21 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         ...base,
         type,
         title: 'Keyboard',
-        data: { keys: 'a', mode: 'tap', interval: 200 },
+        data: { keys: 'a', mode: 'tap', interval: 200, target: 'global' },
+      };
+    case 'gamepad':
+      return {
+        ...base,
+        type,
+        title: 'Gamepad',
+        data: { action: 'pressA', target: 'global', durationMs: 0, delayMs: 100 },
+      };
+    case 'liveVision':
+      return {
+        ...base,
+        type,
+        title: 'Live Vision',
+        data: { source: 'stream', fps: 10, timeoutMs: 5000, detectMode: 'yolo', action: 'returnCoords', yoloThreshold: 60, templateThreshold: 60 },
       };
     case 'recognize':
       return {
