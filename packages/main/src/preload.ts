@@ -189,7 +189,7 @@ contextBridge.exposeInMainWorld('yoloAPI', {
   importModel: (payload: { file: string; name: string; baseModel?: string; imageSize?: number; numClasses?: number }) => ipcRenderer.invoke("yolo:importModel", payload),
   pickModelFile: () => ipcRenderer.invoke("yolo:pickModelFile"),
   getEnvInfo: () => ipcRenderer.invoke('yolo:getEnvInfo'),
-  installPackage: (packageName: string) => ipcRenderer.invoke('yolo:installPackage', packageName),
+  installPackage: (packageNames: string | string[]) => ipcRenderer.invoke('yolo:installPackage', packageNames),
   getYoloxPath: () => ipcRenderer.invoke('yolo:getYoloxPath'),
   setYoloxPath: (path: string) => ipcRenderer.invoke('yolo:setYoloxPath', path),
   pickYoloxPath: () => ipcRenderer.invoke('yolo:pickYoloxPath'),

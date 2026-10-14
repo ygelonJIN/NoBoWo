@@ -22,7 +22,7 @@ class Ps5JsonlTests(unittest.TestCase):
                 {"id": 5, "method": "pair", "params": {"host": "192.168.1.50", "accountId": "AAAAAAAAAAA=", "pin": "12345678"}},
                 {"id": 6, "method": "connect", "params": {"host": "192.168.1.50", "accountId": "AAAAAAAAAAA="}},
                 {"id": 7, "method": "getFrame", "params": {}},
-                {"id": 8, "method": "sendButton", "params": {"action": "pressA", "pressed": True}},
+                {"id": 8, "method": "sendButton", "params": {"action": "pressCross", "pressed": True}},
                 {"id": 9, "method": "disconnect", "params": {}},
             ]
             payload = "".join(json.dumps(item) + "\n" for item in requests)

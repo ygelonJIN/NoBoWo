@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CloudApiProfile, RecognizeNode, StreamSourceProfile } from '@nobowo/core';
 
 import { CustomSelect } from './CustomSelect';
+import { clearVisionOverlay, publishVisionOverlay } from './StreamVisionOverlay';
 
 type StrategyKey = 'coords' | 'template' | 'yolo' | 'ocr' | 'cloudApi';
 
@@ -37,11 +38,11 @@ const STRATEGY_KEYS: StrategyKey[] = ['coords', 'template', 'yolo', 'ocr', 'clou
 const STREAM_TYPE_LABEL: Record<StreamSourceProfile['type'], string> = {
   local: '本机',
   ps5: 'PS5',
-  xbox: 'Xbox',
+  xbox: '其他设备',
   secondPc: '第二台电脑',
   otherDevice: '其他设备',
 };
-const STREAM_TYPE_ORDER: StreamSourceProfile['type'][] = ['ps5', 'xbox', 'secondPc', 'otherDevice'];
+const STREAM_TYPE_ORDER: StreamSourceProfile['type'][] = ['ps5', 'secondPc', 'otherDevice'];
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -165,6 +166,7 @@ export function RecognizeTestModal({ onClose, strategies, strategyOrder, onApply
     setFrameLabel(null);
     setResults({});
     setCaptureError(null);
+    clearVisionOverlay('recognize-test:');
   }, []);
 
   const setFrame = useCallback((url: string, width: number, height: number, label: string) => {
@@ -173,6 +175,7 @@ export function RecognizeTestModal({ onClose, strategies, strategyOrder, onApply
     setFrameLabel(label);
     setResults({});
     setCaptureError(null);
+    clearVisionOverlay('recognize-test:');
   }, []);
 
   const captureScreen = async () => {
@@ -234,7 +237,33 @@ export function RecognizeTestModal({ onClose, strategies, strategyOrder, onApply
 
   const markStrategy = useCallback((key: StrategyKey, result: StrategyResult) => {
     setResults((current) => ({ ...current, [key]: result }));
-  }, []);
+    if (frameSize) {
+      const source = streamSources.find((item) => item.id === streamValue);
+      publishVisionOverlay(`recognize-test:${key}`, {
+        sourceWidth: frameSize.width,
+        sourceHeight: frameSize.height,
+        sourceKind: source?.transport === 'ps5Direct' ? 'ps5Direct' : 'other',
+        streamSourceId: source?.id,
+        markers: (result.markers ?? []).map((marker) => marker.kind === 'box'
+          ? {
+              kind: 'box',
+              x: marker.x,
+              y: marker.y,
+              width: marker.width,
+              height: marker.height,
+              label: marker.label,
+              color: marker.color,
+            }
+          : {
+              kind: 'point',
+              x: marker.x,
+              y: marker.y,
+              label: marker.label,
+              color: marker.color,
+            }),
+      }, { ttlMs: 10000 });
+    }
+  }, [frameSize, streamSources, streamValue]);
 
   const runCoords = useCallback(() => {
     const strategy = strategies?.coords;

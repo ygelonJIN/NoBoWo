@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { StreamSourceProfile, StreamSourceType, StreamTransport, StreamWindowInfo } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
+import { FrameRateSelect } from './FrameRateSelect';
 import { Ps5DirectPanel } from './Ps5DirectPanel';
 
 const STREAM_TYPE_OPTIONS: { value: StreamSourceType; label: string }[] = [
   { value: 'local', label: '本机（当前电脑）' },
   { value: 'ps5', label: 'PS5 主机' },
-  { value: 'xbox', label: 'Xbox 主机' },
   { value: 'secondPc', label: '第二台电脑' },
   { value: 'otherDevice', label: '其他设备' },
 ];
@@ -14,7 +14,7 @@ const STREAM_TYPE_OPTIONS: { value: StreamSourceType; label: string }[] = [
 const STREAM_TYPE_LABEL: Record<StreamSourceType, string> = {
   local: '本机',
   ps5: 'PS5',
-  xbox: 'Xbox',
+  xbox: '其他设备',
   secondPc: '第二台电脑',
   otherDevice: '其他设备',
 };
@@ -22,7 +22,7 @@ const STREAM_TYPE_LABEL: Record<StreamSourceType, string> = {
 const TYPE_HELP: Record<StreamSourceType, string> = {
   local: '直接截取本机屏幕，不需要串流窗口或主机地址。适合自动化本机上的游戏、办公软件。',
   ps5: '优先使用内置 PS5 Remote Play 协议；也可以继续匹配 PS Remote Play / Chiaki 外部窗口。',
-  xbox: '用 Xbox 应用或浏览器远程串流后，选择对应的串流窗口即可。',
+  xbox: '旧配置兼容项，请改用 PS5、第二台电脑或其他设备。',
   secondPc: '用 Parsec / Moonlight / Steam / 向日葵 等把第二台电脑的画面投到本机。',
   otherDevice: '手机、平板或其他设备投屏到本机后，选择对应的投屏窗口即可。',
 };
@@ -32,11 +32,14 @@ const blankProfile = (): Omit<StreamSourceProfile, 'id' | 'createdAt' | 'updated
   type: 'ps5',
   transport: 'ps5Direct',
   ps5Resolution: '720p',
-  ps5Fps: 60,
+  captureFps: 30,
+  ps5Fps: 30,
   host: '',
   port: undefined,
   url: '',
   windowHint: '',
+  windowId: undefined,
+  windowApp: undefined,
   notes: '',
   lastTestAt: null,
   lastTestStatus: null,
@@ -213,11 +216,14 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
         transport: selected.transport ?? (selected.type === 'ps5' ? 'externalWindow' : undefined),
         ps5AccountId: selected.ps5AccountId,
         ps5Resolution: selected.ps5Resolution ?? '720p',
-        ps5Fps: selected.ps5Fps ?? 60,
+        captureFps: selected.captureFps ?? selected.ps5Fps ?? 30,
+        ps5Fps: selected.captureFps ?? selected.ps5Fps ?? 30,
         host: selected.host ?? '',
         port: selected.port ?? undefined,
         url: selected.url ?? '',
         windowHint: selected.windowHint ?? '',
+        windowId: selected.windowId,
+        windowApp: selected.windowApp,
         notes: selected.notes ?? '',
         lastTestAt: selected.lastTestAt ?? null,
         lastTestStatus: selected.lastTestStatus ?? null,
@@ -261,11 +267,14 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
     transport: draft.type === 'ps5' ? (draft.transport ?? 'ps5Direct') : undefined,
     ps5AccountId: draft.ps5AccountId,
     ps5Resolution: draft.ps5Resolution,
-    ps5Fps: draft.ps5Fps,
+    captureFps: draft.captureFps ?? 30,
+    ps5Fps: draft.captureFps ?? draft.ps5Fps ?? 30,
     host: draft.host?.trim() || undefined,
     port: typeof draft.port === 'number' && draft.port > 0 ? draft.port : undefined,
     url: draft.url?.trim() || undefined,
     windowHint: draft.windowHint?.trim() || undefined,
+    windowId: draft.windowId,
+    windowApp: draft.windowApp?.trim() || undefined,
     notes: draft.notes?.trim() || undefined,
   });
 
@@ -376,12 +385,35 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
     return () => window.clearTimeout(timer);
   }, [probeWindows, selected?.windowHint, selected?.id]);
 
-  const handleSelectWindow = (win: StreamWindowInfo) => {
+  const handleSelectWindow = async (win: StreamWindowInfo) => {
     setSelectedWindowId(win.id);
     setPreviewFrame(null);
     setPreviewSize(null);
     setMotion({ running: false, changed: null, diffRatio: 0, message: '' });
+    const windowBinding = {
+      windowHint: win.name,
+      windowId: win.windowId,
+      windowApp: win.windowApp,
+    };
+    setDraft((prev) => ({ ...prev, ...windowBinding }));
     void startPreview(win.id);
+
+    // 选中窗口即绑定并保存到串流设备，Gamepad 无需再单独配置窗口。
+    if (selected && window.streamAPI) {
+      setSaving(true);
+      setError(null);
+      try {
+        await window.streamAPI.update(selected.id, windowBinding);
+        onChanged();
+        setProbeMessage(`已绑定串流窗口「${win.name}」，Gamepad 将直接使用此设备窗口`);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSaving(false);
+      }
+    } else {
+      setProbeMessage(`已选择串流窗口「${win.name}」，创建设备时会保存此绑定`);
+    }
   };
 
   const capturePreview = async () => {
@@ -444,7 +476,7 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
         <header className="template-modal__header stream-modal__header">
           <div>
             <h2>串流设备管理</h2>
-            <p>管理 PS5 / Xbox / 第二台电脑 / 其他设备的串流源，实时预览画面并测试连接状态</p>
+            <p>管理 PS5 / 第二台电脑 / 其他设备的串流源，实时预览画面并测试连接状态</p>
           </div>
           <div className="template-modal__header-actions">
             <button className="template-modal__close" onClick={onClose} aria-label="关闭">×</button>
@@ -501,7 +533,7 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                 <div className="stream-form stream-form--compact">
                   <label className="template-form__field">
                     设备名称
-                    <input value={draft.name} onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：客厅 PS5 / 书房 Xbox / 工作电脑" />
+                    <input value={draft.name} onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：客厅 PS5 / 书房电脑 / 工作电脑" />
                   </label>
                   <div className="template-form__field">
                     设备类型
@@ -521,10 +553,23 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                     </div>
                   )}
                   {(draft.type !== 'ps5' || draft.transport !== 'ps5Direct') && (
-                    <label className="template-form__field stream-form__wide">
-                      窗口标题关键字
-                      <input value={draft.windowHint ?? ''} onChange={(e) => setDraft((prev) => ({ ...prev, windowHint: e.target.value }))} placeholder="例如：Remote Play / Xbox / Moonlight" />
-                    </label>
+                    <>
+                      <label className="template-form__field stream-form__wide">
+                        窗口标题关键字
+                        <input value={draft.windowHint ?? ''} onChange={(e) => setDraft((prev) => ({ ...prev, windowHint: e.target.value }))} placeholder="例如：Remote Play / Chiaki / Moonlight" />
+                      </label>
+                      <label className="template-form__field">
+                        采集帧率
+                        <FrameRateSelect
+                          value={draft.captureFps ?? draft.ps5Fps ?? 30}
+                          allowSource={false}
+                          onChange={(value) => setDraft((prev) => ({
+                            ...prev,
+                            captureFps: value === 'source' ? 30 : value,
+                          }))}
+                        />
+                      </label>
+                    </>
                   )}
                   <div className="stream-form__help">{TYPE_HELP[draft.type]}</div>
                 </div>
@@ -577,7 +622,7 @@ export function StreamManagerModal({ onClose, onChanged }: Props) {
                     {windows.map((win) => {
                       const active = win.id === selectedWindowId;
                       return (
-                        <button key={win.id} className={`stream-window-card ${active ? 'stream-window-card--active' : ''}`} onClick={() => handleSelectWindow(win)}>
+                        <button key={win.id} className={`stream-window-card ${active ? 'stream-window-card--active' : ''}`} onClick={() => void handleSelectWindow(win)}>
                           <img src={win.thumbnail} alt={win.name} className="stream-window-card__thumb" />
                           <span className="stream-window-card__name">{win.name}</span>
                         </button>

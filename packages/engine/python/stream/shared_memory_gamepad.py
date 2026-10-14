@@ -43,6 +43,18 @@ BUTTON_INDEX = {
 
 # NoBoWo 手柄按键到 Chiaki 按键的映射
 GAMEPAD_MAP = {
+    'pressCross': 'cross',
+    'pressCircle': 'circle',
+    'pressTriangle': 'triangle',
+    'pressSquare': 'square',
+    'pressL1': 'l1',
+    'pressR1': 'r1',
+    'pressL2': 'l2',
+    'pressR2': 'r2',
+    'pressShare': 'share',
+    'pressOptions': 'options',
+    'pressPS': 'ps',
+    # 旧工作流兼容映射
     'pressA': 'cross',
     'pressB': 'circle',
     'pressX': 'square',
@@ -66,6 +78,10 @@ STICK_MAP = {
     'pressLD': ('left_y', 1.0),
     'pressLL': ('left_x', -1.0),
     'pressLR': ('left_x', 1.0),
+    'pressRU': ('right_y', -1.0),
+    'pressRD': ('right_y', 1.0),
+    'pressRL': ('right_x', -1.0),
+    'pressRR': ('right_x', 1.0),
 }
 
 
@@ -295,6 +311,32 @@ class SharedMemoryGamepad:
         else:
             self.right_x = 0.0
             self.right_y = 0.0
+        self._write_state()
+
+    def set_action(self, action: str, pressed: bool):
+        """Set a button or stick direction without an automatic release."""
+        if not self.is_connected:
+            return
+        if action in GAMEPAD_MAP:
+            if pressed:
+                self.press_button_down(action)
+            else:
+                self.press_button_up(action)
+            return
+        stick_info = STICK_MAP.get(action)
+        if not stick_info:
+            print(f"未知的手柄动作: {action}")
+            return
+        axis, value = stick_info
+        resolved = value if pressed else 0.0
+        if axis == 'left_x':
+            self.left_x = resolved
+        elif axis == 'left_y':
+            self.left_y = resolved
+        elif axis == 'right_x':
+            self.right_x = resolved
+        elif axis == 'right_y':
+            self.right_y = resolved
         self._write_state()
 
     def set_trigger(self, trigger_name: str, value: float):

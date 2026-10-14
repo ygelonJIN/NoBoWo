@@ -647,16 +647,22 @@ class PyRemotePlayBackend:
             raise RuntimeError2("PS5 尚未连接")
         if action in GAMEPAD_STICKS:
             stick, x, y = GAMEPAD_STICKS[action]
-            controller.stick(stick, point=(x, y))
-            controller.update_sticks()
-            if duration_ms > 0:
-                time.sleep(min(duration_ms, 2000) / 1000.0)
+            if pressed is None:
+                controller.stick(stick, point=(x, y))
+                controller.update_sticks()
+                hold_ms = max(80, min(int(duration_ms or 120), 2000))
+                time.sleep(hold_ms / 1000.0)
                 controller.stick(stick, point=(0.0, 0.0))
                 controller.update_sticks()
-            return {"action": action, "button": f"stick:{stick}", "pressed": pressed}
+                return {"action": action, "button": f"stick:{stick}", "pressed": pressed, "durationMs": hold_ms}
+            controller.stick(stick, point=(x, y) if pressed else (0.0, 0.0))
+            controller.update_sticks()
+            return {"action": action, "button": f"stick:{stick}", "pressed": pressed, "durationMs": 0}
         button = GAMEPAD_TO_BUTTON.get(action) or action.lower()
         if pressed is None:
-            controller.button(button, "tap", delay=max(0.01, min(duration_ms, 2000) / 1000.0))
+            hold_ms = max(80, min(int(duration_ms or 120), 2000))
+            controller.button(button, "tap", delay=hold_ms / 1000.0)
+            return {"action": action, "button": button, "pressed": pressed, "durationMs": hold_ms}
         elif pressed:
             controller.button(button, "press")
             if duration_ms > 0:
@@ -664,7 +670,7 @@ class PyRemotePlayBackend:
                 controller.button(button, "release")
         else:
             controller.button(button, "release")
-        return {"action": action, "button": button, "pressed": pressed}
+        return {"action": action, "button": button, "pressed": pressed, "durationMs": duration_ms}
 
     def set_stick(self, stick: str, x: float, y: float) -> Dict[str, Any]:
         controller = self._controller
@@ -678,38 +684,40 @@ class PyRemotePlayBackend:
 
 
 KEY_TO_BUTTON = {
-    "enter": "cross", " ": "cross", "space": "cross",
-    "escape": "circle", "backspace": "square", "tab": "triangle",
-    "arrowup": "dpad_up", "arrowdown": "dpad_down",
-    "arrowleft": "dpad_left", "arrowright": "dpad_right",
+    "1": "cross", "2": "circle", "3": "triangle", "4": "square",
     "shift": "l1", "control": "r1", "alt": "l2", "meta": "r2",
     "home": "ps", "insert": "share", "delete": "options",
-    "q": "l1", "e": "r1", "r": "l2", "f": "r2",
-    "z": "square", "x": "cross", "c": "circle", "v": "triangle",
-    "1": "share", "2": "options",
 }
 STICK_KEYS = {
     "w": ("left", 0.0, -1.0),
-    "s": ("left", 0.0, 1.0),
     "a": ("left", -1.0, 0.0),
+    "s": ("left", 0.0, 1.0),
     "d": ("left", 1.0, 0.0),
-    "i": ("right", 0.0, -1.0),
-    "k": ("right", 0.0, 1.0),
-    "j": ("right", -1.0, 0.0),
-    "l": ("right", 1.0, 0.0),
+    "arrowup": ("right", 0.0, -1.0),
+    "arrowleft": ("right", -1.0, 0.0),
+    "arrowdown": ("right", 0.0, 1.0),
+    "arrowright": ("right", 1.0, 0.0),
 }
 GAMEPAD_STICKS = {
     "pressLU": ("left", 0.0, -1.0),
     "pressLD": ("left", 0.0, 1.0),
     "pressLL": ("left", -1.0, 0.0),
     "pressLR": ("left", 1.0, 0.0),
+    "pressRU": ("right", 0.0, -1.0),
+    "pressRD": ("right", 0.0, 1.0),
+    "pressRL": ("right", -1.0, 0.0),
+    "pressRR": ("right", 1.0, 0.0),
 }
 GAMEPAD_TO_BUTTON = {
+    "pressCross": "cross", "pressCircle": "circle", "pressTriangle": "triangle", "pressSquare": "square",
+    "pressL1": "l1", "pressR1": "r1", "pressL2": "l2", "pressR2": "r2",
+    "pressShare": "share", "pressOptions": "options", "pressPS": "ps",
+    "pressDPADU": "dpad_up", "pressDPADD": "dpad_down",
+    "pressDPADL": "dpad_left", "pressDPADR": "dpad_right",
+    # 旧工作流兼容映射
     "pressA": "cross", "pressB": "circle", "pressX": "square", "pressY": "triangle",
     "pressLB": "l1", "pressRB": "r1", "pressLT": "l2", "pressRT": "r2",
     "pressBACK": "share", "pressSTART": "options", "pressHOME": "ps",
-    "pressDPADU": "dpad_up", "pressDPADD": "dpad_down",
-    "pressDPADL": "dpad_left", "pressDPADR": "dpad_right",
 }
 
 
@@ -801,7 +809,15 @@ class FakeBackend:
             raise RuntimeError2("PS5 尚未连接")
         if action in GAMEPAD_STICKS:
             stick, x, y = GAMEPAD_STICKS[action]
-            self.controller_buttons.append({"type": "stick", "stick": stick, "x": x, "y": y, "durationMs": duration_ms})
+            point = (x, y) if pressed is not False else (0.0, 0.0)
+            self.controller_buttons.append({
+                "type": "stick",
+                "stick": stick,
+                "x": point[0],
+                "y": point[1],
+                "pressed": pressed,
+                "durationMs": duration_ms,
+            })
             return {"action": action, "button": f"stick:{stick}", "pressed": pressed}
         button = GAMEPAD_TO_BUTTON.get(action) or action.lower()
         self.controller_buttons.append({"type": "button", "action": action, "button": button, "pressed": pressed, "durationMs": duration_ms})

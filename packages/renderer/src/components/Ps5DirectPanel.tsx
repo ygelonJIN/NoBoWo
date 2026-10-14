@@ -2,13 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   Ps5AccountProfile,
+  Ps5Frame,
   Ps5HostInfo,
   Ps5RuntimeStatus,
   Ps5StreamResolution,
   StreamSourceProfile,
 } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
+import { FrameRateSelect } from './FrameRateSelect';
 import { getPs5ViewerMode, setPs5ViewerMode, usePs5ViewerMode } from './ps5ViewerStore';
+import { StreamVisionOverlay } from './StreamVisionOverlay';
 
 type Props = {
   profile: Partial<StreamSourceProfile>;
@@ -17,50 +20,47 @@ type Props = {
 
 const RESOLUTIONS: Ps5StreamResolution[] = ['360p', '540p', '720p', '1080p'];
 const BUTTON_ACTIONS = [
-  ['A / Cross', 'pressA'],
-  ['B / Circle', 'pressB'],
-  ['X / Square', 'pressX'],
-  ['Y / Triangle', 'pressY'],
-  ['LB', 'pressLB'],
-  ['RB', 'pressRB'],
-  ['LT', 'pressLT'],
-  ['RT', 'pressRT'],
-  ['Start', 'pressSTART'],
-  ['Back', 'pressBACK'],
-  ['Home', 'pressHOME'],
+  ['1 · 叉', 'pressCross'],
+  ['2 · 圆圈', 'pressCircle'],
+  ['3 · 三角', 'pressTriangle'],
+  ['4 · 方框', 'pressSquare'],
+  ['L1', 'pressL1'],
+  ['R1', 'pressR1'],
+  ['L2', 'pressL2'],
+  ['R2', 'pressR2'],
+  ['Options', 'pressOptions'],
+  ['Share', 'pressShare'],
+  ['PS', 'pressPS'],
 ] as const;
 
 const KEY_TO_ACTION: Record<string, string> = {
-  Enter: 'pressA',
-  Escape: 'pressB',
-  Backspace: 'pressX',
-  Tab: 'pressY',
-  ArrowUp: 'pressDPADU',
-  ArrowDown: 'pressDPADD',
-  ArrowLeft: 'pressDPADL',
-  ArrowRight: 'pressDPADR',
-  Shift: 'pressLB',
-  Control: 'pressRB',
-  Alt: 'pressLT',
-  Meta: 'pressRT',
-  Home: 'pressHOME',
-  Insert: 'pressBACK',
-  Delete: 'pressSTART',
+  1: 'pressCross',
+  2: 'pressCircle',
+  3: 'pressTriangle',
+  4: 'pressSquare',
+  Shift: 'pressL1',
+  Control: 'pressR1',
+  Alt: 'pressL2',
+  Meta: 'pressR2',
+  Home: 'pressPS',
+  Insert: 'pressShare',
+  Delete: 'pressOptions',
 };
 
 const STICK_KEYS: Record<string, { stick: 'left' | 'right'; x: number; y: number }> = {
   w: { stick: 'left', x: 0, y: -1 },
-  s: { stick: 'left', x: 0, y: 1 },
   a: { stick: 'left', x: -1, y: 0 },
+  s: { stick: 'left', x: 0, y: 1 },
   d: { stick: 'left', x: 1, y: 0 },
-  i: { stick: 'right', x: 0, y: -1 },
-  k: { stick: 'right', x: 0, y: 1 },
-  j: { stick: 'right', x: -1, y: 0 },
-  l: { stick: 'right', x: 1, y: 0 },
+  ArrowUp: { stick: 'right', x: 0, y: -1 },
+  ArrowLeft: { stick: 'right', x: -1, y: 0 },
+  ArrowDown: { stick: 'right', x: 0, y: 1 },
+  ArrowRight: { stick: 'right', x: 1, y: 0 },
 };
 
 export function Ps5DirectPanel({ profile, onChange }: Props) {
   const [accounts, setAccounts] = useState<Ps5AccountProfile[]>([]);
+  const [pairedHosts, setPairedHosts] = useState<Array<{ host: string; accountId: string; updatedAt: number }>>([]);
   const [devices, setDevices] = useState<Ps5HostInfo[]>([]);
   const [status, setStatus] = useState<Ps5RuntimeStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -75,7 +75,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
   const [hostNotice, setHostNotice] = useState('正在自动发现同一局域网中的 PS5…');
   const [showHostAdvanced, setShowHostAdvanced] = useState(false);
 
-  const [preview, setPreview] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Ps5Frame | null>(null);
   const [keyboardActive, setKeyboardActive] = useState(false);
   const [liveSlot, setLiveSlot] = useState<HTMLElement | null>(null);
   const viewerMode = usePs5ViewerMode();
@@ -91,6 +91,14 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === profile.ps5AccountId || account.accountId === profile.ps5AccountId) ?? null,
     [accounts, profile.ps5AccountId],
+  );
+
+  const selectedPairing = useMemo(
+    () => pairedHosts.find((item) =>
+      item.host === profile.host &&
+      (!selectedAccount || item.accountId === selectedAccount.accountId),
+    ) ?? null,
+    [pairedHosts, profile.host, selectedAccount],
   );
 
   const apiUnavailableMessage = typeof navigator !== 'undefined' && /Electron/i.test(navigator.userAgent)
@@ -115,11 +123,13 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
   }, [apiUnavailableMessage]);
 
   const refresh = useCallback(async () => {
-    const [accountResult, statusResult] = await Promise.all([
+    const [accountResult, hostResult, statusResult] = await Promise.all([
       run('加载账号', () => window.ps5API!.listAccounts()),
+      run('读取配对', () => window.ps5API!.listHosts()),
       run('读取状态', () => window.ps5API!.status()),
     ]);
     if (accountResult) setAccounts(accountResult.accounts);
+    if (hostResult) setPairedHosts(hostResult.hosts);
     if (statusResult) setStatus(statusResult);
   }, [run]);
 
@@ -136,7 +146,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
       const currentHost = profileRef.current.host;
       const currentStillExists = currentHost && result.devices.some((device) => device.host === currentHost);
       let selectedDevice = currentStillExists ? result.devices.find((device) => device.host === currentHost) : undefined;
-      if (!currentStillExists && result.devices.length > 0) {
+      if (!currentHost && result.devices.length > 0) {
         selectedDevice = result.devices.find((device) => device.status === 'ready') ?? result.devices[0];
         onChangeRef.current({ host: selectedDevice.host });
       }
@@ -162,6 +172,16 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
   }, [discoverHosts, refresh]);
 
   useEffect(() => {
+    if (pairedHosts.length === 0 || accounts.length === 0) return;
+    const pairing = pairedHosts.find((item) => item.host === profileRef.current.host) ?? pairedHosts[0];
+    const account = accounts.find((item) => item.accountId === pairing.accountId || item.id === pairing.accountId);
+    const patch: Partial<StreamSourceProfile> = {};
+    if (!profileRef.current.host && pairing.host) patch.host = pairing.host;
+    if (!profileRef.current.ps5AccountId && account) patch.ps5AccountId = account.id;
+    if (Object.keys(patch).length > 0) onChangeRef.current(patch);
+  }, [accounts, pairedHosts]);
+
+  useEffect(() => {
     setLiveSlot(document.getElementById('ps5-direct-live-slot'));
   }, []);
 
@@ -183,7 +203,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
       if (stopped || token !== previewToken.current || !window.ps5API) return;
       try {
         const frame = await window.ps5API.getFrame();
-        if (!stopped && token === previewToken.current) setPreview(frame.frame);
+        if (!stopped && token === previewToken.current) setPreview(frame);
       } catch {
         // keep polling; connection state is refreshed separately
       }
@@ -271,7 +291,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
         host: profile.host!,
         accountId: selectedAccount.id,
         resolution: profile.ps5Resolution ?? '720p',
-        fps: profile.ps5Fps ?? 60,
+        fps: profile.captureFps ?? profile.ps5Fps ?? 30,
         quality: 'high',
       }),
     );
@@ -298,7 +318,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
   const keyDown = async (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!keyboardActive || event.repeat || !window.ps5API) return;
     event.preventDefault();
-    const action = KEY_TO_ACTION[event.key];
+    const action = KEY_TO_ACTION[event.key.toLowerCase()];
     if (action) {
       await window.ps5API.sendButton(action, true, 0);
       return;
@@ -314,7 +334,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
   const keyUp = async (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!keyboardActive || !window.ps5API) return;
     event.preventDefault();
-    const action = KEY_TO_ACTION[event.key];
+    const action = KEY_TO_ACTION[event.key.toLowerCase()];
     if (action) {
       await window.ps5API.sendButton(action, false, 0);
       return;
@@ -340,7 +360,12 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
       onFocus={() => setKeyboardActive(true)}
       onBlur={() => setKeyboardActive(false)}
     >
-      {preview ? <img src={preview} alt="PS5 串流画面" /> : <span>{status?.connected ? '正在读取 PS5 协议画面…' : '连接后显示内置视频画面'}</span>}
+      {preview ? (
+        <>
+          <img src={preview.frame} alt="PS5 串流画面" />
+          <StreamVisionOverlay frameWidth={preview.width} frameHeight={preview.height} />
+        </>
+      ) : <span>{status?.connected ? '正在读取 PS5 协议画面…' : '连接后显示内置视频画面'}</span>}
     </div>
   );
 
@@ -354,7 +379,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
           <button type="button" key={action} className="yolo-btn--ghost yolo-btn--compact" disabled={!status?.connected} onMouseDown={() => void sendAction(action)}>{label}</button>
         ))}
       </div>
-      <p className="ps5-live-panel__hint">WASD 左摇杆，IJKL 右摇杆，方向键 D-Pad，Enter / Escape / Backspace / Tab 对应 A / B / X / Y。</p>
+      <p className="ps5-live-panel__hint">键盘 1 / 2 / 3 / 4 对应叉 / 圆圈 / 三角 / 方框；WASD 控制左摇杆，键盘小方向键控制右摇杆。十字 D-Pad 请使用屏幕按钮或 Gamepad 节点。</p>
     </>
   );
 
@@ -573,15 +598,23 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
             <span className="ps5-section__step">3</span>
             <div>
               <h4>配对与画质</h4>
-              <p>输入 PS5「添加设备」页面显示的 8 位配对码。</p>
+              <p>{selectedPairing ? '已记住此主机的配对信息，下次无需再次输入配对码。' : '输入 PS5「添加设备」页面显示的 8 位配对码。'}</p>
             </div>
           </div>
         </div>
         <div className="ps5-pair-grid">
-          <label className="template-form__field ps5-pair-grid__pin">
-            8 位配对码
-            <input value={pin} maxLength={8} inputMode="numeric" onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} placeholder="在 PS5「添加设备」中获取" />
-          </label>
+          {!selectedPairing && (
+            <label className="template-form__field ps5-pair-grid__pin">
+              8 位配对码
+              <input value={pin} maxLength={8} inputMode="numeric" onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} placeholder="在 PS5「添加设备」中获取" />
+            </label>
+          )}
+          {selectedPairing && (
+            <div className="template-form__field ps5-pair-grid__pin">
+              <span className="yolo-field__label">配对状态</span>
+              <strong>已记住，可直接连接</strong>
+            </div>
+          )}
           <label className="template-form__field">
             分辨率
             <CustomSelect
@@ -591,16 +624,21 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
             />
           </label>
           <label className="template-form__field">
-            帧率
-            <CustomSelect
-              value={String(profile.ps5Fps ?? 60)}
-              options={[{ value: '30', label: '30 FPS' }, { value: '60', label: '60 FPS' }]}
-              onChange={(value) => onChange({ ps5Fps: Number(value) })}
+            采集帧率
+            <FrameRateSelect
+              value={profile.captureFps ?? profile.ps5Fps ?? 30}
+              allowSource={false}
+              onChange={(value) => onChange({
+                captureFps: value === 'source' ? 30 : value,
+                ps5Fps: value === 'source' ? 30 : value,
+              })}
             />
           </label>
-          <button type="button" className="yolo-btn--primary ps5-pair-grid__action" disabled={!profile.host || !selectedAccount || pin.length !== 8 || busy !== null} onClick={() => void pair()}>
-            {busy === '配对主机' ? '配对中…' : '配对当前账号'}
-          </button>
+          {!selectedPairing && (
+            <button type="button" className="yolo-btn--primary ps5-pair-grid__action" disabled={!profile.host || !selectedAccount || pin.length !== 8 || busy !== null} onClick={() => void pair()}>
+              {busy === '配对主机' ? '配对中…' : '配对当前账号'}
+            </button>
+          )}
         </div>
       </section>
       </div>

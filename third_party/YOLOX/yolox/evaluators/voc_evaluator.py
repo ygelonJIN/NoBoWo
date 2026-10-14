@@ -90,7 +90,7 @@ class VOCEvaluator:
 
                 outputs = model(imgs)
                 if decoder is not None:
-                    outputs = decoder(outputs, dtype=outputs.type())
+                    outputs = decoder(outputs, reference=outputs)
 
                 if is_time_record:
                     infer_end = time_synchronized()

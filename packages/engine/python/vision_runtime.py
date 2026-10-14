@@ -11,6 +11,7 @@
 
 输出: stdout 每行一个 JSON 事件，状态统一为 {"t":"done","ok":bool,...}
 """
+import base64
 import json
 import math
 import os
@@ -89,8 +90,50 @@ MIN_MATCH_PX = 16         # 缩放后的模板最小边长：再小则信息量�
 MIN_TEMPLATE_DETAIL = 10  # 模板高频细节量下限（Laplacian 方差）：低于此值视为纯色/渐变/模糊
 
 
+YOLOX_PACKAGE_PROBES = (
+    ("loguru", "loguru", "loguru"),
+    ("tqdm", "tqdm", "tqdm"),
+    ("thop", "thop", "thop"),
+    ("ninja", "ninja", "ninja"),
+    ("tabulate", "tabulate", "tabulate"),
+    ("psutil", "psutil", "psutil"),
+    ("tensorboard", "tensorboard", "tensorboard"),
+    ("pycocotools", "pycocotools", "pycocotools"),
+    ("onnx", "onnx", "onnx"),
+    ("onnxsim", "onnxsim", "onnx-simplifier"),
+)
+
+
+def configure_yolox_path(cfg):
+    """Resolve YOLOX from user settings or the bundled source tree before importing it."""
+    candidates = [cfg.get("yoloxPath")]
+    engine_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.extend([
+        os.path.abspath(os.path.join(engine_dir, "..", "..", "..", "third_party", "YOLOX")),
+        os.path.abspath(os.path.join(engine_dir, "..", "..", "third_party", "YOLOX")),
+    ])
+    for candidate in candidates:
+        if not candidate or not os.path.isdir(candidate):
+            continue
+        if not os.path.isfile(os.path.join(candidate, "yolox", "__init__.py")):
+            continue
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+        return candidate
+    return None
+
+
+def infer_num_classes(state_dict):
+    """Read the classification head width from a YOLOX checkpoint."""
+    for key in ("head.cls_preds.0.bias", "head.cls_preds.0.weight"):
+        value = state_dict.get(key)
+        if value is not None and hasattr(value, "shape") and len(value.shape) > 0:
+            return int(value.shape[0])
+    return None
+
+
 def run_check(cfg):
-    info = {"cv2": None, "torch": None, "yolox": None, "pyautogui": None, "cuda": False, "mps": False, "device": "none"}
+    info = {"cv2": None, "torch": None, "yolox": None, "pyautogui": None, "cuda": False, "mps": False, "device": "none", "pythonPackages": {}}
     try:
         import cv2
         info["cv2"] = cv2.__version__
@@ -120,11 +163,28 @@ def run_check(cfg):
                 info["paddleocr"] = "已安装"
     except Exception:
         pass
-    yolox_path = cfg.get("yoloxPath")
-    if yolox_path and os.path.isdir(yolox_path):
-        sys.path.insert(0, yolox_path)
+    try:
+        import importlib.metadata
+        import importlib.util
+        for key, import_name, distribution_name in YOLOX_PACKAGE_PROBES:
+            try:
+                spec = importlib.util.find_spec(import_name)
+                version = None if spec is None else "installed"
+                if spec is not None:
+                    try:
+                        version = importlib.metadata.version(distribution_name)
+                    except Exception:
+                        version = "installed"
+                info["pythonPackages"][key] = version
+            except Exception:
+                info["pythonPackages"][key] = None
+    except Exception:
+        info["pythonPackages"] = {key: None for key, _, _ in YOLOX_PACKAGE_PROBES}
+
+    configure_yolox_path(cfg)
     try:
         import yolox
+        from yolox.core.trainer import Trainer
         info["yolox"] = getattr(yolox, "__version__", "?")
     except Exception:
         pass
@@ -408,65 +468,126 @@ def run_template(cfg):
     return 0
 
 
-def run_yolo(cfg):
-    yolox_path = cfg.get("yoloxPath")
-    if yolox_path and os.path.isdir(yolox_path):
-        sys.path.insert(0, yolox_path)
+def _load_yolo_runtime(cfg):
+    configure_yolox_path(cfg)
 
     try:
         import cv2
+        import numpy as np
         import torch
         from yolox.exp import get_exp
         from yolox.utils import postprocess
         from yolox.data.data_augment import preproc
     except Exception as exc:
-        return fail("yolo", "无法加载 YOLOX / PyTorch：{0}".format(exc))
+        message = "无法加载 YOLOX / PyTorch：{0}".format(exc)
+        if "yolox" in str(exc).lower():
+            message += "。请在「全局环境依赖」中选择包含 yolox/__init__.py 的 YOLOX 源码目录，并安装 requirements.txt 依赖"
+        raise RuntimeError(message)
 
     model_path = cfg.get("modelPath")
-    image_path = cfg.get("imagePath")
-    if not model_path or not image_path:
-        return fail("yolo", "缺少模型或图片路径")
+    if not model_path:
+        raise ValueError("缺少 YOLO 模型路径")
 
     base = str(cfg.get("baseModel", "yolox_s"))
-    num_classes = int(cfg.get("numClasses", 1))
     imgsz = int(cfg.get("imageSize", 640))
     conf_thre = float(cfg.get("confThre", 0.3))
     nms_thre = float(cfg.get("nmsThre", 0.45))
+    default_threads = 4 if base in ("yolox_nano", "yolox_tiny") else min(8, os.cpu_count() or 4)
+    cpu_threads = max(1, min(16, int(cfg.get("cpuThreads", default_threads))))
+    torch.set_num_threads(cpu_threads)
 
     try:
+        try:
+            # The model is produced and selected inside this application, so it is trusted.
+            ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(model_path, map_location="cpu")
+        if "model" in ckpt:
+            ckpt = ckpt["model"]
+        state_dict = ckpt.state_dict() if hasattr(ckpt, "state_dict") else ckpt
+        inferred_classes = infer_num_classes(state_dict)
+        num_classes = int(inferred_classes or cfg.get("numClasses", 1))
+
         exp = get_exp(None, base)
         exp.num_classes = num_classes
         exp.test_size = (imgsz, imgsz)
-
         model = exp.get_model()
-        ckpt = torch.load(model_path, map_location="cpu")
-        if "model" in ckpt:
-            ckpt = ckpt["model"]
-        model.load_state_dict(ckpt)
+        model.load_state_dict(state_dict)
         model.eval()
 
         device = torch.device("cpu")
+        mps = getattr(torch.backends, "mps", None)
+        mps_available = bool(mps is not None and mps.is_available())
         if torch.cuda.is_available():
             device = torch.device("cuda:0")
-        else:
-            mps = getattr(torch.backends, "mps", None)
-            if mps is not None and mps.is_available():
-                device = torch.device("mps")
+        elif mps_available:
+            device = torch.device("mps")
         model.to(device)
+    except Exception as exc:
+        raise RuntimeError("YOLO 模型加载失败：{0}".format(exc)) from exc
 
+    return {
+        "cv2": cv2,
+        "np": np,
+        "torch": torch,
+        "preproc": preproc,
+        "postprocess": postprocess,
+        "model": model,
+        "device": device,
+        "deviceName": str(device),
+        "mpsAvailable": mps_available,
+        "cpuThreads": torch.get_num_threads(),
+        "torchVersion": torch.__version__,
+        "imgsz": imgsz,
+        "conf_thre": conf_thre,
+        "nms_thre": nms_thre,
+        "num_classes": num_classes,
+        "class_names": cfg.get("classNames") or [],
+    }
+
+
+def _read_yolo_image(runtime, request):
+    cv2 = runtime["cv2"]
+    np = runtime["np"]
+    image_path = request.get("imagePath")
+    if image_path:
         origin = cv2.imread(image_path)
         if origin is None:
-            return fail("yolo", "无法读取测试图片")
+            raise ValueError("无法读取测试图片")
+        return origin
 
-        img, ratio = preproc(origin, (imgsz, imgsz))
-        tensor = torch.from_numpy(img).unsqueeze(0).float().to(device)
-        with torch.no_grad():
-            outputs = model(tensor)
-            results = postprocess(outputs, num_classes, conf_thre, nms_thre, class_agnostic=False)
+    frame_data = request.get("frameDataUrl") or request.get("frameBase64")
+    if not frame_data:
+        raise ValueError("缺少待检测图片")
+    if isinstance(frame_data, str) and frame_data.startswith("data:"):
+        frame_data = frame_data.split(",", 1)[-1]
+    try:
+        image_bytes = base64.b64decode(frame_data)
     except Exception as exc:
-        return fail("yolo", "推理失败：{0}".format(traceback.format_exc()))
+        raise ValueError("待检测图片不是有效的 base64 数据") from exc
+    origin = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if origin is None:
+        raise ValueError("无法解码待检测图片")
+    return origin
 
-    class_names = cfg.get("classNames") or []
+
+def _detect_yolo_image(runtime, origin):
+    cv2 = runtime["cv2"]
+    torch = runtime["torch"]
+    preproc = runtime["preproc"]
+    postprocess = runtime["postprocess"]
+    imgsz = runtime["imgsz"]
+    conf_thre = runtime["conf_thre"]
+    nms_thre = runtime["nms_thre"]
+    num_classes = runtime["num_classes"]
+    class_names = runtime["class_names"]
+
+    img, ratio = preproc(origin, (imgsz, imgsz))
+    tensor = torch.from_numpy(img).unsqueeze(0).float().to(runtime["device"])
+    with torch.no_grad():
+        outputs = runtime["model"](tensor)
+        results = postprocess(outputs, num_classes, conf_thre, nms_thre, class_agnostic=False)
+
     detections = []
     dets = results[0] if results and len(results) > 0 else None
     if dets is not None and len(dets) > 0:
@@ -489,14 +610,85 @@ def run_yolo(cfg):
                 "box": [x, y, w, h],
             })
     detections.sort(key=lambda d: -d["confidence"])
+    return detections
+
+
+def run_yolo(cfg):
+    try:
+        runtime = _load_yolo_runtime(cfg)
+        origin = _read_yolo_image(runtime, cfg)
+        detections = _detect_yolo_image(runtime, origin)
+    except Exception as exc:
+        return fail("yolo", "推理失败：{0}".format(traceback.format_exc()))
 
     emit(
         t="done",
         command="yolo",
         ok=True,
         detections=detections,
+        device=runtime.get("deviceName", "unknown"),
+        cpuThreads=runtime.get("cpuThreads"),
+        mpsAvailable=runtime.get("mpsAvailable", False),
         message="检测到 {0} 个目标".format(len(detections)),
     )
+    return 0
+
+
+def run_yolo_stream(cfg):
+    try:
+        runtime = _load_yolo_runtime(cfg)
+    except Exception:
+        emit(t="done", command="yolo-stream", ok=False, message=traceback.format_exc())
+        return 1
+
+    emit(
+        t="ready",
+        command="yolo-stream",
+        ok=True,
+        device=runtime.get("deviceName", "unknown"),
+        cpuThreads=runtime.get("cpuThreads"),
+        mpsAvailable=runtime.get("mpsAvailable", False),
+        torchVersion=runtime.get("torchVersion"),
+        message="YOLO 常驻推理已就绪 · device={0} · threads={1}".format(
+            runtime.get("deviceName", "unknown"),
+            runtime.get("cpuThreads", "?"),
+        ),
+    )
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except Exception:
+            continue
+        if request.get("command") == "stop":
+            emit(t="stopped", command="yolo-stream", ok=True)
+            return 0
+        request_id = request.get("id")
+        try:
+            origin = _read_yolo_image(runtime, request)
+            detections = _detect_yolo_image(runtime, origin)
+            emit(
+                t="done",
+                command="yolo-stream",
+                id=request_id,
+                ok=True,
+                detections=detections,
+                device=runtime.get("deviceName", "unknown"),
+                cpuThreads=runtime.get("cpuThreads"),
+                mpsAvailable=runtime.get("mpsAvailable", False),
+                message="检测到 {0} 个目标".format(len(detections)),
+            )
+        except Exception:
+            emit(
+                t="done",
+                command="yolo-stream",
+                id=request_id,
+                ok=False,
+                message=traceback.format_exc(),
+            )
+    emit(t="stopped", command="yolo-stream", ok=True)
     return 0
 
 
@@ -569,7 +761,7 @@ def _activate_window(info) -> bool:
     activated = False
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "/usr/bin/osascript",
                 "-e",
@@ -579,7 +771,8 @@ def _activate_window(info) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        activated = True
+        if result.returncode == 0:
+            activated = True
     except Exception:
         pass
 
@@ -606,7 +799,22 @@ def _activate_window(info) -> bool:
     except Exception:
         pass
 
-    return activated
+    if not activated:
+        return False
+
+    # Verify the requested process is actually frontmost. AppleScript can return
+    # before the window manager changes focus, so poll briefly before sending keys.
+    try:
+        import AppKit
+        for _ in range(10):
+            frontmost = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            frontmost_pid = int(frontmost.processIdentifier()) if frontmost is not None else None
+            if frontmost_pid == pid:
+                return True
+            time.sleep(0.05)
+    except Exception:
+        return True
+    return False
 
 
 def _display_bounds(display_id):
@@ -853,41 +1061,17 @@ def run_input(cfg):
 # 手柄按键映射：将gamepad动作映射到键盘按键
 # PS Remote使用键盘映射发送手柄按键
 GAMEPAD_KEY_MAP = {
-    # PS5手柄按键 -> 键盘按键
-    'pressA': 'enter',      # A按钮 -> Enter
-    'pressB': 'escape',     # B按钮 -> Escape
-    'pressX': 'space',      # X按钮 -> Space
-    'pressY': 'tab',        # Y按钮 -> Tab
-    'pressRT': 'r',         # RT -> R
-    'pressLT': 'l',         # LT -> L
-    'pressRB': 'e',         # RB -> E
-    'pressLB': 'q',         # LB -> Q
-    'pressSTART': 'enter',  # START -> Enter
-    'pressBACK': 'escape',  # BACK -> Escape
-    'pressHOME': 'h',       # HOME -> H
-    'pressDPADL': 'left',   # 方向键左
-    'pressDPADR': 'right',  # 方向键右
-    'pressDPADU': 'up',     # 方向键上
-    'pressDPADD': 'down',   # 方向键下
-    'pressLU': 'w',         # 左摇杆上
-    'pressLD': 's',         # 左摇杆下
-    'pressLL': 'a',         # 左摇杆左
-    'pressLR': 'd',         # 左摇杆右
-}
-
-# XBOX Remote使用不同的键盘映射
-XBOX_GAMEPAD_KEY_MAP = {
-    'pressA': 'enter',
-    'pressB': 'escape',
-    'pressX': 'space',
-    'pressY': 'tab',
-    'pressRT': 'r',
-    'pressLT': 'l',
-    'pressRB': 'e',
-    'pressLB': 'q',
-    'pressSTART': 'enter',
-    'pressBACK': 'escape',
-    'pressHOME': 'h',
+    'pressCross': '1',
+    'pressCircle': '2',
+    'pressTriangle': '3',
+    'pressSquare': '4',
+    'pressR2': 'f',
+    'pressL2': 'r',
+    'pressR1': 'e',
+    'pressL1': 'q',
+    'pressOptions': '5',
+    'pressShare': '6',
+    'pressPS': 'h',
     'pressDPADL': 'left',
     'pressDPADR': 'right',
     'pressDPADU': 'up',
@@ -896,7 +1080,24 @@ XBOX_GAMEPAD_KEY_MAP = {
     'pressLD': 's',
     'pressLL': 'a',
     'pressLR': 'd',
+    'pressRU': 'up',
+    'pressRD': 'down',
+    'pressRL': 'left',
+    'pressRR': 'right',
+    # 旧工作流兼容映射
+    'pressA': '1',
+    'pressB': '2',
+    'pressY': '3',
+    'pressX': '4',
+    'pressRT': 'f',
+    'pressLT': 'r',
+    'pressRB': 'e',
+    'pressLB': 'q',
+    'pressSTART': '5',
+    'pressBACK': '6',
+    'pressHOME': 'h',
 }
+
 
 
 
@@ -977,17 +1178,29 @@ class CDPGamepad:
 
 # 手柄按键到CDP button index的映射
 GAMEPAD_BUTTON_MAP = {
-    "pressA": 0,      # A按钮
-    "pressB": 1,      # B按钮
-    "pressX": 2,      # X按钮
-    "pressY": 3,      # Y按钮
-    "pressLB": 4,     # LB
-    "pressRB": 5,     # RB
-    "pressLT": 6,     # LT
-    "pressRT": 7,     # RT
-    "pressBACK": 8,   # BACK
-    "pressSTART": 9,  # START
-    "pressHOME": 10,  # HOME
+    "pressCross": 0,
+    "pressCircle": 1,
+    "pressSquare": 2,
+    "pressTriangle": 3,
+    "pressL1": 4,
+    "pressR1": 5,
+    "pressL2": 6,
+    "pressR2": 7,
+    "pressShare": 8,
+    "pressOptions": 9,
+    "pressPS": 10,
+    # 旧工作流兼容映射
+    "pressA": 0,
+    "pressB": 1,
+    "pressX": 2,
+    "pressY": 3,
+    "pressLB": 4,
+    "pressRB": 5,
+    "pressLT": 6,
+    "pressRT": 7,
+    "pressBACK": 8,
+    "pressSTART": 9,
+    "pressHOME": 10,
     "pressDPADU": 11, # 方向键上
     "pressDPADD": 12, # 方向键下
     "pressDPADL": 13, # 方向键左
@@ -996,10 +1209,14 @@ GAMEPAD_BUTTON_MAP = {
 
 # 手柄摇杆轴映射
 GAMEPAD_AXIS_MAP = {
-    "pressLU": {"axis": 1, "value": -1.0},  # 左摇杆上
-    "pressLD": {"axis": 1, "value": 1.0},   # 左摇杆下
-    "pressLL": {"axis": 0, "value": -1.0},  # 左摇杆左
-    "pressLR": {"axis": 0, "value": 1.0},   # 左摇杆右
+    "pressLU": {"axis": 1, "value": -1.0},
+    "pressLD": {"axis": 1, "value": 1.0},
+    "pressLL": {"axis": 0, "value": -1.0},
+    "pressLR": {"axis": 0, "value": 1.0},
+    "pressRU": {"axis": 3, "value": -1.0},
+    "pressRD": {"axis": 3, "value": 1.0},
+    "pressRL": {"axis": 2, "value": -1.0},
+    "pressRR": {"axis": 2, "value": 1.0},
 }
 
 
@@ -1023,32 +1240,48 @@ def run_gamepad_with_shared_memory(cfg):
 
     action = cfg.get("action", "")
     duration_ms = cfg.get("durationMs", 0)
+    pressed = cfg.get("pressed")
 
     try:
         gamepad = SharedMemoryGamepad()
         if not gamepad.connect():
             return fail("gamepad", "连接共享内存失败")
 
-        # 发送按键
-        gamepad.send_action(action, duration_ms)
+        # 状态事件只更新按键/摇杆，不自动松开。
+        if pressed is None:
+            gamepad.send_action(action, duration_ms)
+        else:
+            gamepad.set_action(action, bool(pressed))
 
         # 等待按键生效
         delay_ms = cfg.get("delayMs", 100)
-        if delay_ms > 0:
+        if pressed is None and delay_ms > 0:
             time.sleep(delay_ms / 1000.0)
 
         emit(t="done", command="gamepad", ok=True, action=action,
-             method="shared_memory", message="SharedMemory手柄按键 {0} 发送成功".format(action))
+             method="shared_memory", message="SharedMemory手柄按键 {0} 已写入共享内存".format(action))
         return 0
 
     except Exception as e:
         return fail("gamepad", "SharedMemory手柄按键失败: {0}".format(str(e)))
 
+def resolve_gamepad_key(action, keyboard_key, key_map):
+    custom = str(keyboard_key or "").strip().lower()
+    if custom:
+        return custom
+    if action not in key_map:
+        raise ValueError("未知的手柄动作: {0}".format(action))
+    return key_map[action]
+
+
 def run_gamepad(cfg):
     """手柄按键发送：支持CDP协议、SharedMemory和键盘映射"""
-    # 如果使用SharedMemoryGamepad
+    action = cfg.get("action", "")
+    custom_key = str(cfg.get("keyboardKey", "") or "").strip()
+
+    # 自定义游戏键盘按键优先，绕过 SharedMemory/CDP 的固定手柄映射。
     use_shared_memory = cfg.get("useSharedMemory", False)
-    if use_shared_memory:
+    if use_shared_memory and not custom_key:
         return run_gamepad_with_shared_memory(cfg)
 
 
@@ -1058,19 +1291,20 @@ def run_gamepad(cfg):
         return fail("gamepad", "无法加载 pyautogui，请先安装：pip install pyautogui")
 
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE = float(cfg.get("pause", 0.05))
+    pressed = cfg.get("pressed")
+    pyautogui.PAUSE = 0.0 if pressed is not None else float(cfg.get("pause", 0.05))
 
-    action = cfg.get("action", "")
     target = cfg.get("target", "global")
-    stream_type = cfg.get("streamType", "ps5")  # ps5 或 xbox
     window_hint = cfg.get("windowHint", "")
+    window_id = cfg.get("windowId")
+    window_app = cfg.get("windowApp", "")
     duration_ms = cfg.get("durationMs", 0)
     delay_ms = cfg.get("delayMs", 100)
     use_cdp = cfg.get("useCdp", False)
     cdp_port = cfg.get("cdpPort", 9222)
 
     # 如果使用CDP协议
-    if use_cdp:
+    if use_cdp and not custom_key:
         try:
             gamepad = CDPGamepad(cdp_port)
             loop = asyncio.new_event_loop()
@@ -1097,7 +1331,7 @@ def run_gamepad(cfg):
 
             if success:
                 emit(t="done", command="gamepad", ok=True, action=action,
-                     target=target, method="cdp", message="CDP手柄按键 {0} 发送成功".format(action))
+                     target=target, method="cdp", message="CDP手柄按键 {0} 已派发".format(action))
                 return 0
             else:
                 # CDP失败，回退到键盘映射
@@ -1108,46 +1342,42 @@ def run_gamepad(cfg):
 
     # 键盘映射方式
     # 如果需要发送到串流窗口
-    if target == "stream" and window_hint:
-        # 先激活串流窗口
-        info = _window_info_by_hint(window_hint)
+    target_info = None
+    if target == "stream" and (window_id or window_hint or window_app) and pressed is not False:
+        # 先按精确窗口 ID 定位，再按应用名/标题兜底
+        info = _window_info_by_id(window_id)
+        if not info and window_app:
+            info = _window_info_by_hint(window_app)
+        if not info and window_hint:
+            info = _window_info_by_hint(window_hint)
         if not info:
-            return fail("gamepad", "未找到串流窗口: {0}".format(window_hint))
+            return fail("gamepad", "未找到串流窗口: {0}".format(window_hint or window_app or window_id))
         if not _activate_window(info):
-            return fail("gamepad", "无法激活串流窗口，请确认已授予辅助功能权限")
-        time.sleep(0.1)  # 等待窗口激活
+            return fail("gamepad", "无法激活串流窗口，已中止按键发送，请确认目标窗口存在且已授予辅助功能权限")
+        target_info = {
+            "id": info.get("id"),
+            "title": info.get("title"),
+            "pid": info.get("pid"),
+        }
+        if pressed is not True:
+            time.sleep(0.1)  # wait for the target window to accept focus
 
-    # 键盘映射
-    key_map = {
-        "pressA": "enter",
-        "pressB": "escape",
-        "pressX": "space",
-        "pressY": "tab",
-        "pressRT": "r",
-        "pressLT": "l",
-        "pressRB": "e",
-        "pressLB": "q",
-        "pressSTART": "enter",
-        "pressBACK": "escape",
-        "pressHOME": "h",
-        "pressDPADL": "left",
-        "pressDPADR": "right",
-        "pressDPADU": "up",
-        "pressDPADD": "down",
-        "pressLU": "w",
-        "pressLD": "s",
-        "pressLL": "a",
-        "pressLR": "d",
-    }
+    # 自定义按键优先；否则使用默认 PS5 动作映射。
+    key_map = GAMEPAD_KEY_MAP
 
-    if action not in key_map:
-        return fail("gamepad", "未知的手柄动作: {0}".format(action))
-
-    key = key_map[action]
+    try:
+        key = resolve_gamepad_key(action, custom_key, key_map)
+    except ValueError as exc:
+        return fail("gamepad", str(exc))
 
     # 发送按键
     try:
-        if duration_ms > 0:
+        if pressed is not None:
+            if pressed:
+                pyautogui.keyDown(key)
+            else:
+                pyautogui.keyUp(key)
+        elif duration_ms > 0:
             # 长按
             pyautogui.keyDown(key)
             time.sleep(duration_ms / 1000.0)
@@ -1157,11 +1387,12 @@ def run_gamepad(cfg):
             pyautogui.press(key)
 
         # 按键后延迟
-        if delay_ms > 0:
+        if pressed is None and delay_ms > 0:
             time.sleep(delay_ms / 1000.0)
 
         emit(t="done", command="gamepad", ok=True, action=action, key=key,
-             target=target, method="keyboard", message="手柄按键 {0} 发送成功".format(action))
+             target=target, targetWindow=target_info, method="keyboard",
+             message="手柄按键 {0} 已发送到目标窗口（key={1}）".format(action, key))
         return 0
     except Exception:
         return fail("gamepad", "按键发送失败: {0}".format(traceback.format_exc()))
@@ -1318,6 +1549,8 @@ def main():
         return run_template(cfg)
     if command == "yolo":
         return run_yolo(cfg)
+    if command == "yolo-stream":
+        return run_yolo_stream(cfg)
     if command == "input":
         return run_input(cfg)
     if command == "gamepad":

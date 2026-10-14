@@ -55,6 +55,8 @@ type EditState = {
   error: string | null;
 };
 
+const UNCLASSIFIED_SCOPE_ID = '__unclassified__';
+
 const blankEdit = (): EditState => ({
   editing: null,
   sourceImage: null,
@@ -238,8 +240,9 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
       e.stopPropagation();
-      if (e.key === 'Escape') onClose();
+      onClose();
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
@@ -255,7 +258,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
         sourceImage: String(reader.result),
         sourceRect: null,
         clickOffset: { x: 0, y: 0 },
-        folderId: keepEditing ? prev.folderId : activeFolderId,
+        folderId: keepEditing ? prev.folderId : (activeFolderId === UNCLASSIFIED_SCOPE_ID ? null : activeFolderId),
         name: keepEditing ? prev.name : file.name.replace(/\.[^.]+$/, '') || prev.name,
         resolutionW: window.screen?.width ?? prev.resolutionW,
         resolutionH: window.screen?.height ?? prev.resolutionH,
@@ -306,7 +309,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
     setSelectedId(null);
     setConfirmDeleteId(null);
     pendingReplaceRef.current = false;
-    setEdit({ ...blankEdit(), folderId: activeFolderId });
+    setEdit({ ...blankEdit(), folderId: activeFolderId === UNCLASSIFIED_SCOPE_ID ? null : activeFolderId });
   }, [activeFolderId]);
 
   const importTemplateFiles = useCallback(
@@ -324,7 +327,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
           const imageData = await readImageData(file);
           const definition = await window.templateAPI.create({
             name: file.name.replace(/\.[^.]+$/, '') || `模板 ${index + 1}`,
-            folderId: activeFolderId,
+            folderId: activeFolderId === UNCLASSIFIED_SCOPE_ID ? null : activeFolderId,
             resolution: { width: imageData.width, height: imageData.height },
             scaleFactor: window.devicePixelRatio || 1,
             clickOffset: { x: 0, y: 0 },
@@ -507,13 +510,19 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
   });
 
   const folderIds = new Set(folders.map((folder) => folder.id));
-  const libraryTemplates = templates.filter((template) => template.folderId && folderIds.has(template.folderId));
+  const isClassifiedTemplate = (template: TemplateDefinition) => Boolean(template.folderId && folderIds.has(template.folderId));
+  const libraryTemplates = templates.filter(isClassifiedTemplate);
+  const unclassifiedTemplates = templates.filter((template) => !isClassifiedTemplate(template));
   const getDescendantFolderIds = (folderId: string): string[] => {
     const children = folders.filter(f => f.parentId === folderId);
     return [folderId, ...children.flatMap(c => getDescendantFolderIds(c.id))];
   };
-  const activeFolderIds = activeFolderId ? new Set(getDescendantFolderIds(activeFolderId)) : null;
-  const activeTemplates = filtered.filter((tpl) => (activeFolderIds ? activeFolderIds.has(tpl.folderId ?? '') : true));
+  const isRealFolder = activeFolderId !== null && activeFolderId !== UNCLASSIFIED_SCOPE_ID && folderIds.has(activeFolderId);
+  const activeFolderIds = isRealFolder ? new Set(getDescendantFolderIds(activeFolderId)) : null;
+  const activeTemplates = filtered.filter((tpl) => {
+    if (activeFolderId === UNCLASSIFIED_SCOPE_ID) return !isClassifiedTemplate(tpl);
+    return activeFolderIds ? activeFolderIds.has(tpl.folderId ?? '') : true;
+  });
   const halfW = edit.sourceRect ? Math.round(edit.sourceRect.width / 2) : 0;
   const halfH = edit.sourceRect ? Math.round(edit.sourceRect.height / 2) : 0;
   const canSave = Boolean(edit.name.trim() && edit.sourceRect) && !apiUnavailable;
@@ -581,7 +590,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
           </div>
           <div className="yolo-modal__training-pill">
             <span className="status-dot status-dot--saved" />
-            模板库检测 {libraryStats.libraryCount} 个已归类模板
+            模板库检测 {libraryStats.libraryCount} 个已归类 · {libraryStats.unclassifiedCount} 个未分类
           </div>
           <button className="yolo-modal__close" onClick={onClose} aria-label="关闭">×</button>
         </header>
@@ -593,7 +602,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
               className="yolo-modal__tab-badge"
               title={`模板库 ${libraryStats.libraryCount} 个 · 未分类历史模板 ${libraryStats.unclassifiedCount} 个 · 缺失 ${libraryStats.missingCount} 个`}
             >
-              模板 {libraryStats.libraryCount}
+              模板 {libraryStats.libraryCount + libraryStats.unclassifiedCount}
             </span>
             <span className="yolo-modal__tab-hint">文件夹与模板列表</span>
           </button>
@@ -640,6 +649,30 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                   </button>
                 )}
                 <div className="yolo-dataset__items">
+                  <div
+                    className={`yolo-dataset__item ${activeFolderId === null ? 'active' : ''}`}
+                    onClick={() => setActiveFolderId(null)}
+                  >
+                    <div className="yolo-dataset__item-main">
+                      <div className="yolo-dataset__item-head">
+                        <span className="yolo-dataset__folder-toggle">•</span>
+                        <span className="yolo-dataset__item-name">全部模板</span>
+                        <span className="yolo-dataset__item-meta">{templates.length} 个</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    className={`yolo-dataset__item ${activeFolderId === UNCLASSIFIED_SCOPE_ID ? 'active' : ''}`}
+                    onClick={() => setActiveFolderId(UNCLASSIFIED_SCOPE_ID)}
+                  >
+                    <div className="yolo-dataset__item-main">
+                      <div className="yolo-dataset__item-head">
+                        <span className="yolo-dataset__folder-toggle">•</span>
+                        <span className="yolo-dataset__item-name">未分类历史模板</span>
+                        <span className="yolo-dataset__item-meta">{unclassifiedTemplates.length} 个</span>
+                      </div>
+                    </div>
+                  </div>
                   {(() => {
                     const tree = buildFolderTree(folders);
                     // Auto-expand root folders on first render
@@ -724,12 +757,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
               </aside>
 
               <section className="yolo-dataset__main">
-                {!activeFolderId ? (
-                  <div className="yolo-dataset__empty">
-                    <div className="yolo-dataset__empty-icon">◈</div>
-                    <p>创建或选择一个文件夹，开始上传截图创建模板</p>
-                  </div>
-                ) : activeTemplates.length === 0 ? (
+                {activeTemplates.length === 0 ? (
                   <div className="yolo-dataset__empty yolo-dataset__empty--drop">
                     <div
                       className={`yolo-dataset__drop yolo-dataset__drop--full ${dragOver ? 'drag' : ''}`}
@@ -809,7 +837,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                         >
                           导出模板库
                         </button>
-                        {activeFolderId !== null && (
+                        {isRealFolder && (
                           <button className="yolo-btn--danger" onClick={() => setConfirmDeleteFolderId(activeFolderId)}>
                             删除文件夹
                           </button>
@@ -840,7 +868,7 @@ export function TemplateManagerModal({ onClose, onChanged }: Props) {
                         </div>
                       ))}
                     </div>
-                    {activeTemplates.length === 0 && <div className="yolo-dataset__empty small">这个文件夹还没有模板，拖拽截图到上方创建</div>}
+                    {activeTemplates.length === 0 && <div className="yolo-dataset__empty small">{activeFolderId === UNCLASSIFIED_SCOPE_ID ? '没有未分类历史模板' : '这里还没有模板，拖拽截图到上方创建'}</div>}
                   </>
                 )}
               </section>

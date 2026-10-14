@@ -1,4 +1,5 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell } from 'electron';
+import { ensureTemplatesDir, templateImagesDir, templateIndexFile, templateSourcesDir } from './templateStorage';
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
@@ -21,6 +22,7 @@ import type {
   Ps5StreamResolution,
   StreamProbeResult,
   StreamScreenshotResult,
+  StreamFrameRate,
   StreamSourceProfile,
   TemplateCreatePayload,
   TemplateDefinition,
@@ -40,7 +42,7 @@ import type {
   YoloTrainingState,
   WorkflowDocument,
 } from '@nobowo/core';
-import { YOLO_CLASS_COLORS } from '@nobowo/core';
+import { YOLO_CLASS_COLORS, YOLOX_PYTHON_DEPENDENCIES } from '@nobowo/core';
 import { runVisionEngine, writeImageToTemp } from './engine';
 import { WorkflowExecutor } from './workflowExecutor';
 import { disposePs5RuntimeClient, getPs5RuntimeClient, type Ps5ConnectPayload } from './ps5Runtime';
@@ -108,21 +110,11 @@ const normalizeTemplate = (tpl: TemplateDefinition): TemplateDefinition => ({
   matchHotspot: tpl.matchHotspot ?? tpl.sourceRect,
 });
 
-const templatesDir = () => path.join(app.getPath('userData'), 'templates');
-const indexFile = () => path.join(templatesDir(), 'index.json');
-const templateImagesDir = () => path.join(templatesDir(), 'images');
-const templateSourcesDir = () => path.join(templatesDir(), 'sources');
 const cloudApiProfilesFile = () => path.join(app.getPath('userData'), 'api-profiles.json');
-
-async function ensureTemplatesDir() {
-  await mkdir(templatesDir(), { recursive: true });
-  await mkdir(templateImagesDir(), { recursive: true });
-  await mkdir(templateSourcesDir(), { recursive: true });
-}
 
 async function loadIndex(): Promise<TemplateIndex> {
   try {
-    const raw = await readFile(indexFile(), 'utf8');
+    const raw = await readFile(templateIndexFile(), 'utf8');
     const parsed = JSON.parse(raw) as Partial<TemplateIndex> | TemplateDefinition[];
     if (Array.isArray(parsed)) {
       return { folders: [], templates: parsed.map(normalizeTemplate) };
@@ -138,7 +130,7 @@ async function loadIndex(): Promise<TemplateIndex> {
 
 async function saveIndex(index: TemplateIndex) {
   await ensureTemplatesDir();
-  await writeFile(indexFile(), JSON.stringify(index, null, 2), 'utf8');
+  await writeFile(templateIndexFile(), JSON.stringify(index, null, 2), 'utf8');
 }
 
 async function detectStoredTemplates(templates: TemplateDefinition[]): Promise<{ templates: TemplateDefinition[]; missingCount: number }> {
@@ -429,6 +421,11 @@ type StreamSourceIndex = {
 };
 
 function normalizeStreamSource(source: StreamSourceProfile): StreamSourceProfile {
+  const captureFps: StreamFrameRate | undefined = source.captureFps === 60 || source.ps5Fps === 60
+    ? 60
+    : source.captureFps === 30 || source.ps5Fps === 30
+      ? 30
+      : undefined;
   return {
     ...source,
     name: source.name.trim(),
@@ -436,11 +433,14 @@ function normalizeStreamSource(source: StreamSourceProfile): StreamSourceProfile
     transport: source.transport ?? (source.type === 'ps5' ? 'externalWindow' : undefined),
     ps5AccountId: source.ps5AccountId?.trim() || undefined,
     ps5Resolution: source.ps5Resolution ?? undefined,
-    ps5Fps: source.ps5Fps ? Number(source.ps5Fps) : undefined,
+    captureFps,
+    ps5Fps: captureFps,
     host: source.host?.trim() || undefined,
     port: source.port ? Number(source.port) : undefined,
     url: source.url?.trim() || undefined,
     windowHint: source.windowHint?.trim() || undefined,
+    windowId: source.windowId ? Number(source.windowId) : undefined,
+    windowApp: source.windowApp?.trim() || undefined,
     notes: source.notes?.trim() || undefined,
     lastTestAt: source.lastTestAt ?? null,
     lastTestStatus: source.lastTestStatus ?? null,
@@ -494,6 +494,73 @@ async function saveStreamSources(index: StreamSourceIndex) {
   await writeFile(streamSourcesFile(), JSON.stringify(index, null, 2), 'utf8');
 }
 
+async function ensurePs5DirectStreamSource(
+  host: string,
+  accountKey: string,
+  options: { name?: string; resolution?: Ps5StreamResolution; fps?: number; account?: Ps5AccountProfile } = {},
+): Promise<StreamSourceProfile> {
+  const normalizedHost = host.trim();
+  if (!normalizedHost) throw new Error('PS5 主机地址为空，无法创建串流设备');
+  const account = options.account ?? await getPs5RuntimeClient().listAccounts()
+    .then((result) => result.accounts.find((item) => item.id === accountKey || item.accountId === accountKey))
+    .catch(() => undefined);
+  const index = await loadStreamSources();
+  const existing = index.sources.find((source) =>
+    source.type === 'ps5' &&
+    source.transport === 'ps5Direct' &&
+    (source.host === normalizedHost || (account && (source.ps5AccountId === account.id || source.ps5AccountId === account.accountId))),
+  );
+  const now = Date.now();
+  const profile = normalizeStreamSource({
+    id: existing?.id ?? randomUUID(),
+    name: options.name?.trim() || existing?.name || `PS5 · ${account?.name || account?.onlineId || normalizedHost}`,
+    type: 'ps5',
+    transport: 'ps5Direct',
+    ps5AccountId: account?.id ?? accountKey,
+    ps5Resolution: options.resolution ?? existing?.ps5Resolution ?? '720p',
+    captureFps: options.fps === 60 ? 60 : options.fps === 30 ? 30 : existing?.captureFps ?? existing?.ps5Fps ?? 30,
+    ps5Fps: options.fps === 60 ? 60 : options.fps === 30 ? 30 : existing?.captureFps ?? existing?.ps5Fps ?? 30,
+    host: normalizedHost,
+    port: existing?.port,
+    url: existing?.url,
+    windowHint: existing?.windowHint,
+    windowId: existing?.windowId,
+    windowApp: existing?.windowApp,
+    notes: existing?.notes ?? '由已配对的 PS5 主机自动创建',
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    lastTestAt: existing?.lastTestAt ?? null,
+    lastTestStatus: existing?.lastTestStatus ?? null,
+    lastTestMessage: existing?.lastTestMessage ?? null,
+  });
+  if (existing) {
+    index.sources = index.sources.map((source) => source.id === existing.id ? profile : source);
+  } else {
+    index.sources.push(profile);
+  }
+  await saveStreamSources(index);
+  return profile;
+}
+
+async function migratePairedPs5HostsToStreamSources(): Promise<void> {
+  const ps5Dir = path.join(app.getPath('userData'), 'ps5');
+  try {
+    const [hostsRaw, accountsRaw] = await Promise.all([
+      readFile(path.join(ps5Dir, 'hosts.json'), 'utf8'),
+      readFile(path.join(ps5Dir, 'accounts.json'), 'utf8'),
+    ]);
+    const hostsRecord = JSON.parse(hostsRaw) as Record<string, { host?: string; accountId?: string; registration?: unknown }>;
+    const accounts = JSON.parse(accountsRaw) as Ps5AccountProfile[];
+    for (const item of Object.values(hostsRecord ?? {})) {
+      if (!item?.host || !item?.accountId || !item?.registration) continue;
+      const account = accounts.find((candidate) => candidate.accountId === item.accountId || candidate.id === item.accountId);
+      await ensurePs5DirectStreamSource(item.host, account?.id ?? item.accountId, account ? { account } : {});
+    }
+  } catch {
+    // 尚未配对或 PS5 数据不存在时无需创建串流设备。
+  }
+}
+
 function testTcpConnection(host: string, port: number, timeoutMs = 4000): Promise<{ ok: boolean; latencyMs: number | null; message: string }> {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -533,6 +600,7 @@ async function captureWindowFrames(sourceId: string, thumbnailSize: { width: num
 
 function registerStreamIpc() {
   ipcMain.handle('stream:list', async (): Promise<StreamSourceProfile[]> => {
+    await migratePairedPs5HostsToStreamSources();
     const index = await loadStreamSources();
     return index.sources.sort((a, b) => b.updatedAt - a.updatedAt);
   });
@@ -548,11 +616,14 @@ function registerStreamIpc() {
         transport: payload.transport,
         ps5AccountId: payload.ps5AccountId,
         ps5Resolution: payload.ps5Resolution,
+        captureFps: payload.captureFps,
         ps5Fps: payload.ps5Fps,
         host: payload.host,
         port: payload.port,
         url: payload.url,
         windowHint: payload.windowHint,
+        windowId: payload.windowId,
+        windowApp: payload.windowApp,
         notes: payload.notes,
         createdAt: now,
         updatedAt: now,
@@ -578,11 +649,19 @@ function registerStreamIpc() {
       if (patch.transport !== undefined) profile.transport = patch.transport;
       if (patch.ps5AccountId !== undefined) profile.ps5AccountId = patch.ps5AccountId?.trim() || undefined;
       if (patch.ps5Resolution !== undefined) profile.ps5Resolution = patch.ps5Resolution;
-      if (patch.ps5Fps !== undefined) profile.ps5Fps = patch.ps5Fps ? Number(patch.ps5Fps) : undefined;
+      if (patch.captureFps !== undefined) {
+        profile.captureFps = patch.captureFps;
+        profile.ps5Fps = patch.captureFps;
+      } else if (patch.ps5Fps !== undefined) {
+        profile.captureFps = patch.ps5Fps;
+        profile.ps5Fps = patch.ps5Fps;
+      }
       if (typeof patch.host === 'string') profile.host = patch.host.trim() || undefined;
       if (patch.port !== undefined) profile.port = patch.port ? Number(patch.port) : undefined;
       if (typeof patch.url === 'string') profile.url = patch.url.trim() || undefined;
       if (typeof patch.windowHint === 'string') profile.windowHint = patch.windowHint.trim() || undefined;
+      if (patch.windowId !== undefined) profile.windowId = patch.windowId ? Number(patch.windowId) : undefined;
+      if (typeof patch.windowApp === 'string') profile.windowApp = patch.windowApp.trim() || undefined;
       if (typeof patch.notes === 'string') profile.notes = patch.notes.trim() || undefined;
       profile.updatedAt = Date.now();
       await saveStreamSources(index);
@@ -855,12 +934,19 @@ function registerPs5Ipc() {
   ipcMain.handle('ps5:testHost', async (_event, host: string): Promise<Ps5HostTestResult> =>
     getPs5RuntimeClient().testHost(host),
   );
-  ipcMain.handle('ps5:pair', async (_event, payload: { host: string; accountId: string; pin: string }) =>
-    getPs5RuntimeClient().pair(payload),
-  );
-  ipcMain.handle('ps5:connect', async (_event, payload: Ps5ConnectPayload): Promise<Ps5RuntimeStatus> =>
-    getPs5RuntimeClient().connect(payload),
-  );
+  ipcMain.handle('ps5:pair', async (_event, payload: { host: string; accountId: string; pin: string }) => {
+    const result = await getPs5RuntimeClient().pair(payload);
+    await ensurePs5DirectStreamSource(payload.host, payload.accountId);
+    return result;
+  });
+  ipcMain.handle('ps5:connect', async (_event, payload: Ps5ConnectPayload): Promise<Ps5RuntimeStatus> => {
+    const result = await getPs5RuntimeClient().connect(payload);
+    await ensurePs5DirectStreamSource(payload.host, payload.accountId, {
+      resolution: payload.resolution,
+      fps: payload.fps,
+    });
+    return result;
+  });
   ipcMain.handle('ps5:disconnect', async () => getPs5RuntimeClient().disconnect());
   ipcMain.handle('ps5:getFrame', async (): Promise<Ps5Frame> => getPs5RuntimeClient().getFrame());
   ipcMain.handle('ps5:sendKey', async (_event, key: string, down: boolean) =>
@@ -1120,7 +1206,7 @@ function registerOcrIpc() {
                 id: `vision-${index}-${block.box.x}-${block.box.y}`,
                 text: block.text,
                 box: block.box,
-                confidence: block.confidence,
+                confidence: Math.round(Math.max(0, Math.min(1, block.confidence)) * 100),
               })),
               message: payload.targetText?.trim() ? `已搜索：${payload.targetText.trim()}` : undefined,
             };
@@ -1205,7 +1291,7 @@ function registerOcrIpc() {
                 width: Math.max(0, (word.bbox?.x1 ?? 0) - (word.bbox?.x0 ?? 0)),
                 height: Math.max(0, (word.bbox?.y1 ?? 0) - (word.bbox?.y0 ?? 0)),
               },
-              confidence: typeof word.confidence === 'number' ? word.confidence / 100 : undefined,
+                confidence: typeof word.confidence === 'number' ? word.confidence : undefined,
             }))
             .filter((match) => match.text.length > 0);
           send('info', `识别完成，共 ${matches.length} 个文字块`);
@@ -1592,32 +1678,34 @@ def build_exp(cfg):
             cache_type=cache_type,
         )
 
-    def get_dataset(self, cache=False, cache_type="ram"):
+    # 这些覆盖函数必须是普通函数而不是绑定方法。绑定方法的 __self__ 会指回 exp，
+    # 而 BaseExp.__repr__ 又会遍历 vars(exp)，最终导致 repr 无限递归。
+    def get_dataset(cache=False, cache_type="ram"):
         return make_dataset(
-            self.train_ann, self.train_image_set, self.input_size,
-            TrainTransform(max_labels=50, flip_prob=self.flip_prob, hsv_prob=self.hsv_prob),
+            exp.train_ann, exp.train_image_set, exp.input_size,
+            TrainTransform(max_labels=50, flip_prob=exp.flip_prob, hsv_prob=exp.hsv_prob),
             cache=cache, cache_type=cache_type,
         )
 
-    def get_eval_dataset(self, **kwargs):
+    def get_eval_dataset(**kwargs):
         return make_dataset(
-            self.val_ann, self.val_image_set, self.test_size,
+            exp.val_ann, exp.val_image_set, exp.test_size,
             ValTransform(legacy=kwargs.get("legacy", False)),
         )
 
-    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False):
+    def get_evaluator(batch_size, is_distributed, testdev=False, legacy=False):
         return PlainEvaluator(
-            dataloader=self.get_eval_loader(batch_size, is_distributed, testdev=testdev, legacy=legacy),
-            img_size=self.test_size,
-            confthre=self.test_conf,
-            nmsthre=self.nmsthre,
-            num_classes=self.num_classes,
+            dataloader=exp.get_eval_loader(batch_size, is_distributed, testdev=testdev, legacy=legacy),
+            img_size=exp.test_size,
+            confthre=exp.test_conf,
+            nmsthre=exp.nmsthre,
+            num_classes=exp.num_classes,
             testdev=testdev,
         )
 
-    exp.get_dataset = get_dataset.__get__(exp, type(exp))
-    exp.get_eval_dataset = get_eval_dataset.__get__(exp, type(exp))
-    exp.get_evaluator = get_evaluator.__get__(exp, type(exp))
+    exp.get_dataset = get_dataset
+    exp.get_eval_dataset = get_eval_dataset
+    exp.get_evaluator = get_evaluator
     exp.output_dir = cfg["projectDir"]
     return exp
 
@@ -2982,8 +3070,23 @@ function registerYoloIpc() {
       '  r=subprocess.run([sys.executable,"-m","pip","--version"],capture_output=True,text=True,timeout=8);',
       '  if r.returncode==0: out["pip"]=r.stdout.split()[1];',
       'except Exception: out["pip"]=None;',
+      'deps=[' + YOLOX_PYTHON_DEPENDENCIES.map((dep) =>
+        `{"key":${JSON.stringify(dep.key)},"importName":${JSON.stringify(dep.importName)},"distributionName":${JSON.stringify(dep.distributionName)}}`
+      ).join(',') + '];',
+      'import importlib.util, importlib.metadata;',
+      'out["packages"]={};',
+      'for item in deps:',
+      '  try:',
+      '    spec=importlib.util.find_spec(item["importName"]);',
+      '    version=None if spec is None else "installed";',
+      '    if spec is not None:',
+      '      try: version=importlib.metadata.version(item["distributionName"]);',
+      '      except Exception: version="installed";',
+      '    out["packages"][item["key"]]=version;',
+      '  except Exception: out["packages"][item["key"]]=None;',
       'try:',
-      '  import yolox; out["yolox"]=getattr(yolox,"__version__","?");',
+      '  import yolox; from yolox.core.trainer import Trainer;',
+      '  out["yolox"]=getattr(yolox,"__version__","?");',
       'except Exception: out["yolox"]=None;',
       'try:',
       '  import torch; out["torch"]=torch.__version__;',
@@ -3005,6 +3108,7 @@ function registerYoloIpc() {
       cuda: false,
       mps: false,
       device: 'none',
+      packages: Object.fromEntries(YOLOX_PYTHON_DEPENDENCIES.map((dep) => [dep.key, null])),
     };
     if (res.code !== 0 || !res.stdout.trim()) {
       if (res.stderr.trim()) console.warn('[yolo] env probe:', res.stderr.trim().slice(0, 300));
@@ -3021,19 +3125,30 @@ function registerYoloIpc() {
       info.cuda = Boolean(parsed.cuda);
       info.mps = Boolean(parsed.mps);
       info.device = info.torch ? (info.cuda ? 'cuda' : info.mps ? 'mps' : 'cpu') : 'none';
+      const packageVersions = parsed.packages;
+      if (packageVersions && typeof packageVersions === 'object') {
+        const versions = packageVersions as Record<string, unknown>;
+        for (const dep of YOLOX_PYTHON_DEPENDENCIES) {
+          info.packages[dep.key] = typeof versions[dep.key] === 'string' ? versions[dep.key] as string : null;
+        }
+      }
       return info;
     } catch {
       return info;
     }
   });
 
-  ipcMain.handle('yolo:installPackage', async (_event, packageName: string): Promise<{ started: boolean; message?: string }> => {
+  ipcMain.handle('yolo:installPackage', async (_event, packageNames: string | string[]): Promise<{ started: boolean; message?: string }> => {
     if (packageChild) return { started: false, message: '已有安装任务在进行中' };
+    const packages = (Array.isArray(packageNames) ? packageNames : packageNames.split(/\s+/))
+      .map((name) => name.trim())
+      .filter(Boolean);
+    if (packages.length === 0) return { started: false, message: '没有可安装的 Python 包' };
     const cmd = pythonCommand();
     const args = ['-m', 'pip', 'install', '--timeout', '120'];
     const mirror = (await loadYoloSettings()).pipMirror;
     if (mirror) args.push('-i', mirror);
-    args.push('-U', packageName);
+    args.push('-U', ...packages);
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: pipEnv() });
     packageChild = child;
     const out = makePipOutputHandler('info', (ev) => broadcastPackage(ev));
@@ -3260,6 +3375,15 @@ function registerYoloIpc() {
 
 // ===== 视觉引擎（识别测试台 / 执行引擎共用） =====
 
+function normalizeStringMap(value: unknown): Record<string, string | null> {
+  if (!value || typeof value !== 'object') return {};
+  const result: Record<string, string | null> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    result[key] = typeof item === 'string' ? item : null;
+  }
+  return result;
+}
+
 function registerEngineIpc() {
   ipcMain.handle('engine:envInfo', async (): Promise<EngineEnvInfo> => {
     const yoloxPath = await resolveYoloxPath();
@@ -3277,9 +3401,10 @@ function registerEngineIpc() {
         cuda: Boolean(env.cuda),
         mps: Boolean(env.mps),
         device: typeof env.device === 'string' ? env.device : 'none',
+        pythonPackages: normalizeStringMap(env.pythonPackages),
       };
     }
-    return { cv2: null, torch: null, yolox: null, pyautogui: null, paddleocr: null, chiakiPath: null, sharedMemoryAvailable: false, cuda: false, mps: false, device: 'none' };
+    return { cv2: null, torch: null, yolox: null, pyautogui: null, paddleocr: null, chiakiPath: null, sharedMemoryAvailable: false, cuda: false, mps: false, device: 'none', pythonPackages: {} };
   });
 
   ipcMain.handle('engine:installChiaki', async (_event, platform: string): Promise<{ ok: boolean; message: string }> => {
@@ -3563,7 +3688,8 @@ function registerWorkflowIpc() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await migratePairedPs5HostsToStreamSources();
   registerCloudApiIpc();
   registerStreamIpc();
   registerPs5Ipc();

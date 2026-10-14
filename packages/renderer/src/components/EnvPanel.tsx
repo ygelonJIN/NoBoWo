@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { EngineEnvInfo, YoloEnvInfo, YoloTrainingEvent } from '@nobowo/core';
-import { GITHUB_PROXY_OPTIONS, PIP_MIRROR_OPTIONS } from '@nobowo/core';
+import { GITHUB_PROXY_OPTIONS, PIP_MIRROR_OPTIONS, YOLOX_PYTHON_DEPENDENCIES } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
 
 type Props = {
@@ -32,7 +32,7 @@ const GROUP_META: Record<DepGroup, { title: string; desc: string }> = {
   yolo: { title: 'YOLO 运行环境', desc: '识别节点「YOLO」策略与训练推理依赖' },
   weights: { title: 'YOLO 预训练权重', desc: 'COCO 预训练参数，训练时作为初始权重' },
   ocr: { title: 'OCR 引擎', desc: 'OCR 测试台、识别节点「OCR」策略' },
-  stream: { title: '串流控制', desc: 'PS5/XBOX 串流与手柄控制' },
+  stream: { title: '串流控制', desc: 'PS5 串流与手柄控制' },
 };
 
 const CUSTOM_MIRROR = '__custom__';
@@ -523,8 +523,47 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
             ? ['python3 -m pip install torch torchvision torchaudio']
             : ['python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121'],
           installLabel: '安装 PyTorch',
-          installAction: () => (window.yoloAPI?.installPackage('torch torchvision torchaudio') ?? Promise.resolve({ started: false, message: '当前环境不可用' })),
+          installAction: () => (window.yoloAPI?.installPackage(['torch', 'torchvision', 'torchaudio']) ?? Promise.resolve({ started: false, message: '当前环境不可用' })),
         });
+      }
+
+      const packageVersions = yoloEnv.packages ?? engineEnv?.pythonPackages ?? null;
+      const hasPackageDetection = packageVersions !== null && Object.keys(packageVersions).length > 0;
+      for (const dep of YOLOX_PYTHON_DEPENDENCIES) {
+        const version = packageVersions?.[dep.key] ?? null;
+        if (!hasPackageDetection) {
+          push({
+            id: `yolo-dep-${dep.key}`,
+            label: dep.label,
+            group: 'yolo',
+            usedBy: dep.usedBy,
+            state: 'info',
+            value: '未检测',
+            hint: '当前桌面主进程还没有返回依赖检测数据。重启桌面应用后重新检测，即可显示真实安装状态。',
+          });
+        } else if (version) {
+          push({
+            id: `yolo-dep-${dep.key}`,
+            label: dep.label,
+            group: 'yolo',
+            usedBy: dep.usedBy,
+            state: 'ok',
+            value: version === 'installed' ? '已安装' : `v${version}`,
+          });
+        } else {
+          push({
+            id: `yolo-dep-${dep.key}`,
+            label: dep.label,
+            group: 'yolo',
+            usedBy: dep.usedBy,
+            state: 'missing',
+            value: '未安装',
+            hint: dep.hint,
+            commands: [`python3 -m pip install ${dep.packageName}`],
+            installLabel: `安装 ${dep.label}`,
+            installAction: () => (window.yoloAPI?.installPackage(dep.packageName) ?? Promise.resolve({ started: false, message: '当前环境不可用' })),
+          });
+        }
       }
 
       const cuda = yoloEnv?.cuda ?? engineEnv?.cuda ?? false;
@@ -549,7 +588,7 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
         hint: mps ? '检测到 Apple 芯片 MPS 加速，YOLO 会自动使用。' : '未检测到 MPS。Mac 上如果是 Intel 机型，这是正常情况；Apple 芯片上则建议检查 PyTorch 版本。',
       });
 
-      const yolox = engineEnv?.yolox ?? yoloEnv?.yolox ?? null;
+      const yolox = yoloEnv?.yolox ?? engineEnv?.yolox ?? null;
       if (yolox) {
         push({ id: 'yolox', label: 'YOLOX', group: 'yolo', usedBy: 'YOLO 识别策略、YOLO 训练模型', state: 'ok', value: `v${yolox}` });
       } else if (yoloEnv?.yoloxPath) {
@@ -694,7 +733,7 @@ export function EnvPanel({ mode = 'full', onChanged }: Props) {
           hint: 'PaddleOCR 是百度开源的 OCR 引擎，适合中文识别；体积较大，按需安装。',
           commands: ['python3 -m pip install paddleocr paddlepaddle'],
           installLabel: '安装 PaddleOCR',
-          installAction: () => (window.yoloAPI?.installPackage('paddleocr paddlepaddle') ?? Promise.resolve({ started: false, message: '当前环境不可用' })),
+          installAction: () => (window.yoloAPI?.installPackage(['paddleocr', 'paddlepaddle']) ?? Promise.resolve({ started: false, message: '当前环境不可用' })),
         });
       }
     }

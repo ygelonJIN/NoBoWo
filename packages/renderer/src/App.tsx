@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import {
   createDefaultNode,
   defaultWorkflowDocument,
+  formatFrameRateSetting,
   type LoopNode,
   type OcrEngine,
   type RecognizeNode,
@@ -19,6 +20,7 @@ import { Ps5FloatingViewer } from './components/Ps5FloatingViewer';
 import { DebugPanel } from './components/DebugPanel';
 import { RecognizeTestModal } from './components/RecognizeTestModal';
 import { WorkflowManagerModal } from './components/WorkflowManagerModal';
+import { clearVisionOverlay, publishVisionOverlay } from './components/StreamVisionOverlay';
 import {
   ensureActiveStoredWorkflow,
   readActiveWorkflowId,
@@ -87,6 +89,36 @@ function cloneNode(node: WorkflowNode, offset = 40): WorkflowNode {
     } as LoopNode['data'];
   }
   return cloned;
+}
+
+function readSelectedText(): string | null {
+  const active = document.activeElement as (HTMLInputElement | HTMLTextAreaElement | HTMLElement) | null;
+  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+    try {
+      const start = active.selectionStart;
+      const end = active.selectionEnd;
+      if (start !== null && end !== null && end > start) return active.value.slice(start, end);
+    } catch {
+      // 某些 input 类型不支持 selectionStart，继续检查 DOM 文本选区。
+    }
+  }
+
+  const selection = window.getSelection();
+  if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+    const text = selection.toString();
+    if (text.length > 0) return text;
+  }
+  return null;
+}
+
+function copyTextToClipboard(text: string): void {
+  if (navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(text).catch(() => {
+      document.execCommand('copy');
+    });
+    return;
+  }
+  document.execCommand('copy');
 }
 
 function getSourcePoint(node: WorkflowNode, sourcePort?: string): Point {
@@ -208,10 +240,17 @@ function getNodeSummary(node: WorkflowNode): string {
     }
     case 'gamepad': {
       const targetHint = node.data.target === 'stream' ? ' → 串流窗口' : '';
-      return `手柄：${node.data.action}${targetHint}`;
+      const keyHint = node.data.keyboardKey?.trim() ? ` → 键盘 ${node.data.keyboardKey.trim()}` : '';
+      return `手柄：${node.data.action}${keyHint}${targetHint}`;
     }
     case 'liveVision':
-      return `实时检测 · ${node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${node.data.fps ?? 10} FPS`;
+      return `实时检测 · ${node.data.detectMode === 'all' ? 'YOLO+模板+OCR' : node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'ocr' ? 'OCR' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${formatFrameRateSetting(node.data.fps)}`;
+    case 'spatialDetector':
+      return `空间检测 · ${(node.data.captureMode ?? 'live') === 'live' ? `实时取景（${formatFrameRateSetting(node.data.fps)}）` : '单帧'} · ${node.data.playerLabel || 'player'} → ${(node.data.targetMode ?? 'detection') === 'polyline' ? '三分线折线' : (node.data.targetLabel || 'target')} · ${node.data.calibration ? '世界坐标' : '图像坐标'}`;
+    case 'gameplayState':
+      return `攻防状态 · ${(node.data.captureMode ?? 'frame') === 'live' ? `实时（${formatFrameRateSetting(node.data.fps)}）` : '单帧'} · ${node.data.offenseLabel || 'offense'} / ${node.data.defenseLabel || 'defense'} · 确认 ${node.data.confirmFrames ?? 3} 帧 / 保持 ${node.data.holdFrames ?? 2} 帧`;
+    case 'movePlayer':
+      return `移动 · ${(node.data.controlMode ?? 'continuous') === 'continuous' ? `永久持续（停止距离 ${node.data.deadZone ?? 10}，直到手动停止）` : '单次脉冲'} · ${node.data.directionMode === 'auto' ? '自动方向' : node.data.direction} · ${node.data.control === 'keyboard' ? '键盘' : node.data.control === 'gamepadAnalog' ? 'PS5 模拟摇杆' : '左摇杆方向'}`;
     case 'recognize':
       return '';
   }
@@ -373,6 +412,7 @@ export function App() {
     }).catch(() => {});
     const off = window.workflowAPI.onEvent((event) => {
       if (event.t === 'start') {
+        clearVisionOverlay('workflow:');
         setWorkflowRunLogs([`[${new Date().toLocaleTimeString()}] 开始运行（${event.nodeCount} 个节点）`]);
       } else if (event.t === 'log') {
         setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] ${event.message}`]);
@@ -381,10 +421,15 @@ export function App() {
         setTotalRunSteps(event.totalSteps ?? totalRunSteps);
         const node = nodesRef.current.find((item) => item.id === event.nodeId);
         setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] 执行节点：${node?.title ?? event.nodeId}`]);
+      } else if (event.t === 'visionOverlay') {
+        publishVisionOverlay(`workflow:${event.nodeId}`, event.overlay, { ttlMs: 5000 });
       } else if (event.t === 'nodeEnd') {
         const node = nodesRef.current.find((item) => item.id === event.nodeId);
         const message = event.result.message ?? event.result.status;
         setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] ${node?.title ?? event.nodeId} → ${message}`]);
+        if (event.result.visionOverlay) {
+          publishVisionOverlay(`workflow:${event.nodeId}`, event.result.visionOverlay, { ttlMs: 5000 });
+        }
       }
       setWorkflowRunState((current) => {
         const base = current ?? { runId: null, status: 'idle', startedAt: null, nodeStates: {}, nodeResults: {} };
@@ -897,12 +942,22 @@ export function App() {
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
           target.isContentEditable);
-      if (inFormField) return;
       const meta = event.metaKey || event.ctrlKey;
       if (meta && event.key.toLowerCase() === 'c') {
+        const selectedText = readSelectedText();
+        if (selectedText !== null) {
+          event.preventDefault();
+          copyTextToClipboard(selectedText);
+          return;
+        }
+        if (inFormField) return;
+        if (!selectedNode) return;
         event.preventDefault();
         copySelectedNode();
-      } else if (meta && event.key.toLowerCase() === 'v') {
+        return;
+      }
+      if (inFormField) return;
+      if (meta && event.key.toLowerCase() === 'v') {
         event.preventDefault();
         pasteNode();
       } else if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -917,7 +972,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [copySelectedNode, deleteSelectedNode, pasteNode, selectedEdgeId]);
+  }, [copySelectedNode, deleteSelectedNode, pasteNode, selectedEdgeId, selectedNode]);
 
   if (isControlWindow) {
     const pauseShortcut = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘⇧Esc' : 'Ctrl+Shift+Esc';
@@ -1047,7 +1102,7 @@ export function App() {
                 </div>
               </div>
               <div className="toolbar__actions">
-                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad'] as WorkflowNode['type'][]).map((type) => (
+                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad', 'gameplayState', 'spatialDetector', 'movePlayer'] as WorkflowNode['type'][]).map((type) => (
                   <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type === 'liveVision' ? 'liveVision' : type}</button>
                 ))}
               </div>
@@ -1199,6 +1254,7 @@ export function App() {
               onChangeNode={updateNode}
               allNodes={nodes}
               templateVersion={templateVersion}
+              streamVersion={streamVersion}
               cloudApiVersion={cloudApiVersion}
               onOpenTemplateManager={() => setTemplateManagerOpen(true)}
               onOpenCloudApiManager={() => setCloudApiManagerOpen(true)}

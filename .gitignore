@@ -7,3 +7,24 @@ dist/
 
 # Local Python runtime dependencies; install from requirements-ps5.txt
 packages/engine/python/vendor/
+
+# User-uploaded template images and metadata; never commit these to GitHub
+templates/
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Local backups, temporary files, logs, and secrets
+*.bak
+*.tmp
+*.log
+.env
+.env.*
+!.env.example
+# Large generated model/data artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.pkl
+*.npy

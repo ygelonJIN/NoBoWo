@@ -181,7 +181,7 @@ export class Ps5RuntimeClient {
     return this.request('sendKey', { key, down }, 5000);
   }
 
-  sendButton(action: string, pressed?: boolean, durationMs = 0): Promise<{ action: string; button: string }> {
+  sendButton(action: string, pressed?: boolean, durationMs = 0): Promise<{ action: string; button: string; durationMs?: number }> {
     return this.request('sendButton', { action, pressed, durationMs }, 5000);
   }
 

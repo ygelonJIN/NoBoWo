@@ -6,12 +6,42 @@
 # Copyright (c) Megvii Inc. All rights reserved.
 
 import copy
+import threading
 import time
+import warnings
 
 import numpy as np
 from pycocotools.cocoeval import COCOeval
 
 from .jit_ops import FastCOCOEvalOp
+
+_FAST_MODULE = None
+_FAST_MODULE_UNAVAILABLE = False
+_FAST_MODULE_LOCK = threading.Lock()
+
+
+def _load_fast_module():
+    global _FAST_MODULE, _FAST_MODULE_UNAVAILABLE
+    if _FAST_MODULE is not None:
+        return _FAST_MODULE
+    if _FAST_MODULE_UNAVAILABLE:
+        return None
+    with _FAST_MODULE_LOCK:
+        if _FAST_MODULE is not None:
+            return _FAST_MODULE
+        if _FAST_MODULE_UNAVAILABLE:
+            return None
+        try:
+            _FAST_MODULE = FastCOCOEvalOp().load()
+            return _FAST_MODULE
+        except Exception as exc:
+            _FAST_MODULE_UNAVAILABLE = True
+            warnings.warn(
+                "Fast COCO evaluation is unavailable; falling back to pycocotools: {}".format(exc),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
 
 
 class COCOeval_opt(COCOeval):
@@ -21,9 +51,11 @@ class COCOeval_opt(COCOeval):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.module = FastCOCOEvalOp().load()
+        self.module = _load_fast_module()
 
     def evaluate(self):
+        if self.module is None:
+            return super().evaluate()
         """
         Run per image evaluation on given images and store results in self.evalImgs_cpp, a
         datastructure that isn't readable from Python but is used by a c++ implementation of
@@ -127,6 +159,8 @@ class COCOeval_opt(COCOeval):
         Accumulate per image evaluation results and store the result in self.eval.  Does not
         support changing parameter settings from those used by self.evaluate()
         """
+        if self.module is None:
+            return super().accumulate()
         print("Accumulating evaluation results...")
         tic = time.time()
         if not hasattr(self, "_evalImgs_cpp"):

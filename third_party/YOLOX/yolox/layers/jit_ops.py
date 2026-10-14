@@ -4,11 +4,36 @@
 import glob
 import importlib
 import os
+import shutil
 import sys
 import time
 from typing import List
 
 __all__ = ["JitOp", "FastCOCOEvalOp"]
+
+
+def ensure_ninja_available():
+    """把 pip --user 安装的 ninja 可执行文件补到 PATH 中。"""
+    if shutil.which("ninja"):
+        return True
+
+    try:
+        from importlib.metadata import distribution
+
+        dist = distribution("ninja")
+        for file in dist.files or []:
+            if os.path.basename(str(file)) != "ninja":
+                continue
+            candidate = os.fspath(dist.locate_file(file))
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                bin_dir = os.path.dirname(candidate)
+                current_path = os.environ.get("PATH", "")
+                os.environ["PATH"] = bin_dir + (os.pathsep + current_path if current_path else "")
+                return shutil.which("ninja") is not None
+    except Exception:
+        pass
+    return False
+
 
 
 class JitOp:
@@ -89,13 +114,10 @@ class JitOp:
     def jit_load(self, verbose=True):
         from torch.utils.cpp_extension import load
         from loguru import logger
-        try:
-            import ninja  # noqa
-        except ImportError:
-            if verbose:
-                logger.warning(
-                    f"Ninja is not installed, fall back to normal installation for {self.name}."
-                )
+        if not ensure_ninja_available() and verbose:
+            logger.warning(
+                f"Ninja executable is not available, fall back to normal installation for {self.name}."
+            )
 
         build_tik = time.time()
         # build op and load

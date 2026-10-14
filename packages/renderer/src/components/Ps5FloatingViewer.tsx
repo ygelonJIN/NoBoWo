@@ -1,49 +1,46 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { Ps5RuntimeStatus } from '@nobowo/core';
+import type { Ps5Frame, Ps5RuntimeStatus } from '@nobowo/core';
 import { setPs5ViewerMode, usePs5ViewerMode } from './ps5ViewerStore';
+import { StreamVisionOverlay } from './StreamVisionOverlay';
 
 const BUTTON_ACTIONS = [
-  ['A / Cross', 'pressA'],
-  ['B / Circle', 'pressB'],
-  ['X / Square', 'pressX'],
-  ['Y / Triangle', 'pressY'],
-  ['LB', 'pressLB'],
-  ['RB', 'pressRB'],
-  ['LT', 'pressLT'],
-  ['RT', 'pressRT'],
-  ['Start', 'pressSTART'],
-  ['Back', 'pressBACK'],
-  ['Home', 'pressHOME'],
+  ['1 · 叉', 'pressCross'],
+  ['2 · 圆圈', 'pressCircle'],
+  ['3 · 三角', 'pressTriangle'],
+  ['4 · 方框', 'pressSquare'],
+  ['L1', 'pressL1'],
+  ['R1', 'pressR1'],
+  ['L2', 'pressL2'],
+  ['R2', 'pressR2'],
+  ['Options', 'pressOptions'],
+  ['Share', 'pressShare'],
+  ['PS', 'pressPS'],
 ] as const;
 
 const KEY_TO_ACTION: Record<string, string> = {
-  Enter: 'pressA',
-  Escape: 'pressB',
-  Backspace: 'pressX',
-  Tab: 'pressY',
-  ArrowUp: 'pressDPADU',
-  ArrowDown: 'pressDPADD',
-  ArrowLeft: 'pressDPADL',
-  ArrowRight: 'pressDPADR',
-  Shift: 'pressLB',
-  Control: 'pressRB',
-  Alt: 'pressLT',
-  Meta: 'pressRT',
-  Home: 'pressHOME',
-  Insert: 'pressBACK',
-  Delete: 'pressSTART',
+  1: 'pressCross',
+  2: 'pressCircle',
+  3: 'pressTriangle',
+  4: 'pressSquare',
+  Shift: 'pressL1',
+  Control: 'pressR1',
+  Alt: 'pressL2',
+  Meta: 'pressR2',
+  Home: 'pressPS',
+  Insert: 'pressShare',
+  Delete: 'pressOptions',
 };
 
 const STICK_KEYS: Record<string, { stick: 'left' | 'right'; x: number; y: number }> = {
   w: { stick: 'left', x: 0, y: -1 },
-  s: { stick: 'left', x: 0, y: 1 },
   a: { stick: 'left', x: -1, y: 0 },
+  s: { stick: 'left', x: 0, y: 1 },
   d: { stick: 'left', x: 1, y: 0 },
-  i: { stick: 'right', x: 0, y: -1 },
-  k: { stick: 'right', x: 0, y: 1 },
-  j: { stick: 'right', x: -1, y: 0 },
-  l: { stick: 'right', x: 1, y: 0 },
+  ArrowUp: { stick: 'right', x: 0, y: -1 },
+  ArrowLeft: { stick: 'right', x: -1, y: 0 },
+  ArrowDown: { stick: 'right', x: 0, y: 1 },
+  ArrowRight: { stick: 'right', x: 1, y: 0 },
 };
 
 type Position = { x: number; y: number };
@@ -51,7 +48,7 @@ type Position = { x: number; y: number };
 export function Ps5FloatingViewer() {
   const mode = usePs5ViewerMode();
   const [status, setStatus] = useState<Ps5RuntimeStatus | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Ps5Frame | null>(null);
   const [keyboardActive, setKeyboardActive] = useState(false);
   const [position, setPosition] = useState<Position | null>(null);
   const drag = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
@@ -102,7 +99,7 @@ export function Ps5FloatingViewer() {
       if (stopped || token !== previewToken.current || !window.ps5API) return;
       try {
         const frame = await window.ps5API.getFrame();
-        if (!stopped && token === previewToken.current) setPreview(frame.frame);
+        if (!stopped && token === previewToken.current) setPreview(frame);
       } catch {
         // keep polling while the session is connected
       }
@@ -192,7 +189,12 @@ export function Ps5FloatingViewer() {
       onFocus={() => setKeyboardActive(true)}
       onBlur={() => setKeyboardActive(false)}
     >
-      {preview ? <img src={preview} alt="PS5 串流画面" /> : <span>{status?.connected ? '正在读取 PS5 协议画面…' : '连接后显示内置视频画面'}</span>}
+      {preview ? (
+        <>
+          <img src={preview.frame} alt="PS5 串流画面" />
+          <StreamVisionOverlay frameWidth={preview.width} frameHeight={preview.height} />
+        </>
+      ) : <span>{status?.connected ? '正在读取 PS5 协议画面…' : '连接后显示内置视频画面'}</span>}
     </div>
   );
 
@@ -206,7 +208,7 @@ export function Ps5FloatingViewer() {
           <button type="button" key={action} className="yolo-btn--ghost yolo-btn--compact" disabled={!status?.connected} onMouseDown={() => void window.ps5API?.sendButton(action, true, 90)}>{label}</button>
         ))}
       </div>
-      <p className="ps5-live-panel__hint">WASD 左摇杆，IJKL 右摇杆，方向键 D-Pad，Enter / Escape / Backspace / Tab 对应 A / B / X / Y。</p>
+      <p className="ps5-live-panel__hint">1 / 2 / 3 / 4 对应叉 / 圆圈 / 三角 / 方框；WASD 控制左摇杆，键盘小方向键控制右摇杆。十字 D-Pad 请使用屏幕按钮或 Gamepad 节点。</p>
     </>
   );
 

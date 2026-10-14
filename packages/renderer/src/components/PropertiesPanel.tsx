@@ -1,6 +1,7 @@
-import type { CloudApiProfile, ConditionType, GamepadAction, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import type { CloudApiProfile, ConditionType, GamepadAction, MoveDirection, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
+import { FrameRateSelect } from './FrameRateSelect';
 import { ModelPicker } from './ModelPicker';
 import { TemplatePicker } from './TemplatePicker';
 
@@ -10,6 +11,7 @@ type Props = {
   allNodes?: WorkflowNode[];
   style?: CSSProperties;
   templateVersion: number;
+  streamVersion?: number;
   cloudApiVersion?: number;
   onOpenTemplateManager: () => void;
   onOpenCloudApiManager: () => void;
@@ -73,6 +75,65 @@ function updateNodeData<T extends WorkflowNode>(node: T, patch: Partial<T['data'
       ...patch,
     },
   };
+}
+
+type NumberInputProps = {
+  value: number | undefined;
+  fallback: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  onChange: (value: number) => void;
+};
+
+/** Keep an editable draft while typing so clearing the field does not immediately reset it. */
+function NumberInput({ value, fallback, min, max, step, onChange }: NumberInputProps) {
+  const [draft, setDraft] = useState(() => String(value ?? fallback));
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(String(value ?? fallback));
+  }, [editing, fallback, value]);
+
+  const commit = () => {
+    setEditing(false);
+    if (draft.trim() === '') {
+      setDraft(String(value ?? fallback));
+      return;
+    }
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value ?? fallback));
+      return;
+    }
+    const clamped = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, parsed));
+    onChange(clamped);
+    setDraft(String(clamped));
+  };
+
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      min={min}
+      max={max}
+      step={step}
+      value={draft}
+      onFocus={() => setEditing(true)}
+      onChange={(event) => {
+        setEditing(true);
+        setDraft(event.target.value);
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur();
+        if (event.key === 'Escape') {
+          setDraft(String(value ?? fallback));
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
 }
 
 // 键盘录制：优先用物理键码(e.code)，回退用 e.key。
@@ -156,6 +217,7 @@ export function PropertiesPanel({
   allNodes = [],
   style,
   templateVersion,
+  streamVersion = 0,
   cloudApiVersion = 0,
   onOpenTemplateManager,
   onOpenCloudApiManager,
@@ -311,7 +373,7 @@ export function PropertiesPanel({
       .then(setStreamSources)
       .catch(() => setStreamSources([]))
       .finally(() => setStreamSourceLoading(false));
-  }, [node?.type]);
+  }, [node?.type, streamVersion]);
 
   useEffect(() => {
     if (!window.cloudApiAPI) {
@@ -330,7 +392,12 @@ export function PropertiesPanel({
       return;
     }
     window.streamAPI.list().then(setStreamSources).catch(() => setStreamSources([]));
-  }, [expandedStrategy, node?.type]);
+  }, [expandedStrategy, node?.type, streamVersion]);
+
+  useEffect(() => {
+    if (node?.type !== 'gamepad' || node.data.target !== 'stream' || node.data.streamSourceId || streamSources.length === 0) return;
+    onChangeNode(updateNodeData(node, { streamSourceId: streamSources[0].id, streamWindowHint: undefined }));
+  }, [node, onChangeNode, streamSources]);
 
   const updateStrategy = useCallback(
     (strategyKey: StrategyKey, patch: Partial<LooseStrategy>) => {
@@ -552,10 +619,11 @@ export function PropertiesPanel({
             {node.data.mode === 'delay' ? (
               <label>
                 延时毫秒
-                <input
-                  type="number"
-                  value={node.data.delayMs ?? 1000}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { delayMs: Number(e.target.value) }))}
+                <NumberInput
+                  value={node.data.delayMs}
+                  fallback={1000}
+                  min={0}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { delayMs: value }))}
                 />
               </label>
             ) : (
@@ -590,36 +658,36 @@ export function PropertiesPanel({
                 <div className="grid-two">
                   <label>
                     X
-                    <input
-                      type="number"
-                      value={node.data.region?.x ?? 0}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { y: 0, width: 100, height: 100 }), x: Number(e.target.value) } }))}
+                    <NumberInput
+                      value={node.data.region?.x}
+                      fallback={0}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { y: 0, width: 100, height: 100 }), x: value } }))}
                     />
                   </label>
                   <label>
                     Y
-                    <input
-                      type="number"
-                      value={node.data.region?.y ?? 0}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, width: 100, height: 100 }), y: Number(e.target.value) } }))}
+                    <NumberInput
+                      value={node.data.region?.y}
+                      fallback={0}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, width: 100, height: 100 }), y: value } }))}
                     />
                   </label>
                   <label>
                     宽
-                    <input
-                      type="number"
+                    <NumberInput
+                      value={node.data.region?.width}
+                      fallback={100}
                       min={1}
-                      value={node.data.region?.width ?? 100}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, y: 0, height: 100 }), width: Number(e.target.value) } }))}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, y: 0, height: 100 }), width: value } }))}
                     />
                   </label>
                   <label>
                     高
-                    <input
-                      type="number"
+                    <NumberInput
+                      value={node.data.region?.height}
+                      fallback={100}
                       min={1}
-                      value={node.data.region?.height ?? 100}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, y: 0, width: 100 }), height: Number(e.target.value) } }))}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { region: { ...(node.data.region ?? { x: 0, y: 0, width: 100 }), height: value } }))}
                     />
                   </label>
                 </div>
@@ -724,7 +792,7 @@ export function PropertiesPanel({
                     { value: '', label: streamSourceLoading ? '正在加载串流设备…' : '选择一个串流设备' },
                     ...streamSources.map((source) => {
                       const typeLabel =
-                        source.type === 'local' ? '本机' : source.type === 'ps5' ? 'PS5' : source.type === 'xbox' ? 'Xbox' : source.type === 'secondPc' ? '第二台电脑' : '其他设备';
+                        source.type === 'local' ? '本机' : source.type === 'ps5' ? 'PS5' : source.type === 'xbox' ? '其他设备' : source.type === 'secondPc' ? '第二台电脑' : '其他设备';
                       return { value: source.id, label: `${source.name} · ${typeLabel}` };
                     }),
                   ]}
@@ -740,6 +808,11 @@ export function PropertiesPanel({
           const conditionOptions: { value: ConditionType; label: string; description: string }[] = [
             { value: 'lastOk', label: '上一次节点', description: '检查前面连线的节点是否执行成功' },
             { value: 'nodeCheck', label: '指定节点', description: '监视某个节点的状态（不需要连线）' },
+            { value: 'spatialArrived', label: '空间检测已到达', description: '最近一次 Spatial Detector 已连续满足到达阈值' },
+            { value: 'spatialNotArrived', label: '空间检测未到达', description: '最近一次 Spatial Detector 尚未满足到达阈值' },
+            { value: 'gameplayOffense', label: '游戏正在进攻', description: '最近一次 Gameplay State 稳定状态为 offense' },
+            { value: 'gameplayDefense', label: '游戏正在防守', description: '最近一次 Gameplay State 稳定状态为 defense' },
+            { value: 'gameplayStateChanged', label: '攻防状态已切换', description: '最近一次 Gameplay State 发生确认后的状态变化' },
             { value: 'custom', label: '自定义表达式', description: '手写JavaScript表达式（高级模式）' },
           ];
           const currentOption = conditionOptions.find((opt) => opt.value === conditionType) ?? conditionOptions[0];
@@ -754,6 +827,11 @@ export function PropertiesPanel({
                 const targetNode = allNodes.find((n) => n.title === targetTitle);
                 return targetNode ? `ctx.results['${targetNode.id}']?.status === 'ok'` : 'ctx.lastOk';
               }
+              case 'spatialArrived': return 'ctx.spatial?.arrived === true';
+              case 'spatialNotArrived': return 'ctx.spatial?.arrived !== true';
+              case 'gameplayOffense': return 'ctx.gameplayState === "offense"';
+              case 'gameplayDefense': return 'ctx.gameplayState === "defense"';
+              case 'gameplayStateChanged': return 'ctx.gameplayStateChanged === true';
               case 'custom': return node.data.expression ?? 'true';
               default: return 'ctx.lastOk';
             }
@@ -793,6 +871,7 @@ export function PropertiesPanel({
                       <li><code>ctx.lastOk</code> — 上一次检测是否成功</li>
                       <li><code>ctx.last</code> — 上一次检测结果（含 x, y, nodeId）</li>
                       <li><code>ctx.frame</code> — 是否有截图</li>
+                      <li><code>ctx.spatial</code> — 最近一次空间检测的距离、方向、世界坐标和到达状态</li>
                       <li><code>ctx.results</code> — 所有节点的执行结果</li>
                     </ul>
                   </div>
@@ -845,10 +924,11 @@ export function PropertiesPanel({
                 {node.data.mode === 'count' ? (
                   <label>
                     次数
-                    <input
-                      type="number"
-                      value={node.data.count ?? 3}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { count: Number(e.target.value) }))}
+                    <NumberInput
+                      value={node.data.count}
+                      fallback={3}
+                      min={0}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { count: value }))}
                     />
                   </label>
                 ) : (
@@ -898,11 +978,11 @@ export function PropertiesPanel({
             {(node.data.preset ?? 'medium') === 'custom' && (
               <label>
                 自定义滚动量
-                <input
-                  type="number"
+                <NumberInput
+                  value={node.data.customAmount}
+                  fallback={300}
                   min={0}
-                  value={node.data.customAmount ?? 300}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { customAmount: Math.max(0, Number(e.target.value)) }))}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { customAmount: value }))}
                 />
               </label>
             )}
@@ -940,7 +1020,7 @@ export function PropertiesPanel({
                     <input
                       value={node.data.streamWindowHint ?? ''}
                       onChange={(e) => onChangeNode(updateNodeData(node, { streamWindowHint: e.target.value }))}
-                      placeholder="例如：Remote Play / Chiaki / Xbox"
+                      placeholder="例如：Remote Play / Chiaki / Moonlight"
                     />
                   </label>
                 )}
@@ -1008,12 +1088,12 @@ export function PropertiesPanel({
             {node.data.mode === 'type' && (
               <label>
                 输入间隔（毫秒）
-                <input
-                  type="number"
+                <NumberInput
+                  value={node.data.interval}
+                  fallback={200}
                   min={0}
                   max={10000}
-                  value={node.data.interval ?? 200}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { interval: Math.max(0, Number(e.target.value) || 0) }))}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { interval: value }))}
                 />
               </label>
             )}
@@ -1022,6 +1102,470 @@ export function PropertiesPanel({
                 ? '逐字符输入：ABCD 打大写，{enter}、{tab}、{esc} 表示特殊键'
                 : '推荐用上方「录制按键」录入；也可手动写：A、command+left、enter'}
             </p>
+          </section>
+        )}
+
+        {node.type === 'spatialDetector' && (
+          <section className="properties-panel__group">
+            <h3>空间检测配置</h3>
+            <p className="properties-panel__hint">
+              通用 Player → Target 检测。节点输出两者的图像坐标、可选世界坐标、最近距离、移动方向和到达状态。
+            </p>
+            <label>
+              画面获取
+              <CustomSelect
+                value={node.data.captureMode ?? 'live'}
+                options={[
+                  { value: 'live', label: '实时取景（自动截图）' },
+                  { value: 'frame', label: '单帧（使用前面的 Screenshot）' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { captureMode: v as 'live' | 'frame' }))}
+              />
+            </label>
+            {(node.data.captureMode ?? 'live') === 'live' && (
+              <>
+                <label>
+                  画面来源
+                  <CustomSelect
+                    value={node.data.source ?? 'stream'}
+                    options={[
+                      { value: 'stream', label: '串流设备' },
+                      { value: 'window', label: '本机窗口' },
+                      { value: 'screen', label: '系统屏幕' },
+                    ]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { source: v as 'screen' | 'window' | 'stream' }))}
+                  />
+                </label>
+                {(node.data.source ?? 'stream') === 'stream' && (
+                  <label>
+                    串流设备
+                    <CustomSelect
+                      value={node.data.streamSourceId ?? ''}
+                      options={[
+                        { value: '', label: streamSources.length > 0 ? '未选择' : '尚未配置串流设备' },
+                        ...streamSources.map((source) => ({ value: source.id, label: source.name || source.id })),
+                      ]}
+                      onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                    />
+                  </label>
+                )}
+                {(node.data.source ?? 'stream') === 'window' && (
+                  <label>
+                    窗口标题关键字
+                    <input
+                      value={node.data.windowHint ?? ''}
+                      onChange={(e) => onChangeNode(updateNodeData(node, { windowHint: e.target.value }))}
+                      placeholder="例如：Remote Play / Chrome / 游戏名"
+                    />
+                  </label>
+                )}
+                <div className="grid-two">
+                  <label>
+                    处理帧率
+                    <FrameRateSelect
+                      value={node.data.fps}
+                      sourceLabel="跟随串流/来源"
+                      onChange={(value) => onChangeNode(updateNodeData(node, { fps: value }))}
+                    />
+                  </label>
+                  <label>
+                    启动超时（ms）
+                    <NumberInput
+                      value={node.data.timeoutMs}
+                      fallback={5000}
+                      min={250}
+                      step={100}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { timeoutMs: value }))}
+                    />
+                  </label>
+                </div>
+                <p className="properties-panel__hint">
+                  Player 和 Target 可以在不同帧出现并跨帧缓存。任一目标出现后持续等待另一个，不判失败；启动超时只针对两者都未出现。FPS 是采集/调度目标，实际推理 FPS 受模型和硬件限制。
+                </p>
+              </>
+            )}
+            <label>
+              YOLO 模型
+              <ModelPicker
+                value={node.data.modelPath}
+                onChange={(model) => onChangeNode(updateNodeData(node, {
+                  modelId: model.id,
+                  modelPath: model.path,
+                  numClasses: model.numClasses ?? node.data.numClasses,
+                }))}
+                refreshKey={yoloVersion ?? 0}
+              />
+            </label>
+            {onOpenYoloManager && (
+              <button className="properties-panel__ghost-button" onClick={onOpenYoloManager}>
+                管理模型…
+              </button>
+            )}
+            <div className="grid-two">
+              <label>
+                Player 标签
+                <input
+                  value={node.data.playerLabel}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { playerLabel: e.target.value }))}
+                  placeholder="例如：player"
+                />
+              </label>
+              <label>
+                Target 标签
+                <input
+                  value={node.data.targetLabel}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { targetLabel: e.target.value }))}
+                  placeholder="例如：target"
+                />
+              </label>
+            </div>
+            <div className="grid-two">
+              <label>
+                类别数（模型可自动识别）
+                <NumberInput
+                  value={node.data.numClasses}
+                  fallback={2}
+                  min={1}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { numClasses: value }))}
+                />
+              </label>
+              <label>
+                置信阈值
+                <NumberInput
+                  value={node.data.threshold}
+                  fallback={60}
+                  min={0}
+                  max={100}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { threshold: value }))}
+                />
+              </label>
+            </div>
+            <div className="grid-two">
+              {node.data.targetAnchor !== 'boxDistance' && (
+                <label>
+                  Player 锚点
+                  <CustomSelect
+                    value={node.data.playerAnchor}
+                    options={[
+                      { value: 'boxCenter', label: '检测框中心' },
+                      { value: 'keypoint', label: 'YOLO 关键点' },
+                    ]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { playerAnchor: v as 'boxCenter' | 'keypoint' }))}
+                  />
+                </label>
+              )}
+              <label>
+                Target 锚点
+                <CustomSelect
+                  value={node.data.targetAnchor}
+                  options={[
+                    { value: 'boxDistance', label: '两框边界最近距离' },
+                    { value: 'nearestBoxPoint', label: '检测框最近点' },
+                    { value: 'boxCenter', label: '检测框中心' },
+                    { value: 'keypoint', label: 'YOLO 关键点' },
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { targetAnchor: v as 'boxDistance' | 'boxCenter' | 'nearestBoxPoint' | 'keypoint' }))}
+                />
+              </label>
+            </div>
+            {node.data.targetAnchor !== 'boxDistance' && node.data.playerAnchor === 'keypoint' && (
+              <label>
+                Player 关键点名称/ID
+                <input
+                  value={node.data.playerKeypoint ?? ''}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { playerKeypoint: e.target.value || undefined }))}
+                  placeholder="留空使用第一个关键点"
+                />
+              </label>
+            )}
+            {node.data.targetAnchor === 'keypoint' && (
+              <label>
+                Target 关键点名称/ID
+                <input
+                  value={node.data.targetKeypoint ?? ''}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { targetKeypoint: e.target.value || undefined }))}
+                  placeholder="留空使用第一个关键点"
+                />
+              </label>
+            )}
+            <div className="grid-two">
+              <label>
+                到达阈值
+                <NumberInput
+                  value={node.data.arrivalTolerance}
+                  fallback={5}
+                  min={0}
+                  step={0.1}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { arrivalTolerance: value }))}
+                />
+              </label>
+              <label>
+                稳定帧数
+                <NumberInput
+                  value={node.data.stabilityFrames}
+                  fallback={3}
+                  min={1}
+                  max={120}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { stabilityFrames: value }))}
+                />
+              </label>
+            </div>
+            <p className="properties-panel__hint">未配置标定时，阈值单位是图像像素；配置后，距离和阈值使用世界坐标单位。</p>
+            <p className="properties-panel__hint">如果选择“两框边界最近距离”，系统会直接计算 Player 框和 Target 框边界之间的像素距离，不需要设置 Player/Target 锚点；两框重叠时距离为 0。</p>
+            <label>
+              目标类型
+              <CustomSelect
+                value={node.data.targetMode ?? 'detection'}
+                options={[
+                  { value: 'detection', label: 'YOLO Target 检测' },
+                  { value: 'polyline', label: '三分线/折线目标' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { targetMode: v as 'detection' | 'polyline' }))}
+              />
+            </label>
+            {(node.data.targetMode ?? 'detection') === 'polyline' && (
+              <label>
+                三分线折线点（JSON）
+                <textarea
+                  key={`${node.id}-polyline`}
+                  rows={5}
+                  defaultValue={JSON.stringify(node.data.targetPolyline ?? [], null, 2)}
+                  placeholder={'[{"x":300,"y":700},{"x":500,"y":620},{"x":700,"y":700}]'}
+                  onBlur={(e) => {
+                    try {
+                      const parsed = JSON.parse(e.target.value) as Array<{ x: number; y: number }>;
+                      onChangeNode(updateNodeData(node, {
+                        targetPolyline: parsed.filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y)).map((point) => ({ x: Number(point.x), y: Number(point.y) })),
+                      }));
+                    } catch {
+                      // Keep the last valid polyline when the textarea contains invalid JSON.
+                    }
+                  }}
+                />
+              </label>
+            )}
+            <label>
+              世界坐标标定（JSON，可选）
+              <textarea
+                key={node.id}
+                rows={8}
+                defaultValue={JSON.stringify(node.data.calibration ?? { image: [], world: [], unit: 'm' }, null, 2)}
+                placeholder={'{\n  "image": [{"x":0,"y":0}, {"x":100,"y":0}, {"x":100,"y":100}, {"x":0,"y":100}],\n  "world": [{"x":0,"y":0}, {"x":10,"y":0}, {"x":10,"y":10}, {"x":0,"y":10}],\n  "unit": "m"\n}'}
+                onBlur={(e) => {
+                  try {
+                    const parsed = JSON.parse(e.target.value) as { image?: Array<{ x: number; y: number }>; world?: Array<{ x: number; y: number }>; unit?: string };
+                    onChangeNode(updateNodeData(node, {
+                      calibration: {
+                        image: parsed.image ?? [],
+                        world: parsed.world ?? [],
+                        unit: parsed.unit ?? 'm',
+                      },
+                    }));
+                  } catch {
+                    // Keep the last valid calibration when the textarea contains invalid JSON.
+                  }
+                }}
+              />
+            </label>
+            <p className="properties-panel__hint">
+              至少填写 4 组对应点。图像点使用截图像素坐标，世界点使用目标平面坐标；执行器通过单应矩阵计算真实位置。
+            </p>
+          </section>
+        )}
+
+        {node.type === 'movePlayer' && (
+          <section className="properties-panel__group">
+            <h3>移动配置</h3>
+            <label>
+              执行方式
+              <CustomSelect
+                value={node.data.controlMode ?? 'continuous'}
+                options={[
+                  { value: 'continuous', label: '永久持续（逐帧检测，直到手动停止）' },
+                  { value: 'pulse', label: '单次脉冲（兼容旧流程）' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { controlMode: v as 'continuous' | 'pulse' }))}
+              />
+            </label>
+            {(node.data.controlMode ?? 'continuous') === 'continuous' && (
+              <p className="properties-panel__hint">
+                每个检测帧都会更新动作：距离仍远时保持当前方向键，不再重复按下；进入停止距离或稳定到达时只释放输入并继续监测，之后距离变远会自动重新按住。闭环不会因到达自动结束。
+              </p>
+            )}
+            {(node.data.controlMode ?? 'continuous') === 'continuous' && node.data.directionMode === 'auto' && (
+              <label>
+                空间检测节点
+                <CustomSelect
+                  value={node.data.detectorNodeId ?? ''}
+                  options={[
+                    { value: '', label: '自动使用最近的 Spatial Detector' },
+                    ...allNodes.filter((item) => item.type === 'spatialDetector').map((item) => ({ value: item.id, label: item.title || item.id })),
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { detectorNodeId: v || undefined }))}
+                />
+              </label>
+            )}
+            <label>
+              方向来源
+              <CustomSelect
+                value={node.data.directionMode}
+                options={[
+                  { value: 'auto', label: '自动：使用 Spatial Detector 方向' },
+                  { value: 'manual', label: '手动指定方向' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { directionMode: v as 'auto' | 'manual' }))}
+              />
+            </label>
+            {node.data.directionMode === 'manual' && (
+              <label>
+                移动方向
+                <CustomSelect
+                  value={node.data.direction}
+                  options={[
+                    { value: 'up', label: '上' },
+                    { value: 'down', label: '下' },
+                    { value: 'left', label: '左' },
+                    { value: 'right', label: '右' },
+                    { value: 'stop', label: '停止' },
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { direction: v as MoveDirection }))}
+                />
+              </label>
+            )}
+            <label>
+              控制通道
+              <CustomSelect
+                value={node.data.control}
+                options={[
+                  { value: 'gamepad', label: '左摇杆方向' },
+                  { value: 'gamepadAnalog', label: 'PS5 模拟摇杆' },
+                  { value: 'keyboard', label: '键盘按键' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { control: v as 'gamepad' | 'gamepadAnalog' | 'keyboard' }))}
+              />
+            </label>
+            <label>
+              发送目标
+              <CustomSelect
+                value={node.data.target}
+                options={[
+                  { value: 'stream', label: '串流设备窗口' },
+                  { value: 'global', label: '系统全局' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, {
+                  target: v as 'global' | 'stream',
+                  streamSourceId: v === 'stream' ? (node.data.streamSourceId ?? streamSources[0]?.id) : undefined,
+                }))}
+              />
+            </label>
+            {node.data.target === 'stream' && (
+              <label>
+                串流设备
+                <CustomSelect
+                  value={node.data.streamSourceId ?? ''}
+                  options={[
+                    { value: '', label: streamSources.length > 0 ? '未选择' : '尚未配置串流设备' },
+                    ...streamSources.map((source) => ({ value: source.id, label: source.name || source.id })),
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                />
+              </label>
+            )}
+            {node.data.control === 'gamepadAnalog' && (
+              <div className="grid-two">
+                <label>
+                  摇杆
+                  <CustomSelect
+                    value={node.data.stick ?? 'left'}
+                    options={[{ value: 'left', label: '左摇杆' }, { value: 'right', label: '右摇杆' }]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { stick: v as 'left' | 'right' }))}
+                  />
+                </label>
+                <label>
+                  最大模拟量
+                  <input type="number" min={0.1} max={1} step={0.05} value={node.data.maxStickMagnitude ?? 0.7} onChange={(e) => onChangeNode(updateNodeData(node, { maxStickMagnitude: Number(e.target.value) }))} />
+                </label>
+                <label>
+                  最小模拟量
+                  <input type="number" min={0.05} max={1} step={0.05} value={node.data.minStickMagnitude ?? 0.2} onChange={(e) => onChangeNode(updateNodeData(node, { minStickMagnitude: Number(e.target.value) }))} />
+                </label>
+                <label>
+                  刹车距离
+                  <input type="number" min={1} step={1} value={node.data.brakeDistance ?? 120} onChange={(e) => onChangeNode(updateNodeData(node, { brakeDistance: Number(e.target.value) }))} />
+                </label>
+              </div>
+            )}
+            {node.data.control === 'keyboard' && (
+              <div className="grid-two">
+                <label>
+                  上
+                  <input value={node.data.keyboardUp ?? ''} onChange={(e) => onChangeNode(updateNodeData(node, { keyboardUp: e.target.value }))} />
+                </label>
+                <label>
+                  下
+                  <input value={node.data.keyboardDown ?? ''} onChange={(e) => onChangeNode(updateNodeData(node, { keyboardDown: e.target.value }))} />
+                </label>
+                <label>
+                  左
+                  <input value={node.data.keyboardLeft ?? ''} onChange={(e) => onChangeNode(updateNodeData(node, { keyboardLeft: e.target.value }))} />
+                </label>
+                <label>
+                  右
+                  <input value={node.data.keyboardRight ?? ''} onChange={(e) => onChangeNode(updateNodeData(node, { keyboardRight: e.target.value }))} />
+                </label>
+              </div>
+            )}
+            {(node.data.controlMode ?? 'continuous') === 'continuous' ? (
+              <label>
+                停止距离（进入后释放按键并继续监测）
+                <NumberInput
+                  value={node.data.deadZone}
+                  fallback={10}
+                  min={0}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { deadZone: value }))}
+                />
+              </label>
+            ) : (
+              <div className="grid-two">
+                <label>
+                  停止距离
+                  <NumberInput
+                    value={node.data.deadZone}
+                    fallback={10}
+                    min={0}
+                    onChange={(value) => onChangeNode(updateNodeData(node, { deadZone: value }))}
+                  />
+                </label>
+                <label>
+                  按键持续（ms）
+                  <NumberInput
+                    value={node.data.durationMs}
+                    fallback={120}
+                    min={0}
+                    onChange={(value) => onChangeNode(updateNodeData(node, { durationMs: value }))}
+                  />
+                </label>
+              </div>
+            )}
+            {(node.data.controlMode ?? 'continuous') === 'pulse' && (
+              <label>
+                后延迟（ms）
+                <NumberInput
+                  value={node.data.delayMs}
+                  fallback={80}
+                  min={0}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { delayMs: value }))}
+                />
+              </label>
+            )}
+            <label className="checkbox-row">
+              <span>稳定到达时释放输入（持续闭环继续监测）</span>
+              <input
+                type="checkbox"
+                checked={node.data.stopWhenArrived}
+                onChange={(e) => onChangeNode(updateNodeData(node, { stopWhenArrived: e.target.checked }))}
+              />
+            </label>
           </section>
         )}
 
@@ -1034,88 +1578,117 @@ export function PropertiesPanel({
               <CustomSelect
                 value={node.data.action}
                 options={[
-                  { value: 'pressA', label: 'A' },
-                  { value: 'pressB', label: 'B' },
-                  { value: 'pressX', label: 'X' },
-                  { value: 'pressY', label: 'Y' },
-                  { value: 'pressRT', label: 'RT' },
-                  { value: 'pressLT', label: 'LT' },
-                  { value: 'pressRB', label: 'RB' },
-                  { value: 'pressLB', label: 'LB' },
-                  { value: 'pressSTART', label: 'START' },
-                  { value: 'pressBACK', label: 'BACK' },
-                  { value: 'pressHOME', label: 'HOME' },
-                  { value: 'pressDPADU', label: '↑' },
-                  { value: 'pressDPADD', label: '↓' },
-                  { value: 'pressDPADL', label: '←' },
-                  { value: 'pressDPADR', label: '→' },
-                  { value: 'pressLU', label: 'L↑' },
-                  { value: 'pressLD', label: 'L↓' },
-                  { value: 'pressLL', label: 'L←' },
-                  { value: 'pressLR', label: 'L→' },
+                  { value: 'pressCross', label: '1 · 叉' },
+                  { value: 'pressCircle', label: '2 · 圆圈' },
+                  { value: 'pressTriangle', label: '3 · 三角' },
+                  { value: 'pressSquare', label: '4 · 方框' },
+                  { value: 'pressR2', label: 'R2' },
+                  { value: 'pressL2', label: 'L2' },
+                  { value: 'pressR1', label: 'R1' },
+                  { value: 'pressL1', label: 'L1' },
+                  { value: 'pressOptions', label: 'Options' },
+                  { value: 'pressShare', label: 'Share' },
+                  { value: 'pressPS', label: 'PS' },
+                  { value: 'pressDPADU', label: '十字 ↑' },
+                  { value: 'pressDPADD', label: '十字 ↓' },
+                  { value: 'pressDPADL', label: '十字 ←' },
+                  { value: 'pressDPADR', label: '十字 →' },
+                  { value: 'pressLU', label: '左摇杆 ↑' },
+                  { value: 'pressLD', label: '左摇杆 ↓' },
+                  { value: 'pressLL', label: '左摇杆 ←' },
+                  { value: 'pressLR', label: '左摇杆 →' },
+                  { value: 'pressRU', label: '右摇杆 ↑' },
+                  { value: 'pressRD', label: '右摇杆 ↓' },
+                  { value: 'pressRL', label: '右摇杆 ←' },
+                  { value: 'pressRR', label: '右摇杆 →' },
                 ]}
                 onChange={(v) => onChangeNode(updateNodeData(node, { action: v as GamepadAction }))}
               />
             </label>
             <label>
-              发送目标
-              <CustomSelect
-                value={node.data.target ?? 'global'}
-                options={[
-                  { value: 'global', label: '系统全局' },
-                  { value: 'stream', label: '指定串流设备' },
-                ]}
-                onChange={(v) => onChangeNode(updateNodeData(node, { target: v as 'global' | 'stream' }))}
+              游戏内键盘按键（可选）
+              <input
+                value={node.data.keyboardKey ?? ''}
+                maxLength={16}
+                placeholder="例如：E / A / O / 1 / 2 / 5–0"
+                onChange={(e) => onChangeNode(updateNodeData(node, { keyboardKey: e.target.value.trim() || undefined }))}
               />
             </label>
-            {(node.data.target ?? 'global') === 'stream' && (
+            <p className="properties-panel__hint">
+              填写后优先发送这个精确按键，可自由设置 A–Z、0–9 或 E、O、1、2、5、6、7、8、9、0 等游戏按键；留空则使用下方 PS5 默认映射。
+            </p>
+            <label>
+              发送目标
+              <CustomSelect
+                value={node.data.target ?? 'stream'}
+                options={[
+                  { value: 'stream', label: '串流设备窗口' },
+                  { value: 'global', label: '系统全局' },
+                ]}
+                onChange={(v) => {
+                  const target = v as 'global' | 'stream';
+                  onChangeNode(updateNodeData(node, {
+                    target,
+                    streamSourceId: target === 'stream' ? (node.data.streamSourceId ?? streamSources[0]?.id) : undefined,
+                    streamWindowHint: undefined,
+                  }));
+                }}
+              />
+            </label>
+            {(node.data.target ?? 'stream') === 'stream' && (
               <>
                 <label>
-                  串流设备
+                  串流设备窗口
                   <CustomSelect
                     value={node.data.streamSourceId ?? ''}
-                    options={[{ value: '', label: '未选择' }, ...streamSources.map((s) => ({ value: s.id, label: s.name || s.windowHint || s.id }))]}
-                    onChange={(v) => onChangeNode(updateNodeData(node, { streamSourceId: v || undefined }))}
+                    options={[
+                      { value: '', label: streamSources.length > 0 ? '未选择' : '尚未配置串流设备' },
+                      ...streamSources.map((s) => ({ value: s.id, label: s.name || s.windowHint || s.id })),
+                    ]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, {
+                      streamSourceId: v || undefined,
+                      streamWindowHint: undefined,
+                    }))}
                   />
                 </label>
-                {!isDirectStream(node.data.streamSourceId) && (
-                  <label>
-                    窗口标题关键字（可选）
-                    <input
-                      value={node.data.streamWindowHint ?? ''}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { streamWindowHint: e.target.value }))}
-                      placeholder="例如：Remote Play / Chiaki / Xbox"
-                    />
-                  </label>
-                )}
+                {(() => {
+                  const selectedStream = streamSources.find((source) => source.id === node.data.streamSourceId);
+                  return (
+                    <p className="properties-panel__hint">
+                      {!selectedStream
+                        ? '请先在串流管理中配置设备，然后在这里选择它的窗口。'
+                        : selectedStream.transport === 'ps5Direct'
+                          ? `目标：${selectedStream.name || selectedStream.id}（PS5 协议直连，不依赖窗口焦点）`
+                          : `目标窗口：${selectedStream.name || selectedStream.id}${selectedStream.windowHint ? ` · ${selectedStream.windowHint}` : '（尚未配置窗口标题）'}`}
+                    </p>
+                  );
+                })()}
                 <p className="properties-panel__hint">
-                  {isDirectStream(node.data.streamSourceId)
-                    ? 'PS5 直连设备：键盘事件直接映射为 Remote Play 协议控制器事件，不依赖窗口焦点。'
-                    : '外部窗口设备：按键发送到对应串流窗口；若未找到窗口，将回退到系统全局按键。'}
+                  窗口标题由所选串流设备统一配置，Gamepad 不再单独填写指定窗口。
                 </p>
               </>
             )}
             <label>
               按键持续时间（毫秒）
-              <input
-                type="number"
+              <NumberInput
+                value={node.data.durationMs}
+                fallback={120}
                 min={0}
                 max={10000}
-                value={node.data.durationMs ?? 0}
-                onChange={(e) => onChangeNode(updateNodeData(node, { durationMs: Math.max(0, Number(e.target.value) || 0) }))}
+                onChange={(value) => onChangeNode(updateNodeData(node, { durationMs: value }))}
               />
             </label>
             <label>
               按键后延迟（毫秒）
-              <input
-                type="number"
+              <NumberInput
+                value={node.data.delayMs}
+                fallback={100}
                 min={0}
                 max={10000}
-                value={node.data.delayMs ?? 100}
-                onChange={(e) => onChangeNode(updateNodeData(node, { delayMs: Math.max(0, Number(e.target.value) || 0) }))}
+                onChange={(value) => onChangeNode(updateNodeData(node, { delayMs: value }))}
               />
             </label>
-            {!isDirectStream(node.data.streamSourceId) && (
+            {!isDirectStream(node.data.streamSourceId) && !node.data.keyboardKey?.trim() && (
               <>
             <label>
               使用CDP协议
@@ -1131,12 +1704,12 @@ export function PropertiesPanel({
             {node.data.useCdp && (
               <label>
                 CDP调试端口
-                <input
-                  type="number"
+                <NumberInput
+                  value={node.data.cdpPort}
+                  fallback={9222}
                   min={1}
                   max={65535}
-                  value={node.data.cdpPort ?? 9222}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { cdpPort: Math.max(1, Number(e.target.value) || 9222) }))}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { cdpPort: value }))}
                 />
               </label>
             )}
@@ -1159,11 +1732,15 @@ export function PropertiesPanel({
               </>
             )}
             <p className="properties-panel__hint">
-              {isDirectStream(node.data.streamSourceId)
-                ? 'PS5 直连设备：所有手柄动作直接发送到主机协议会话。'
+              {node.data.keyboardKey?.trim() && isDirectStream(node.data.streamSourceId)
+                ? '自定义键盘按键不能通过 PS5 协议直连发送；请改用外部串流窗口，或清空自定义按键后使用 PS5 手柄动作。'
+                : node.data.keyboardKey?.trim()
+                  ? `将向所选串流窗口发送键盘按键「${node.data.keyboardKey.trim()}」。`
+                  : isDirectStream(node.data.streamSourceId)
+                    ? 'PS5 直连设备：所有手柄动作直接发送到主机协议会话。'
                 : node.data.useCdp
-                  ? 'CDP协议：直接发送手柄按键到串流窗口，需要串流软件支持CDP调试端口'
-                  : '键盘映射：将手柄按键映射到键盘按键，然后发送到串流窗口'}
+                  ? 'CDP协议：手柄按键直接发送到所选串流设备窗口，需要串流软件支持CDP调试端口'
+                  : '键盘映射：手柄按键映射为键盘按键后发送到所选串流设备窗口'}
             </p>
           </section>
         )}
@@ -1199,30 +1776,28 @@ export function PropertiesPanel({
                   <input
                     value={node.data.windowHint ?? ''}
                     onChange={(e) => onChangeNode(updateNodeData(node, { windowHint: e.target.value }))}
-                    placeholder="例如：PS Remote Play / Chiaki / Xbox"
+                    placeholder="例如：PS Remote Play / Chiaki / Moonlight"
                   />
                 </label>
               </>
             )}
             <div className="grid-two">
               <label>
-                目标帧率（FPS）
-                <input
-                  type="number"
-                  min={1}
-                  max={60}
-                  value={node.data.fps ?? 10}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { fps: Math.max(1, Math.min(60, Number(e.target.value) || 10)) }))}
+                处理帧率
+                <FrameRateSelect
+                  value={node.data.fps}
+                  sourceLabel="跟随串流/来源"
+                  onChange={(value) => onChangeNode(updateNodeData(node, { fps: value }))}
                 />
               </label>
               <label>
                 检测超时（ms）
-                <input
-                  type="number"
-                  min={500}
+                <NumberInput
+                  value={node.data.timeoutMs}
+                  fallback={5000}
+                  min={0}
                   step={100}
-                  value={node.data.timeoutMs ?? 5000}
-                  onChange={(e) => onChangeNode(updateNodeData(node, { timeoutMs: Math.max(500, Number(e.target.value) || 5000) }))}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { timeoutMs: value }))}
                 />
               </label>
             </div>
@@ -1234,11 +1809,13 @@ export function PropertiesPanel({
                   { value: 'yolo', label: 'YOLO 检测' },
                   { value: 'template', label: '模板匹配' },
                   { value: 'both', label: 'YOLO + 模板' },
+                  { value: 'ocr', label: 'OCR 文字定位' },
+                  { value: 'all', label: 'YOLO + 模板 + OCR' },
                 ]}
                 onChange={(v) => onChangeNode(updateNodeData(node, { detectMode: v as 'yolo' | 'template' | 'both' }))}
               />
             </label>
-            {node.data.detectMode !== 'template' && (
+            {(node.data.detectMode === 'yolo' || node.data.detectMode === 'both' || node.data.detectMode === 'all') && (
               <>
                 <label>
                   YOLO 模型
@@ -1263,18 +1840,66 @@ export function PropertiesPanel({
                 </label>
                 <label>
                   YOLO 置信阈值
-                  <input
-                    type="number"
-                    min={1}
+                  <NumberInput
+                    value={node.data.yoloThreshold}
+                    fallback={60}
+                    min={0}
                     max={100}
-                    value={node.data.yoloThreshold ?? 60}
-                    onChange={(e) => onChangeNode(updateNodeData(node, { yoloThreshold: Math.max(1, Math.min(100, Number(e.target.value) || 60)) }))}
+                    onChange={(value) => onChangeNode(updateNodeData(node, { yoloThreshold: value }))}
                   />
                 </label>
               </>
             )}
+            {(node.data.detectMode === 'ocr' || node.data.detectMode === 'all') && (
+              <>
+                <label>
+                  OCR 目标文字
+                  <input
+                    value={node.data.ocrText ?? ''}
+                    onChange={(e) => onChangeNode(updateNodeData(node, { ocrText: e.target.value }))}
+                    placeholder="例如：开始、提交、Score"
+                  />
+                </label>
+                <label>
+                  OCR 引擎
+                  <CustomSelect
+                    value={node.data.ocrEngine ?? 'auto'}
+                    options={[
+                      { value: 'auto', label: '系统 OCR（自动）' },
+                      { value: 'macosVision', label: 'macOS Vision' },
+                      { value: 'tesseract', label: 'Tesseract' },
+                    ]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { ocrEngine: v as 'auto' | 'macosVision' | 'tesseract' }))}
+                  />
+                </label>
+                <div className="grid-two">
+                  <label>
+                    OCR 语言
+                    <CustomSelect
+                      value={node.data.ocrLang ?? 'auto'}
+                      options={[
+                        { value: 'auto', label: '自动判断' },
+                        { value: 'eng', label: '英文' },
+                        { value: 'chi_sim', label: '中文' },
+                      ]}
+                      onChange={(v) => onChangeNode(updateNodeData(node, { ocrLang: v as 'auto' | 'eng' | 'chi_sim' }))}
+                    />
+                  </label>
+                  <label>
+                    OCR 置信阈值
+                    <NumberInput
+                      value={node.data.ocrThreshold}
+                      fallback={60}
+                      min={0}
+                      max={100}
+                      onChange={(value) => onChangeNode(updateNodeData(node, { ocrThreshold: value }))}
+                    />
+                  </label>
+                </div>
+              </>
+            )}
             {/* 模板匹配配置 */}
-            {(node.data.detectMode === 'template' || node.data.detectMode === 'both') && (
+            {(node.data.detectMode === 'template' || node.data.detectMode === 'both' || node.data.detectMode === 'all') && (
               <>
                 <label>
                   匹配模板
@@ -1290,12 +1915,12 @@ export function PropertiesPanel({
                 </label>
                 <label>
                   模板置信阈值
-                  <input
-                    type="number"
-                    min={1}
+                  <NumberInput
+                    value={node.data.templateThreshold}
+                    fallback={80}
+                    min={0}
                     max={100}
-                    value={node.data.templateThreshold ?? 80}
-                    onChange={(e) => onChangeNode(updateNodeData(node, { templateThreshold: Math.max(1, Math.min(100, Number(e.target.value) || 80)) }))}
+                    onChange={(value) => onChangeNode(updateNodeData(node, { templateThreshold: value }))}
                   />
                 </label>
                 {onOpenTemplateManager && (
@@ -1316,13 +1941,14 @@ export function PropertiesPanel({
                 onChange={(v) => onChangeNode(updateNodeData(node, { action: v as 'returnCoords' | 'click' }))}
               />
             </label>
-            <p className="properties-panel__hint">实时检测会按目标帧率持续读取画面，命中目标后立刻返回坐标或点击；未命中则持续检测直到超时。</p>
+            <p className="properties-panel__hint">实时检测按所选处理帧率持续读取画面；实际 FPS 受模型、画面来源和硬件性能限制。</p>
           </section>
         )}
 
         {node.type === 'recognize' && (
           <section className="properties-panel__group properties-panel__group--recognize" onWheel={(e) => e.stopPropagation()}>
             <h3>识别配置</h3>
+            <p className="properties-panel__hint">Recognize（包括其中的 YOLO/模板/OCR 策略）每次执行只分析一帧，因此这里不设置 FPS；连续视频请使用 Live Vision 或 Spatial Detector。</p>
             <label>
               执行模式
               <CustomSelect
@@ -1399,18 +2025,18 @@ export function PropertiesPanel({
                           <div className="grid-two">
                             <label>
                               X
-                              <input
-                                type="number"
-                                value={strategy.x ?? 0}
-                                onChange={(e) => updateStrategy('coords', { x: Number(e.target.value) })}
+                              <NumberInput
+                                value={strategy.x}
+                                fallback={0}
+                                onChange={(value) => updateStrategy('coords', { x: value })}
                               />
                             </label>
                             <label>
                               Y
-                              <input
-                                type="number"
-                                value={strategy.y ?? 0}
-                                onChange={(e) => updateStrategy('coords', { y: Number(e.target.value) })}
+                              <NumberInput
+                                value={strategy.y}
+                                fallback={0}
+                                onChange={(value) => updateStrategy('coords', { y: value })}
                               />
                             </label>
                           </div>
@@ -1433,12 +2059,12 @@ export function PropertiesPanel({
                           </button>
                           <label>
                             阈值
-                            <input
-                              type="number"
+                            <NumberInput
+                              value={strategy.threshold}
+                              fallback={60}
                               min={0}
                               max={100}
-                              value={strategy.threshold ?? 60}
-                              onChange={(e) => updateStrategy('template', { threshold: Number(e.target.value) })}
+                              onChange={(value) => updateStrategy('template', { threshold: value })}
                             />
                           </label>
                         </>
@@ -1461,12 +2087,12 @@ export function PropertiesPanel({
                           )}
                           <label>
                             阈值
-                            <input
-                              type="number"
+                            <NumberInput
+                              value={strategy.threshold}
+                              fallback={60}
                               min={0}
                               max={100}
-                              value={strategy.threshold ?? 60}
-                              onChange={(e) => updateStrategy('yolo', { threshold: Number(e.target.value) })}
+                              onChange={(value) => updateStrategy('yolo', { threshold: value })}
                             />
                           </label>
                         </>
@@ -1491,12 +2117,12 @@ export function PropertiesPanel({
                           </label>
                           <label>
                             阈值
-                            <input
-                              type="number"
+                            <NumberInput
+                              value={strategy.threshold}
+                              fallback={60}
                               min={0}
                               max={100}
-                              value={strategy.threshold ?? 60}
-                              onChange={(e) => updateStrategy('ocr', { threshold: Number(e.target.value) })}
+                              onChange={(value) => updateStrategy('ocr', { threshold: value })}
                             />
                           </label>
                         </>
@@ -1584,12 +2210,12 @@ export function PropertiesPanel({
                           </label>
                           <label>
                             阈值
-                            <input
-                              type="number"
+                            <NumberInput
+                              value={strategy.threshold}
+                              fallback={60}
                               min={0}
                               max={100}
-                              value={strategy.threshold ?? 60}
-                              onChange={(e) => updateStrategy('cloudApi', { threshold: Number(e.target.value) })}
+                              onChange={(value) => updateStrategy('cloudApi', { threshold: value })}
                             />
                           </label>
                         </>

@@ -56,9 +56,18 @@ class BaseExp(metaclass=ABCMeta):
         pass
 
     def __repr__(self):
+        def format_value(value):
+            # 绑定方法的 __self__ 可能指回当前 Exp；展开它会导致 repr 无限递归。
+            if callable(value):
+                return "<{}>".format(type(value).__name__)
+            try:
+                return pprint.pformat(value)
+            except (RecursionError, ValueError, TypeError):
+                return "<{}>".format(type(value).__name__)
+
         table_header = ["keys", "values"]
         exp_table = [
-            (str(k), pprint.pformat(v))
+            (str(k), format_value(v))
             for k, v in vars(self).items()
             if not k.startswith("_")
         ]

@@ -1,3 +1,6 @@
+import type { LegacyFrameRateSetting, StreamFrameRate } from './frameRate';
+import type { GameplayStateValue } from './gameplayStateTracking';
+
 export type NodeType =
   | 'liveVision'
   | 'click'
@@ -8,7 +11,16 @@ export type NodeType =
   | 'recognize'
   | 'scroll'
   | 'keyboard'
-  | 'gamepad';
+  | 'gamepad'
+  | 'spatialDetector'
+  | 'gameplayState'
+  | 'movePlayer';
+
+export * from './frameRate';
+export * from './gameplayStateTracking';
+export * from './movementControl';
+export * from './spatialOverlay';
+export * from './spatialGeometry';
 
 export type PortDirection = 'input' | 'output';
 
@@ -64,6 +76,11 @@ export type ScreenshotNode = WorkflowNodeBase<'screenshot', {
 export type ConditionType =
   | 'lastOk'            // 上一次节点（检查前面连线的节点）
   | 'nodeCheck'         // 指定节点（通过标题选择）
+  | 'spatialArrived'    // 最近一次 Spatial Detector 已到达目标
+  | 'spatialNotArrived' // 最近一次 Spatial Detector 尚未到达目标
+  | 'gameplayOffense'
+  | 'gameplayDefense'
+  | 'gameplayStateChanged'
   | 'custom';           // 自定义表达式
 
 export type IfNode = WorkflowNodeBase<'if', {
@@ -104,19 +121,26 @@ export type KeyboardNode = WorkflowNodeBase<'keyboard', {
 
 
 export type GamepadAction =
+  | 'pressCross' | 'pressCircle' | 'pressTriangle' | 'pressSquare'
+  | 'pressL1' | 'pressR1' | 'pressL2' | 'pressR2'
+  | 'pressOptions' | 'pressShare' | 'pressPS'
+  | 'pressDPADL' | 'pressDPADR' | 'pressDPADU' | 'pressDPADD'
+  | 'pressLU' | 'pressLD' | 'pressLL' | 'pressLR'
+  | 'pressRU' | 'pressRD' | 'pressRL' | 'pressRR'
+  /** @deprecated 仅用于兼容旧工作流，新节点和界面统一使用 1/2/3/4 PS5 动作 */
   | 'pressA' | 'pressB' | 'pressX' | 'pressY'
   | 'pressRT' | 'pressLT' | 'pressRB' | 'pressLB'
-  | 'pressSTART' | 'pressBACK' | 'pressHOME'
-  | 'pressDPADL' | 'pressDPADR' | 'pressDPADU' | 'pressDPADD'
-  | 'pressLU' | 'pressLD' | 'pressLL' | 'pressLR';
+  | 'pressSTART' | 'pressBACK' | 'pressHOME';
 
 export type GamepadNode = WorkflowNodeBase<'gamepad', {
   action: GamepadAction;
-  /** 按键发送目标：系统全局 / 指定串流窗口 */
+  /** 游戏内自定义键盘按键；设置后优先于默认手柄/键盘映射 */
+  keyboardKey?: string;
+  /** 按键发送目标：系统全局 / 串流设备配置的窗口 */
   target: 'global' | 'stream';
-  /** target=stream 时：串流设备 id */
+  /** target=stream 时：串流设备 id，目标窗口由该设备配置决定 */
   streamSourceId?: string;
-  /** target=stream 时：窗口标题关键字 */
+  /** @deprecated 旧工作流兼容字段；Gamepad 现在只使用串流设备配置的窗口 */
   streamWindowHint?: string;
   /** 按键持续时间（毫秒），0表示瞬间按下 */
   durationMs?: number;
@@ -128,6 +152,118 @@ export type GamepadNode = WorkflowNodeBase<'gamepad', {
   cdpPort?: number;
   /** 是否使用SharedMemoryGamepad发送按键 */
   useSharedMemory?: boolean;
+}>;
+
+export type Point2D = {
+  x: number;
+  y: number;
+};
+
+/** 图像点与真实世界平面点的四点（或更多点）对应关系。 */
+export type WorldCalibration = {
+  image: Point2D[];
+  world: Point2D[];
+  /** 世界坐标单位，例如 px、cm、m。 */
+  unit?: string;
+};
+
+export type YoloKeypoint = {
+  id?: string;
+  label?: string;
+  x: number;
+  y: number;
+  confidence?: number;
+};
+
+/**
+ * 通用空间检测节点：识别 player 与 target，并计算它们在图像坐标或标定后的世界坐标中的关系。
+ * 不绑定任何具体场景，篮球三分线只是 target 的一种使用方式。
+ */
+export type SpatialDetectorNode = WorkflowNodeBase<'spatialDetector', {
+  modelId?: string;
+  modelPath?: string;
+  numClasses?: number;
+  /** live：节点内部持续获取新画面；frame：只分析前面 Screenshot 留下的当前帧 */
+  captureMode: 'live' | 'frame';
+  source: 'screen' | 'window' | 'stream';
+  streamSourceId?: string;
+  windowHint?: string;
+  windowId?: number;
+  windowApp?: string;
+  fps: LegacyFrameRateSetting;
+  timeoutMs: number;
+  playerLabel: string;
+  targetLabel: string;
+  threshold: number;
+  playerAnchor: 'boxCenter' | 'keypoint';
+  targetAnchor: 'boxDistance' | 'boxCenter' | 'nearestBoxPoint' | 'keypoint';
+  playerKeypoint?: string;
+  targetKeypoint?: string;
+  /** detection：Target 也由 YOLO 识别；polyline：Target 是手工/标定得到的三分线等折线。 */
+  targetMode?: SpatialTargetMode;
+  /** targetMode=polyline 时至少两个图像坐标点。 */
+  targetPolyline?: Point2D[];
+  calibration?: WorldCalibration;
+  arrivalTolerance: number;
+  stabilityFrames: number;
+}>;
+
+export type GameplayStateNode = WorkflowNodeBase<'gameplayState', {
+  modelId?: string;
+  modelPath?: string;
+  numClasses?: number;
+  captureMode: 'live' | 'frame';
+  source: 'screen' | 'window' | 'stream';
+  streamSourceId?: string;
+  windowHint?: string;
+  windowId?: number;
+  windowApp?: string;
+  fps: LegacyFrameRateSetting;
+  timeoutMs: number;
+  threshold: number;
+  offenseLabel: string;
+  defenseLabel: string;
+  confirmFrames: number;
+  holdFrames: number;
+}>;
+
+export type MoveDirection = 'up' | 'down' | 'left' | 'right' | 'stop';
+export type SpatialTargetMode = 'detection' | 'polyline';
+export type MoveControl = 'gamepad' | 'gamepadAnalog' | 'keyboard';
+export type MovePlayerControlMode = 'continuous' | 'pulse';
+
+/**
+ * 通用移动节点：可由 Spatial Detector 的方向自动选择动作，也可手动指定方向。
+ * gamepadAnalog 面向 PS5 Direct Remote Play，通过左摇杆输出连续向量。
+ */
+export type MovePlayerNode = WorkflowNodeBase<'movePlayer', {
+  /** continuous：逐帧检测并持续保持输入，接近目标只释放输入并继续监测；pulse：兼容旧行为的单次按压。 */
+  controlMode?: MovePlayerControlMode;
+  /** continuous 自动方向使用的 Spatial Detector；留空时使用流程中最近的一个。 */
+  detectorNodeId?: string;
+  directionMode: 'auto' | 'manual';
+  direction: MoveDirection;
+  control: MoveControl;
+  target: 'global' | 'stream';
+  streamSourceId?: string;
+  keyboardUp?: string;
+  keyboardDown?: string;
+  keyboardLeft?: string;
+  keyboardRight?: string;
+  /** gamepadAnalog 使用的摇杆。 */
+  stick?: 'left' | 'right';
+  /** 摇杆最大/最小模拟量，距离越近输出越小，形成接近-刹车。 */
+  maxStickMagnitude?: number;
+  minStickMagnitude?: number;
+  /** 小于等于该距离立即释放输入，单位与 Spatial Detector 的距离单位一致。 */
+  deadZone?: number;
+  /** 从最大速度开始线性降速的距离。 */
+  brakeDistance?: number;
+  /** pulse 模式的单次按压时长。 */
+  durationMs: number;
+  delayMs: number;
+  /** stable arrival 时释放输入；持续闭环本身不会因此结束。 */
+  stopWhenArrived: boolean;
 }>;
 
 export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
@@ -156,6 +292,7 @@ export type OcrMatch = {
   id: string;
   text: string;
   box: OcrTextBox;
+  /** 置信度 0-100 */
   confidence?: number;
 };
 
@@ -231,7 +368,10 @@ export type StreamSourceProfile = {
   /** transport=ps5Direct 时绑定的 PS5 账号 */
   ps5AccountId?: string;
   ps5Resolution?: Ps5StreamResolution;
-  ps5Fps?: number;
+  /** 采集来源的目标帧率。 */
+  captureFps?: StreamFrameRate;
+  /** @deprecated 兼容旧 PS5 配置，新配置使用 captureFps。 */
+  ps5Fps?: StreamFrameRate;
   /** 主机地址（IP / 主机名），用于连通性测试 */
   host?: string;
   /** 测试端口 */
@@ -240,6 +380,10 @@ export type StreamSourceProfile = {
   url?: string;
   /** 串流窗口标题关键字，用于画面探测时自动预选 */
   windowHint?: string;
+  /** 已绑定的精确 CGWindowID，标题变化时仍优先定位同一窗口 */
+  windowId?: number;
+  /** 已绑定窗口所属应用名，窗口 ID 失效时兜底 */
+  windowApp?: string;
   notes?: string;
   createdAt: number;
   updatedAt: number;
@@ -303,7 +447,7 @@ export type RecognizeNode = WorkflowNodeBase<'recognize', {
     coords: { enabled: boolean; x: number; y: number };
     template: { enabled: boolean; templateId?: string; templatePath?: string; threshold: number };
     yolo: { enabled: boolean; modelId?: string; modelPath?: string; classId?: string; label?: string; threshold: number };
-    ocr: { enabled: boolean; text: string; engine?: OcrEngine; threshold: number };
+    ocr: { enabled: boolean; text: string; engine?: OcrEngine; lang?: 'auto' | 'eng' | 'chi_sim'; threshold: number };
     cloudApi: { enabled: boolean; profileId?: string; apiIds?: string[]; apiMode?: 'cascade' | 'parallel'; url?: string; apiKey?: string; prompt: string; threshold: number };
   };
   executionMode: 'cascade' | 'parallel';
@@ -317,12 +461,12 @@ export type LiveVisionNode = WorkflowNodeBase<'liveVision', {
   windowHint?: string;
   windowId?: number;
   windowApp?: string;
-  /** 目标帧率 */
-  fps: number;
+  /** 处理帧率：跟随来源，或固定 30/60 FPS */
+  fps: LegacyFrameRateSetting;
   /** 检测超时毫秒 */
   timeoutMs: number;
   /** 检测方式 */
-  detectMode: 'yolo' | 'template' | 'both';
+  detectMode: 'yolo' | 'template' | 'ocr' | 'both' | 'all';
   /** 检测到目标后的动作 */
   action: 'returnCoords' | 'click';
   yoloModelPath?: string;
@@ -330,9 +474,26 @@ export type LiveVisionNode = WorkflowNodeBase<'liveVision', {
   yoloThreshold?: number;
   templatePath?: string;
   templateThreshold?: number;
+  ocrText?: string;
+  ocrEngine?: OcrEngine;
+  ocrLang?: 'auto' | 'eng' | 'chi_sim';
+  ocrThreshold?: number;
 }>;
 
-export type WorkflowNode = ClickNode | WaitNode | ScreenshotNode | IfNode | LoopNode | RecognizeNode | ScrollNode | KeyboardNode | LiveVisionNode | GamepadNode;
+export type WorkflowNode =
+  | ClickNode
+  | WaitNode
+  | ScreenshotNode
+  | IfNode
+  | LoopNode
+  | RecognizeNode
+  | ScrollNode
+  | KeyboardNode
+  | LiveVisionNode
+  | GamepadNode
+  | SpatialDetectorNode
+  | GameplayStateNode
+  | MovePlayerNode;
 
 export type WorkflowEdge = {
   id: string;
@@ -448,6 +609,8 @@ export type EngineEnvInfo = {
   cuda: boolean;
   mps: boolean;
   device: string;
+  /** Python 依赖版本；旧运行时未返回该字段时为 undefined */
+  pythonPackages?: Record<string, string | null>;
 };
 
 export type TemplateMatchResult = {
@@ -471,12 +634,47 @@ export type YoloDetection = {
   confidence: number;
   /** [x, y, width, height] */
   box: [number, number, number, number];
+  /** 关键点模型返回的可选关键点；检测模型通常没有该字段。 */
+  keypoints?: YoloKeypoint[];
 };
 
 export type YoloDetectResult = {
   ok: boolean;
   detections?: YoloDetection[];
   message?: string;
+};
+
+export type VisionOverlayBox = {
+  kind: 'box';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  label?: string;
+  confidence?: number;
+  color?: string;
+};
+
+export type VisionOverlayPoint = {
+  kind: 'point';
+  x: number;
+  y: number;
+  label?: string;
+  confidence?: number;
+  color?: string;
+};
+
+export type VisionOverlayMarker = VisionOverlayBox | VisionOverlayPoint;
+
+export type VisionOverlaySourceKind = 'ps5Direct' | 'other';
+
+/** 识别结果始终使用识别时的原始画面坐标；显示层负责随画面尺寸等比换算。 */
+export type VisionOverlayPayload = {
+  sourceWidth: number;
+  sourceHeight: number;
+  sourceKind?: VisionOverlaySourceKind;
+  streamSourceId?: string;
+  markers: VisionOverlayMarker[];
 };
 
 export type CloudApiVisionResult = {
@@ -512,6 +710,8 @@ export type RecognizeStrategyRun = {
   y?: number;
   matchBox?: { x: number; y: number; width: number; height: number };
   matchScale?: number;
+  /** YOLO 返回的全部检测框；selected 命中仍保留在 detections 中。 */
+  detections?: YoloDetection[];
   elapsedMs?: number;
   debugImagePath?: string;
 };
@@ -537,6 +737,8 @@ export type NodeRunResult = {
   width?: number;
   /** screenshot 截图高度（缩略图像素） */
   height?: number;
+  /** 可直接叠加到对应串流画面的识别框/点，坐标基于 width/height。 */
+  visionOverlay?: VisionOverlayPayload;
   /** loop 节点实际迭代次数 */
   loopCount?: number;
   /** if 节点走的分支 */
@@ -547,6 +749,12 @@ export type NodeRunResult = {
   debugImagePath?: string;
   /** liveVision 运行态指标：每秒帧数 */
   liveFps?: number;
+  /** 配置的处理帧率上限。 */
+  targetFps?: StreamFrameRate;
+  /** 实际完成的处理帧率。 */
+  processingFps?: number;
+  /** 实际完成的处理帧数。 */
+  processingFrameCount?: number;
   /** liveVision 运行态指标：累计帧数 */
   liveFrameCount?: number;
   /** liveVision 运行态指标：命中次数 */
@@ -555,12 +763,190 @@ export type NodeRunResult = {
   liveHitRate?: number;
   /** liveVision 运行态指标：最近一次命中 */
   liveLatestHit?: { x: number; y: number; label?: string; confidence?: number };
+  /** 通用空间检测结果：图像坐标、可选世界坐标、距离、方向和到点状态。 */
+  spatial?: SpatialResult;
+  /** Player/Target 已分别缓存，但尚未同时计算空间关系。 */
+  partial?: boolean;
+  /** 本帧更新了至少一个 Player/Target 观察，可用于重置无进展超时。 */
+  spatialProgress?: boolean;
+  /** Player/Target 均已观察到，空间关系可用。 */
+  spatialReady?: boolean;
+  /** Move Player 实际选择的移动方向。 */
+  moveDirection?: MoveDirection;
+  /** gameplayState 解析后的稳定攻防状态。 */
+  gameplayState?: GameplayStateValue;
+  gameplayStateRaw?: GameplayStateValue;
+  gameplayStateChanged?: boolean;
+  /** gamepadAnalog 实际输出的摇杆向量。 */
+  moveVector?: Point2D;
+  moveMagnitude?: number;
+  /** Spatial Detector 已将直连 Move Player 纳入同一持续闭环。 */
+  moveIntegrated?: boolean;
 };
+
+export type SpatialResult = {
+  player: { image: Point2D; world?: Point2D };
+  target: { image: Point2D; world?: Point2D };
+  distance: number;
+  distanceSpace: 'image' | 'world';
+  /** 图像坐标系中的归一化移动方向。 */
+  direction: Point2D;
+  /** 根据距离和刹车参数计算出的推荐移动向量。 */
+  movement: Point2D;
+  requiredStickMagnitude: number;
+  targetMode: SpatialTargetMode;
+  arrived: boolean;
+  stableFrames: number;
+  calibrationApplied: boolean;
+  playerBox?: [number, number, number, number];
+  targetBox?: [number, number, number, number];
+};
+
+/** 用四对图像/世界平面点求 3×3 单应矩阵，返回 [h0...h7]，h8 固定为 1。 */
+export function solveHomography(image: Point2D[], world: Point2D[]): number[] | null {
+  if (image.length < 4 || world.length < 4) return null;
+  const rows: number[][] = [];
+  const values: number[] = [];
+  for (let i = 0; i < 4; i += 1) {
+    const { x, y } = image[i];
+    const { x: u, y: v } = world[i];
+    rows.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
+    values.push(u);
+    rows.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
+    values.push(v);
+  }
+
+  // Gaussian elimination with partial pivoting. Calibration points are user-entered,
+  // so reject singular/degenerate layouts instead of silently producing bad world coordinates.
+  const n = 8;
+  for (let col = 0; col < n; col += 1) {
+    let pivot = col;
+    for (let row = col + 1; row < n; row += 1) {
+      if (Math.abs(rows[row][col]) > Math.abs(rows[pivot][col])) pivot = row;
+    }
+    if (Math.abs(rows[pivot][col]) < 1e-9) return null;
+    if (pivot !== col) {
+      [rows[pivot], rows[col]] = [rows[col], rows[pivot]];
+      [values[pivot], values[col]] = [values[col], values[pivot]];
+    }
+    const divisor = rows[col][col];
+    for (let j = col; j < n; j += 1) rows[col][j] /= divisor;
+    values[col] /= divisor;
+    for (let row = 0; row < n; row += 1) {
+      if (row === col) continue;
+      const factor = rows[row][col];
+      if (Math.abs(factor) < 1e-12) continue;
+      for (let j = col; j < n; j += 1) rows[row][j] -= factor * rows[col][j];
+      values[row] -= factor * values[col];
+    }
+  }
+  return values;
+}
+
+export function transformPointWithHomography(point: Point2D, h: number[]): Point2D | null {
+  if (h.length !== 8) return null;
+  const denominator = h[6] * point.x + h[7] * point.y + 1;
+  if (Math.abs(denominator) < 1e-9) return null;
+  return {
+    x: (h[0] * point.x + h[1] * point.y + h[2]) / denominator,
+    y: (h[3] * point.x + h[4] * point.y + h[5]) / denominator,
+  };
+}
+
+/** 返回点到矩形边缘的最近点；点在矩形内部时投影到最近边。 */
+export function closestPointOnBox(point: Point2D, box: [number, number, number, number]): Point2D {
+  const [x, y, width, height] = box;
+  const left = x;
+  const top = y;
+  const right = x + width;
+  const bottom = y + height;
+  const inside = point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
+  if (!inside) {
+    return {
+      x: Math.max(left, Math.min(right, point.x)),
+      y: Math.max(top, Math.min(bottom, point.y)),
+    };
+  }
+  const candidates: Point2D[] = [
+    { x: left, y: point.y },
+    { x: right, y: point.y },
+    { x: point.x, y: top },
+    { x: point.x, y: bottom },
+  ];
+  return candidates.reduce((best, candidate) => {
+    const bestDistance = (best.x - point.x) ** 2 + (best.y - point.y) ** 2;
+    const candidateDistance = (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2;
+    return candidateDistance < bestDistance ? candidate : best;
+  }, candidates[0]);
+}
+
+/** 计算两个矩形框边界之间的最短距离，重叠时返回 0。 */
+export function closestPointsBetweenBoxes(
+  playerBox: [number, number, number, number],
+  targetBox: [number, number, number, number],
+): { player: Point2D; target: Point2D; distance: number } {
+  const [px, py, pw, ph] = playerBox;
+  const [tx, ty, tw, th] = targetBox;
+  const playerCenter = { x: px + pw / 2, y: py + ph / 2 };
+  const targetCenter = { x: tx + tw / 2, y: ty + th / 2 };
+  const playerRight = px + pw;
+  const playerBottom = py + ph;
+  const targetRight = tx + tw;
+  const targetBottom = ty + th;
+  const overlapX = px <= targetRight && playerRight >= tx;
+  const overlapY = py <= targetBottom && playerBottom >= ty;
+  if (overlapX && overlapY) {
+    return { player: playerCenter, target: targetCenter, distance: 0 };
+  }
+
+  let playerPoint: Point2D;
+  let targetPoint: Point2D;
+  if (!overlapX && !overlapY) {
+    playerPoint = {
+      x: playerCenter.x < targetCenter.x ? playerRight : px,
+      y: playerCenter.y < targetCenter.y ? playerBottom : py,
+    };
+    targetPoint = {
+      x: playerCenter.x < targetCenter.x ? tx : targetRight,
+      y: playerCenter.y < targetCenter.y ? ty : targetBottom,
+    };
+  } else if (!overlapX) {
+    playerPoint = {
+      x: playerCenter.x < targetCenter.x ? playerRight : px,
+      y: Math.max(py, Math.min(playerBottom, targetCenter.y)),
+    };
+    targetPoint = {
+      x: playerCenter.x < targetCenter.x ? tx : targetRight,
+      y: Math.max(ty, Math.min(targetBottom, playerCenter.y)),
+    };
+  } else {
+    playerPoint = {
+      x: Math.max(px, Math.min(playerRight, targetCenter.x)),
+      y: playerCenter.y < targetCenter.y ? playerBottom : py,
+    };
+    targetPoint = {
+      x: Math.max(tx, Math.min(targetRight, playerCenter.x)),
+      y: playerCenter.y < targetCenter.y ? ty : targetBottom,
+    };
+  }
+  return {
+    player: playerPoint,
+    target: targetPoint,
+    distance: Math.hypot(targetPoint.x - playerPoint.x, targetPoint.y - playerPoint.y),
+  };
+}
+
+export function normalizeVector(vector: Point2D): Point2D {
+  const length = Math.hypot(vector.x, vector.y);
+  if (length < 1e-9) return { x: 0, y: 0 };
+  return { x: vector.x / length, y: vector.y / length };
+}
 
 export type WorkflowRunEvent =
   | { t: 'start'; runId: string; nodeCount: number; message?: string }
   | { t: 'nodeStart'; runId: string; nodeId: string; step?: number; totalSteps?: number }
   | { t: 'nodeEnd'; runId: string; nodeId: string; result: NodeRunResult }
+  | { t: 'visionOverlay'; runId: string; nodeId: string; overlay: VisionOverlayPayload }
   | { t: 'log'; runId: string; level: 'info' | 'warn' | 'error' | 'debug'; message: string; nodeId?: string }
   | { t: 'pause'; runId: string; nodeId?: string; message?: string }
   | { t: 'resume'; runId: string }
@@ -637,6 +1023,17 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
       ];
     case 'gamepad':
+      return [
+        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
+        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
+      ];
+    case 'spatialDetector':
+      return [
+        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
+        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
+      ];
+    case 'gameplayState':
+    case 'movePlayer':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
@@ -723,6 +1120,8 @@ export type YoloModel = {
   artifactPaths?: YoloModelArtifacts | null;
 };
 
+export * from './spatialTracking';
+
 export type YoloAugmentConfig = {
   hsvH: number;
   hsvS: number;
@@ -781,6 +1180,113 @@ export type YoloTrainingEvent =
   /** pip 安装的下载进度（yolo:packageOutput 通道） */
   | { t: 'packageProgress'; percent: number; doneMb: number; totalMb: number; speed: string; eta: string };
 
+export type YoloPythonDependencySpec = {
+  key: string;
+  label: string;
+  /** 传给 pip 的 requirement，可包含版本约束 */
+  packageName: string;
+  /** 用于检测安装状态的 Python 模块名 */
+  importName: string;
+  /** 用于读取版本号的 pip distribution 名称 */
+  distributionName: string;
+  usedBy: string;
+  hint: string;
+};
+
+/** YOLOX requirements.txt 中需要在“全局环境依赖”里独立检测和安装的 Python 包 */
+export const YOLOX_PYTHON_DEPENDENCIES: YoloPythonDependencySpec[] = [
+  {
+    key: 'loguru',
+    label: 'Loguru',
+    packageName: 'loguru',
+    importName: 'loguru',
+    distributionName: 'loguru',
+    usedBy: 'YOLOX 训练日志',
+    hint: 'Loguru 负责 YOLOX 训练过程日志。缺少它时导入 yolox.core.trainer 会直接失败。',
+  },
+  {
+    key: 'tqdm',
+    label: 'tqdm',
+    packageName: 'tqdm',
+    importName: 'tqdm',
+    distributionName: 'tqdm',
+    usedBy: 'YOLOX 数据加载与验证进度',
+    hint: 'tqdm 提供数据集加载和评估时的进度显示，是 YOLOX 数据模块的运行依赖。',
+  },
+  {
+    key: 'thop',
+    label: 'THOP',
+    packageName: 'thop',
+    importName: 'thop',
+    distributionName: 'thop',
+    usedBy: 'YOLOX 模型统计',
+    hint: 'THOP 用于统计模型参数量和计算量，YOLOX 打印模型摘要时需要它。',
+  },
+  {
+    key: 'ninja',
+    label: 'Ninja',
+    packageName: 'ninja',
+    importName: 'ninja',
+    distributionName: 'ninja',
+    usedBy: 'YOLOX JIT 编译',
+    hint: 'Ninja 是 PyTorch JIT 运算编译所需的构建工具，部分 YOLOX 加速层会使用。',
+  },
+  {
+    key: 'tabulate',
+    label: 'tabulate',
+    packageName: 'tabulate',
+    importName: 'tabulate',
+    distributionName: 'tabulate',
+    usedBy: 'YOLOX 评估结果表格',
+    hint: 'tabulate 用于格式化验证指标表格，是 YOLOX 评估器的运行依赖。',
+  },
+  {
+    key: 'psutil',
+    label: 'psutil',
+    packageName: 'psutil',
+    importName: 'psutil',
+    distributionName: 'psutil',
+    usedBy: 'YOLOX 资源监控',
+    hint: 'psutil 用于读取内存、CPU 等运行资源信息，帮助显示训练资源占用。',
+  },
+  {
+    key: 'tensorboard',
+    label: 'TensorBoard',
+    packageName: 'tensorboard',
+    importName: 'tensorboard',
+    distributionName: 'tensorboard',
+    usedBy: 'YOLOX 训练曲线记录',
+    hint: 'TensorBoard 被 YOLOX Trainer 用来记录训练曲线；缺少它时训练器无法导入。',
+  },
+  {
+    key: 'pycocotools',
+    label: 'pycocotools',
+    packageName: 'pycocotools>=2.0.2',
+    importName: 'pycocotools',
+    distributionName: 'pycocotools',
+    usedBy: 'YOLOX COCO 数据集与评估',
+    hint: 'pycocotools 负责读取 COCO 标注并计算 mAP，是 YOLOX 数据集和验证流程的核心依赖。',
+  },
+  {
+    key: 'onnx',
+    label: 'ONNX',
+    packageName: 'onnx>=1.13.0',
+    importName: 'onnx',
+    distributionName: 'onnx',
+    usedBy: 'YOLOX 模型导出',
+    hint: 'ONNX 用于把训练好的模型导出为通用推理格式，不影响训练但会影响模型导出。',
+  },
+  {
+    key: 'onnxsim',
+    label: 'onnx-simplifier',
+    packageName: 'onnx-simplifier==0.4.10',
+    importName: 'onnxsim',
+    distributionName: 'onnx-simplifier',
+    usedBy: 'YOLOX ONNX 模型优化',
+    hint: 'onnx-simplifier 用于简化导出的 ONNX 图，减少冗余算子并提高部署兼容性。',
+  },
+];
+
 export type YoloEnvInfo = {
   pythonAvailable: boolean;
   pythonPath: string | null;
@@ -794,6 +1300,8 @@ export type YoloEnvInfo = {
   cuda: boolean;
   mps: boolean;
   device: string;
+  /** YOLOX Python 依赖版本；未安装为 null */
+  packages: Record<string, string | null>;
 };
 
 export type YoloTrainingState = {
@@ -890,14 +1398,14 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         ...base,
         type,
         title: 'Gamepad',
-        data: { action: 'pressA', target: 'global', durationMs: 0, delayMs: 100 },
+        data: { action: 'pressCross', target: 'stream', durationMs: 120, delayMs: 100 },
       };
     case 'liveVision':
       return {
         ...base,
         type,
         title: 'Live Vision',
-        data: { source: 'stream', fps: 10, timeoutMs: 5000, detectMode: 'yolo', action: 'returnCoords', yoloThreshold: 60, templateThreshold: 60 },
+        data: { source: 'stream', fps: 'source', timeoutMs: 5000, detectMode: 'yolo', action: 'returnCoords', yoloThreshold: 60, templateThreshold: 60 },
       };
     case 'recognize':
       return {
@@ -914,6 +1422,70 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
           },
           executionMode: 'cascade',
           strategyOrder: ['coords', 'template', 'yolo', 'ocr', 'cloudApi'],
+        },
+      };
+    case 'spatialDetector':
+      return {
+        ...base,
+        type,
+        title: 'Spatial Detector',
+        data: {
+          captureMode: 'live',
+          source: 'stream',
+          fps: 'source',
+          timeoutMs: 5000,
+          numClasses: 2,
+          playerLabel: 'player',
+          targetLabel: 'target',
+          targetMode: 'detection',
+          targetPolyline: [],
+          threshold: 60,
+          playerAnchor: 'boxCenter',
+          targetAnchor: 'boxDistance',
+          arrivalTolerance: 5,
+          stabilityFrames: 3,
+        },
+      };
+    case 'gameplayState':
+      return {
+        ...base,
+        type,
+        title: 'Gameplay State',
+        data: {
+          captureMode: 'frame',
+          source: 'stream',
+          fps: 'source',
+          timeoutMs: 5000,
+          threshold: 60,
+          offenseLabel: 'offense_marker',
+          defenseLabel: 'defense_marker',
+          confirmFrames: 3,
+          holdFrames: 2,
+        },
+      };
+    case 'movePlayer':
+      return {
+        ...base,
+        type,
+        title: 'Move Player',
+        data: {
+          controlMode: 'continuous',
+          directionMode: 'auto',
+          direction: 'stop',
+          control: 'gamepadAnalog',
+          stick: 'left',
+          maxStickMagnitude: 0.7,
+          minStickMagnitude: 0.2,
+          deadZone: 10,
+          brakeDistance: 120,
+          target: 'stream',
+          durationMs: 120,
+          delayMs: 80,
+          stopWhenArrived: true,
+          keyboardUp: 'w',
+          keyboardDown: 's',
+          keyboardLeft: 'a',
+          keyboardRight: 'd',
         },
       };
   }

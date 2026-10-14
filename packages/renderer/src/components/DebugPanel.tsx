@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { formatFrameRateSetting } from '@nobowo/core';
 import type { NodeRunResult, WorkflowEdge, WorkflowNode, WorkflowRunSnapshot } from '@nobowo/core';
 import { TemplateThumb } from './TemplateThumb';
 
@@ -13,6 +14,9 @@ const NODE_TYPE_LABELS: Record<string, string> = {
   if: '条件',
   loop: '循环',
   liveVision: '实时检测',
+  gameplayState: '攻防状态',
+  spatialDetector: '空间检测',
+  movePlayer: '移动玩家',
 };
 const STATUS_LABELS: Record<string, string> = {
   pending: '待执行',
@@ -131,7 +135,9 @@ function getNodeLabel(node: WorkflowNode): string {
     case 'keyboard':
       return node.data.keys ? `按键：${node.data.keys}${(node.data.target ?? 'global') === 'stream' ? ' → 串流窗口' : ''}` : `空按键${(node.data.target ?? 'global') === 'stream' ? ' → 串流窗口' : ''}`;
     case 'liveVision':
-      return `实时检测 · ${node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${node.data.fps ?? 10} FPS`;
+      return `实时检测 · ${node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${formatFrameRateSetting(node.data.fps)}`;
+    case 'spatialDetector':
+      return `空间检测 · ${formatFrameRateSetting(node.data.fps)}`;
     case 'recognize':
       return '识别目标（五级策略栈）';
     default:
@@ -323,11 +329,18 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
 
   const renderNodeDetails = (node: WorkflowNode, result?: NodeRunResult): ReactNode => {
     if (!result) return null;
-    if (node.type === 'liveVision') {
+    if (node.type === 'liveVision' || node.type === 'spatialDetector') {
       const hits = result.liveHitCount ?? 0;
-      const fps = result.liveFps ?? 0;
+      const fps = result.processingFps ?? result.liveFps ?? 0;
       const hitRate = typeof result.liveHitRate === 'number' ? `${Math.round(result.liveHitRate * 100)}%` : '-';
-      const parts = [`FPS ${fps}`, `命中 ${hits}/${result.liveFrameCount ?? 0}`, `命中率 ${hitRate}`];
+      const parts = [
+        `目标 ${result.targetFps ?? '-'} FPS`,
+        `实测 ${fps} FPS`,
+        `处理 ${result.processingFrameCount ?? result.liveFrameCount ?? 0} 帧`,
+      ];
+      if (node.type === 'liveVision') {
+        parts.push(`命中 ${hits}/${result.liveFrameCount ?? 0}`, `命中率 ${hitRate}`);
+      }
       const latest = result.liveLatestHit;
       const latestLine = latest ? `最近命中：${latest.label ?? '目标'}${typeof latest.confidence === 'number' ? `（${latest.confidence}%）` : ''} @ (${Math.round(latest.x)}, ${Math.round(latest.y)})` : null;
       return (
@@ -491,31 +504,29 @@ export function DebugPanel({ nodes, edges, onClose, notice, workflowState, logs 
         </div>
       </section>
 
-      {/* Live metrics (仅 liveVision 运行态) */}
-      {currentStep?.type === 'liveVision' && (() => {
+      {/* Processing metrics for continuous detection nodes */}
+      {(currentStep?.type === 'liveVision' || currentStep?.type === 'spatialDetector') && (() => {
         const r = runResults[currentStep.id];
-        const hits = r?.liveHitCount ?? 0;
-        const fps = r?.liveFps ?? 0;
-        const hitRate = typeof r?.liveHitRate === 'number' ? `${Math.round(r.liveHitRate * 100)}%` : '-';
+        const fps = r?.processingFps ?? r?.liveFps ?? 0;
         const latest = r?.liveLatestHit;
         return (
           <section className="debug-panel__section">
-            <div className="debug-panel__section-title">实时检测指标</div>
+            <div className="debug-panel__section-title">处理帧率指标</div>
             <div className="live-metrics">
               <div className="live-metric">
-                <div className="live-metric__label">FPS</div>
+                <div className="live-metric__label">配置帧率</div>
+                <div className="live-metric__value">{formatFrameRateSetting(currentStep.data.fps)}</div>
+              </div>
+              <div className="live-metric">
+                <div className="live-metric__label">实测 FPS</div>
                 <div className="live-metric__value">{fps}</div>
               </div>
-              <div className={`live-metric ${hits > 0 ? 'live-metric--hit' : ''}`}>
-                <div className="live-metric__label">命中 / 总帧</div>
-                <div className="live-metric__value">{hits} / {r?.liveFrameCount ?? 0}</div>
-              </div>
-              <div className={`live-metric ${hits > 0 ? 'live-metric--hit' : 'live-metric--danger'}`}>
-                <div className="live-metric__label">命中率</div>
-                <div className="live-metric__value">{hitRate}</div>
+              <div className="live-metric">
+                <div className="live-metric__label">处理帧数</div>
+                <div className="live-metric__value">{r?.processingFrameCount ?? r?.liveFrameCount ?? 0}</div>
               </div>
             </div>
-            {latest && (
+            {currentStep.type === 'liveVision' && latest && (
               <div className="live-hits" style={{ marginTop: 10 }}>
                 <div className="live-hit live-hit--latest">
                   <div className="live-hit__main">

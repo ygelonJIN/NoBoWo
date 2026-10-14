@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { YoloAugmentConfig, YoloDataset, YoloEnvInfo, YoloEpochMetrics, YoloTrainConfig, YoloTrainingEvent, YoloTrainingState } from '@nobowo/core';
 import { CustomSelect } from './CustomSelect';
 
@@ -13,79 +13,6 @@ type Props = {
   onStart: (cfg: YoloTrainConfig, datasetId: string) => Promise<void>;
   onStop: () => Promise<void>;
 };
-
-type PreviewBox = { x: number; y: number; width: number; height: number; classId: string | null; color: string };
-
-type AugPreview = { label: string; src: string; boxes: PreviewBox[] };
-
-const PREVIEW_BASE_BOX: PreviewBox[] = [
-  { x: 0.16, y: 0.18, width: 0.28, height: 0.28, classId: 'btn', color: '#78a9ff' },
-  { x: 0.55, y: 0.22, width: 0.24, height: 0.18, classId: 'field', color: '#6ae3a1' },
-  { x: 0.34, y: 0.58, width: 0.18, height: 0.22, classId: 'icon', color: '#f7c948' },
-];
-
-const PREVIEW_BG =
-  'data:image/svg+xml;utf8,' +
-  encodeURIComponent(`
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640">
-    <defs>
-      <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
-        <stop offset="0%" stop-color="#1d2634"/>
-        <stop offset="100%" stop-color="#0c1118"/>
-      </linearGradient>
-      <filter id="blur"><feGaussianBlur stdDeviation="18"/></filter>
-    </defs>
-    <rect width="960" height="640" fill="url(#g)"/>
-    <circle cx="210" cy="150" r="92" fill="#78a9ff" opacity="0.22" filter="url(#blur)"/>
-    <circle cx="720" cy="180" r="140" fill="#6ae3a1" opacity="0.18" filter="url(#blur)"/>
-    <circle cx="600" cy="430" r="180" fill="#f7c948" opacity="0.14" filter="url(#blur)"/>
-    <rect x="130" y="130" width="320" height="180" rx="20" fill="#d7e4ff" opacity="0.12" stroke="#8fb4f5" stroke-width="4"/>
-    <rect x="544" y="160" width="260" height="120" rx="18" fill="#d9ffe9" opacity="0.12" stroke="#6ae3a1" stroke-width="4"/>
-    <rect x="320" y="390" width="180" height="160" rx="18" fill="#fff7d6" opacity="0.12" stroke="#f7c948" stroke-width="4"/>
-    <text x="168" y="220" fill="#e7ecf3" font-size="42" font-family="Inter, sans-serif">Button</text>
-    <text x="582" y="235" fill="#e7ecf3" font-size="32" font-family="Inter, sans-serif">Field</text>
-    <text x="356" y="478" fill="#e7ecf3" font-size="32" font-family="Inter, sans-serif">Icon</text>
-  </svg>
-`);
-
-function distortPreview(base: PreviewBox[], cfg: YoloAugmentConfig, seed: number): PreviewBox[] {
-  const rand = (n: number) => ((Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453) % 1 + 1) % 1;
-  const rot = (cfg.degrees / 180) * 0.16 * (rand(1) - 0.5);
-  const scale = 1 - cfg.scale * 0.18 * (rand(2) - 0.35);
-  const shiftX = (cfg.translate * 0.14) * (rand(3) - 0.5);
-  const shiftY = (cfg.translate * 0.14) * (rand(4) - 0.5);
-  const flip = rand(5) < cfg.fliplr;
-  return base.map((b, i) => {
-    const cx = b.x + b.width / 2;
-    const cy = b.y + b.height / 2;
-    let nx = cx - 0.5;
-    const ny = cy - 0.5;
-    if (flip) nx *= -1;
-    const x = 0.5 + nx * scale + shiftX + (i * rot * 0.22);
-    const y = 0.5 + ny * scale + shiftY + (i * rot * -0.16);
-    const w = Math.max(0.05, Math.min(0.9, b.width * scale * (1 - cfg.shear * 0.002)));
-    const h = Math.max(0.05, Math.min(0.9, b.height * scale * (1 - cfg.perspective * 300)));
-    return { ...b, x: Math.min(0.92 - w, Math.max(0.04, x - w / 2)), y: Math.min(0.92 - h, Math.max(0.04, y - h / 2)), width: w, height: h };
-  });
-}
-
-function PreviewCard({ preview }: { preview: AugPreview }) {
-  return (
-    <div className="yolo-preview-card">
-      <div className="yolo-preview-card__head">
-        <span>{preview.label}</span>
-      </div>
-      <div className="yolo-preview-card__image">
-        <img src={preview.src} alt="增强预览" draggable={false} />
-        {preview.boxes.map((box, idx) => (
-          <div key={idx} className="yolo-preview-box" style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%`, borderColor: box.color }}>
-            <span style={{ background: box.color }}>{box.classId ?? 'obj'}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 const CONFIG_KEY = 'nobowo.yolo.trainConfig.v2';
 
@@ -202,55 +129,55 @@ const AUGMENT_GROUPS: { title: string; desc: string; items: { key: keyof YoloAug
     title: '翻转',
     desc: '对图片做水平/垂直镜像',
     items: [
-      { key: 'flipud', label: '上下翻转概率', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
-      { key: 'fliplr', label: '左右翻转概率', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'flipud', label: '上下翻转概率（按概率把图片上下镜像）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'fliplr', label: '左右翻转概率（按概率把图片左右镜像）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
     ],
   },
   {
     title: '几何变换',
     desc: '旋转 / 平移 / 缩放 / 错切 / 透视',
     items: [
-      { key: 'degrees', label: '旋转角度 ±', min: 0, max: 180, step: 5, format: (v) => `${v}°` },
-      { key: 'translate', label: '平移比例', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
-      { key: 'scale', label: '缩放比例', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
-      { key: 'shear', label: '错切角度 ±', min: 0, max: 90, step: 5, format: (v) => `${v}°` },
-      { key: 'perspective', label: '透视强度', min: 0, max: 0.001, step: 0.00005, format: (v) => v.toFixed(5) },
-      { key: 'cropFraction', label: '随机裁剪比例', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'degrees', label: '旋转角度 ±（图片随机旋转的最大角度）', min: 0, max: 180, step: 5, format: (v) => `${v}°` },
+      { key: 'translate', label: '平移比例（图片随机移动的最大范围）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'scale', label: '缩放比例（图片随机缩放的幅度）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'shear', label: '错切角度 ±（图片随机倾斜的最大角度）', min: 0, max: 90, step: 5, format: (v) => `${v}°` },
+      { key: 'perspective', label: '透视强度（模拟远近透视变化的强度）', min: 0, max: 0.001, step: 0.00005, format: (v) => v.toFixed(5) },
+      { key: 'cropFraction', label: '随机裁剪比例（随机保留图片区域的比例）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
     ],
   },
   {
     title: '色彩抖动',
     desc: '色相 / 饱和度 / 明度扰动，增强泛化',
     items: [
-      { key: 'hsvH', label: '色相 HSV-H', min: 0, max: 0.5, step: 0.005 },
-      { key: 'hsvS', label: '饱和度 HSV-S', min: 0, max: 1, step: 0.05 },
-      { key: 'hsvV', label: '明度 HSV-V', min: 0, max: 1, step: 0.05 },
+      { key: 'hsvH', label: '色相 HSV-H（随机调整颜色色相的强度）', min: 0, max: 0.5, step: 0.005 },
+      { key: 'hsvS', label: '饱和度 HSV-S（随机调整颜色鲜艳程度）', min: 0, max: 1, step: 0.05 },
+      { key: 'hsvV', label: '明度 HSV-V（随机调整图片明暗程度）', min: 0, max: 1, step: 0.05 },
     ],
   },
   {
     title: '拼接与遮挡',
     desc: 'Mosaic / MixUp / Copy-Paste / 随机擦除',
     items: [
-      { key: 'mosaic', label: 'Mosaic 拼接', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
-      { key: 'mixup', label: 'MixUp 混合', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
-      { key: 'copyPaste', label: 'Copy-Paste 复制粘贴', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
-      { key: 'erasing', label: '随机擦除', min: 0, max: 0.99, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'mosaic', label: 'Mosaic 拼接（按概率把多张图片拼成训练图）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'mixup', label: 'MixUp 混合（按概率混合两张图片及其标注）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'copyPaste', label: 'Copy-Paste 复制粘贴（按概率复制目标区域到其他图片）', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { key: 'erasing', label: '随机擦除（随机遮挡区域，减少对局部特征的依赖）', min: 0, max: 0.99, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
     ],
   },
 ];
 
 const HYPER_FIELDS: { key: 'epochs' | 'batch' | 'imageSize' | 'lr0' | 'lrf' | 'momentum' | 'weightDecay' | 'warmupEpochs' | 'patience' | 'workers' | 'seed'; label: string; min: number; max: number; step: number; hint?: string }[] = [
-  { key: 'epochs', label: '训练轮数 (epochs)', min: 1, max: 2000, step: 1 },
-  { key: 'batch', label: '批次大小 (batch)', min: 1, max: 512, step: 1, hint: '显存不足时调小' },
-  { key: 'imageSize', label: '输入尺寸 (imgsz)', min: 320, max: 1280, step: 32 },
-  { key: 'lr0', label: '初始学习率 (lr0)', min: 0.0001, max: 0.1, step: 0.0005 },
-  { key: 'lrf', label: '最终学习率系数 (lrf)', min: 0.0001, max: 1, step: 0.01 },
-  { key: 'momentum', label: '动量 (momentum)', min: 0, max: 0.99, step: 0.001 },
-  { key: 'weightDecay', label: '权重衰减 (weight_decay)', min: 0, max: 0.01, step: 0.0001 },
-  { key: 'warmupEpochs', label: '预热轮数 (warmup)', min: 0, max: 20, step: 0.5 },
-  { key: 'patience', label: '早停耐心 (patience)', min: 0, max: 200, step: 1, hint: '0 = 关闭早停' },
-  { key: 'workers', label: '数据加载线程', min: 0, max: 32, step: 1 },
-  { key: 'seed', label: '随机种子', min: 0, max: 99999, step: 1 },
+  { key: 'epochs', label: '训练轮数（epochs，完整数据集重复训练的次数）', min: 1, max: 2000, step: 1 },
+  { key: 'batch', label: '批次大小（batch，每次参数更新使用的图片数量）', min: 1, max: 512, step: 1, hint: '显存不足时调小' },
+  { key: 'imageSize', label: '输入尺寸（imgsz，送入模型的图片边长）', min: 320, max: 1280, step: 32, hint: 'Nano/Tiny 推荐 416；S/M/L 通常 640。输入越小越快，但小目标和细线精度会下降' },
+  { key: 'lr0', label: '初始学习率（lr0，训练开始时参数更新的步长）', min: 0.0001, max: 0.1, step: 0.0005 },
+  { key: 'lrf', label: '最终学习率系数（lrf，训练结束时学习率相对初始值的比例）', min: 0.0001, max: 1, step: 0.01 },
+  { key: 'momentum', label: '动量（momentum，累积历史梯度以稳定参数更新）', min: 0, max: 0.99, step: 0.001 },
+  { key: 'weightDecay', label: '权重衰减（weight_decay，抑制过大权重以减轻过拟合）', min: 0, max: 0.01, step: 0.0001 },
+  { key: 'warmupEpochs', label: '预热轮数（warmup，学习率从小到目标值的过渡轮数）', min: 0, max: 20, step: 0.5 },
+  { key: 'patience', label: '早停耐心（patience，验证指标连续多少轮不提升后停止）', min: 0, max: 200, step: 1, hint: '0 = 关闭早停' },
+  { key: 'workers', label: '数据加载线程（workers，并行读取和预处理图片的线程数）', min: 0, max: 32, step: 1 },
+  { key: 'seed', label: '随机种子（seed，固定随机性以便复现实验）', min: 0, max: 99999, step: 1 },
 ];
 
 function Sparkline({ values, color, height = 44 }: { values: number[]; color: string; height?: number }) {
@@ -343,21 +270,6 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
     }
   };
 
-  const previews = useMemo<AugPreview[]>(() => {
-    const labels = ['原图', '左右翻转', '旋转 + 缩放', '颜色抖动'];
-    const configs: YoloAugmentConfig[] = [
-      cfg.augment,
-      { ...cfg.augment, fliplr: 1 },
-      { ...cfg.augment, degrees: Math.max(cfg.augment.degrees, 20), scale: Math.min(1, cfg.augment.scale + 0.18), translate: Math.min(1, cfg.augment.translate + 0.05) },
-      { ...cfg.augment, hsvH: Math.min(0.5, cfg.augment.hsvH + 0.08), hsvS: Math.min(1, cfg.augment.hsvS + 0.25), hsvV: Math.min(1, cfg.augment.hsvV + 0.2) },
-    ];
-    return labels.map((label, i) => ({
-      label,
-      src: PREVIEW_BG,
-      boxes: distortPreview(PREVIEW_BASE_BOX, configs[i], i + 1),
-    }));
-  }, [cfg.augment]);
-
   const metricCards: { label: string; value: string; color: string }[] = [
     { label: 'mAP50', value: lastEpoch ? `${lastEpoch.metrics.mAP50.toFixed(2)}%` : '—', color: '#6ae3a1' },
     { label: 'mAP50-95', value: lastEpoch ? `${lastEpoch.metrics.mAP50_95.toFixed(2)}%` : '—', color: '#78a9ff' },
@@ -379,7 +291,7 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
         <div className="yolo-config-section">
           <div className="yolo-config-section__title">基础设置</div>
           <label className="yolo-field">
-            <span className="yolo-field__label">数据集</span>
+            <span className="yolo-field__label">数据集（dataset，用于训练和验证的标注图片）</span>
             <CustomSelect
               value={selectedDatasetId ?? ''}
               options={[
@@ -399,7 +311,7 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
             </div>
           )}
           <label className="yolo-field">
-            <span className="yolo-field__label">基础模型</span>
+            <span className="yolo-field__label">基础模型（model，选择网络容量与速度）</span>
             <CustomSelect
               value={cfg.model}
               options={BASE_MODELS.map((m) => ({
@@ -412,7 +324,7 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
             <span className="yolo-field__hint">越大的模型精度越高、训练越慢；小数据集优先 Nano / Tiny / S。下载预训练权重后可微调，训练更快更准。</span>
           </label>
           <label className="yolo-field">
-            <span className="yolo-field__label">计算设备</span>
+            <span className="yolo-field__label">计算设备（device，选择 CPU / GPU / Apple 芯片）</span>
             <CustomSelect
               value={cfg.device}
               options={deviceOptions.map((d) => ({
@@ -424,7 +336,7 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
             />
           </label>
           <SliderField
-            label="训练集占比"
+            label="训练集占比（split，训练数据占全部数据的比例）"
             value={Math.round(cfg.splitTrain * 100)}
             onChange={(v) => {
               patch({ splitTrain: v / 100, splitVal: Math.round((100 - v) * 10) / 1000 });
@@ -443,17 +355,12 @@ export function YoloTrainingTab({ datasets, selectedDatasetId, onSelectDataset, 
               <NumberField key={f.key} label={f.label} value={cfg[f.key]} min={f.min} max={f.max} step={f.step} hint={f.hint} onChange={(v) => patch({ [f.key]: v } as Partial<YoloTrainConfig>)} />
             ))}
           </div>
-          <ToggleRow label="确定性训练 (deterministic)" hint="保证同种子下结果可复现" checked={cfg.deterministic} onChange={(v) => patch({ deterministic: v })} />
+          <ToggleRow label="确定性训练（deterministic，固定计算顺序让结果可复现）" checked={cfg.deterministic} onChange={(v) => patch({ deterministic: v })} />
         </div>
 
         <div className="yolo-config-section">
-          <div className="yolo-config-section__title">数据增强（对照片的微调）</div>
-          <div className="yolo-config-section__desc">训练时自动对图片做这些变换，让模型更鲁棒；增强越强越不容易过拟合</div>
-          <div className="yolo-preview-grid">
-            {previews.map((preview) => (
-              <PreviewCard key={preview.label} preview={preview} />
-            ))}
-          </div>
+          <div className="yolo-config-section__title">数据增强（训练时自动生成变体）</div>
+          <div className="yolo-config-section__desc">训练时自动对图片做这些变换，让模型更鲁棒；增强越强越不容易过拟合。</div>
           {AUGMENT_GROUPS.map((group) => (
             <div key={group.title} className="yolo-augment-group">
               <div className="yolo-augment-group__head">

@@ -210,6 +210,10 @@ npm run preview
 
 ```text
 NoBoWo/
+├── templates/                 # 用户上传的模板明文数据，已加入 .gitignore
+│   ├── index.json             # 模板元数据
+│   ├── images/                # 用于匹配的裁剪模板
+│   └── sources/               # 创建模板时保存的原始截图
 ├── packages/
 │   ├── core/                  # 工作流类型、节点模型和共享逻辑
 │   ├── main/                  # Electron 主进程、IPC、执行器和运行时
@@ -225,6 +229,24 @@ NoBoWo/
 ```
 
 ## 数据与安全
+
+### 模板图片存放位置
+
+模板图片和元数据直接保存在项目根目录的 `templates/`：
+
+```text
+/Volumes/TUF ESD-T1A Media/NoBoWo/templates/
+├── index.json
+├── images/
+└── sources/
+```
+
+- `templates/` 已写入 `.gitignore`，模板图片、原始截图和索引不会进入 Git 提交或 GitHub。
+- 主进程和工作流执行器统一从该目录读取模板，删除、替换和识别使用同一份数据。
+- 新上传的图片会立即保存到 `templates/images`，原始截图保存到 `templates/sources`。
+- 模板数据不会复制到系统用户目录，也不会自动从旧用户目录导入。
+
+### 其他安全说明
 
 - 云端 API Key 可能保存在本地应用数据或浏览器本地存储中，请勿公开分享配置文件、截图或包含密钥的调试日志。
 - 自动化流程可以控制鼠标和键盘。运行陌生工作流前，请确认节点操作，避免误触、输入或删除数据。

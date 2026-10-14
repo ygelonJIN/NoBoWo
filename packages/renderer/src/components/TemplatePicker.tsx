@@ -20,27 +20,30 @@ export function TemplatePicker({ templates, folders = [], value, onChange }: Pro
     setFolderFilter('all');
   }, [templates, folders]);
 
+  const folderIds = useMemo(() => new Set(folders.map((folder) => folder.id)), [folders]);
+  const isUnclassified = (template: TemplateDefinition) => !template.folderId || !folderIds.has(template.folderId);
+
   const filtered = useMemo(() => {
     if (folderFilter === 'all') return templates;
-    if (folderFilter === 'none') return templates.filter((t) => !t.folderId);
-    return templates.filter((t) => t.folderId === folderFilter);
-  }, [templates, folderFilter]);
+    if (folderFilter === 'none') return templates.filter(isUnclassified);
+    return templates.filter((t) => t.folderId === folderFilter && folderIds.has(t.folderId));
+  }, [templates, folders, folderFilter, folderIds]);
 
   const groups = useMemo(() => {
     if (folderFilter !== 'all') return [{ label: null, items: filtered }];
     const result: { label: string | null; items: TemplateDefinition[] }[] = [];
-    const noneItems = filtered.filter((t) => !t.folderId);
-    if (noneItems.length > 0) result.push({ label: null, items: noneItems });
+    const noneItems = filtered.filter(isUnclassified);
+    if (noneItems.length > 0) result.push({ label: '未分类历史模板', items: noneItems });
     for (const folder of folders) {
       const items = filtered.filter((t) => t.folderId === folder.id);
       if (items.length > 0) result.push({ label: folder.name, items });
     }
     return result;
-  }, [filtered, folders, folderFilter]);
+  }, [filtered, folders, folderFilter, folderIds]);
 
   const folderOptions = [
     { value: 'all', label: '全部' },
-    ...(templates.some((t) => !t.folderId) ? [{ value: 'none', label: '未分类' }] : []),
+    ...(templates.some(isUnclassified) ? [{ value: 'none', label: `未分类历史模板（${templates.filter(isUnclassified).length}）` }] : []),
     ...folders.map((f) => ({ value: f.id, label: f.name })),
   ];
 

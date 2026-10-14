@@ -210,7 +210,10 @@ class Exp(BaseExp):
             mosaic=not no_aug,
         )
 
-        dataloader_kwargs = {"num_workers": self.data_num_workers, "pin_memory": True}
+        dataloader_kwargs = {
+            "num_workers": self.data_num_workers,
+            "pin_memory": torch.cuda.is_available(),
+        }
         dataloader_kwargs["batch_sampler"] = batch_sampler
 
         # Make sure each process has different random seed, especially for 'fork' method.
@@ -320,9 +323,11 @@ class Exp(BaseExp):
         else:
             sampler = torch.utils.data.SequentialSampler(valdataset)
 
+        # 验证集通常很小，但每轮都会重建 DataLoader。macOS/MPS 长时间训练时
+        # 多进程 worker 可能被系统终止，因此验证阶段固定使用单进程加载。
         dataloader_kwargs = {
-            "num_workers": self.data_num_workers,
-            "pin_memory": True,
+            "num_workers": 0,
+            "pin_memory": torch.cuda.is_available(),
             "sampler": sampler,
         }
         dataloader_kwargs["batch_size"] = batch_size

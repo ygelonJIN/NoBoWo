@@ -147,7 +147,7 @@ declare global {
       importModel: (payload: { file: string; name: string; baseModel?: string; imageSize?: number; numClasses?: number }) => Promise<YoloModel>;
       pickModelFile: () => Promise<string | null>;
       getEnvInfo: () => Promise<YoloEnvInfo>;
-      installPackage: (packageName: string) => Promise<{ started: boolean; message?: string }>;
+      installPackage: (packageNames: string | string[]) => Promise<{ started: boolean; message?: string }>;
       getYoloxPath: () => Promise<string | null>;
       setYoloxPath: (path: string) => Promise<void>;
       pickYoloxPath: () => Promise<string | null>;
