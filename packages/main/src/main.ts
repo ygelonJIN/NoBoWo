@@ -44,7 +44,7 @@ import type {
 } from '@nobowo/core';
 import { YOLO_CLASS_COLORS, YOLOX_PYTHON_DEPENDENCIES } from '@nobowo/core';
 import { runVisionEngine, writeImageToTemp } from './engine';
-import { WorkflowExecutor } from './workflowExecutor';
+import { WorkflowExecutor, WORKFLOW_EXECUTOR_VERSION } from './workflowExecutor';
 import { disposePs5RuntimeClient, getPs5RuntimeClient, type Ps5ConnectPayload } from './ps5Runtime';
 
 let mainWindow: BrowserWindow | null = null;
@@ -3659,6 +3659,7 @@ function registerWorkflowIpc() {
   });
 
   ipcMain.handle('workflow:getState', async () => workflowExecutor.getSnapshot());
+  ipcMain.handle('workflow:getExecutorVersion', async () => WORKFLOW_EXECUTOR_VERSION);
   ipcMain.handle('workflow:run', async (_event, workflow: WorkflowDocument) => {
     const result = await workflowExecutor.run(workflow);
     if (result.started && isLocalWorkflow(workflow)) {

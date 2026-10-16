@@ -1,5 +1,5 @@
 import type { LegacyFrameRateSetting, StreamFrameRate } from './frameRate';
-import type { GameplayStateValue } from './gameplayStateTracking';
+import type { WorkflowStateValue } from './workflowState';
 
 export type NodeType =
   | 'liveVision'
@@ -13,12 +13,13 @@ export type NodeType =
   | 'keyboard'
   | 'gamepad'
   | 'spatialDetector'
-  | 'gameplayState'
+  | 'state'
   | 'movePlayer';
 
 export * from './frameRate';
-export * from './gameplayStateTracking';
+export * from './workflowState';
 export * from './movementControl';
+export * from './workflowGraph';
 export * from './spatialOverlay';
 export * from './spatialGeometry';
 
@@ -78,20 +79,23 @@ export type ConditionType =
   | 'nodeCheck'         // 指定节点（通过标题选择）
   | 'spatialArrived'    // 最近一次 Spatial Detector 已到达目标
   | 'spatialNotArrived' // 最近一次 Spatial Detector 尚未到达目标
-  | 'gameplayOffense'
-  | 'gameplayDefense'
-  | 'gameplayStateChanged'
   | 'custom';           // 自定义表达式
 
+/** If 只判断直接前一个节点是否成功；旧条件字段仅为历史数据兼容，不再参与分支。 */
 export type IfNode = WorkflowNodeBase<'if', {
+  /** @deprecated If 现在固定判断直接前一个节点的成功/失败。 */
   conditionType?: ConditionType;
+  /** @deprecated If 现在固定判断直接前一个节点的成功/失败。 */
   expression: string;
+  /** @deprecated */
   targetNodeId?: string;
+  /** @deprecated */
   targetNodeTitle?: string;
 }>;
 
 export type LoopNode = WorkflowNodeBase<'loop', {
-  mode: 'count' | 'condition';
+  /** untilBreak：循环体回边作为 Continue，进入 Loop Down 作为 Break。 */
+  mode: 'count' | 'condition' | 'untilBreak';
   count?: number;
   conditionText?: string;
   role?: 'begin' | 'down';
@@ -199,6 +203,8 @@ export type SpatialDetectorNode = WorkflowNodeBase<'spatialDetector', {
   targetAnchor: 'boxDistance' | 'boxCenter' | 'nearestBoxPoint' | 'keypoint';
   playerKeypoint?: string;
   targetKeypoint?: string;
+  /** targetAnchor=boxDistance 时使用的目标边；nearest 表示四边中的最短距离。 */
+  targetEdge?: SpatialTargetEdge;
   /** detection：Target 也由 YOLO 识别；polyline：Target 是手工/标定得到的三分线等折线。 */
   targetMode?: SpatialTargetMode;
   /** targetMode=polyline 时至少两个图像坐标点。 */
@@ -208,27 +214,17 @@ export type SpatialDetectorNode = WorkflowNodeBase<'spatialDetector', {
   stabilityFrames: number;
 }>;
 
-export type GameplayStateNode = WorkflowNodeBase<'gameplayState', {
-  modelId?: string;
-  modelPath?: string;
-  numClasses?: number;
-  captureMode: 'live' | 'frame';
-  source: 'screen' | 'window' | 'stream';
-  streamSourceId?: string;
-  windowHint?: string;
-  windowId?: number;
-  windowApp?: string;
-  fps: LegacyFrameRateSetting;
-  timeoutMs: number;
-  threshold: number;
-  offenseLabel: string;
-  defenseLabel: string;
-  confirmFrames: number;
-  holdFrames: number;
+export type WorkflowStateNode = WorkflowNodeBase<'state', {
+  /** branch：双输出判断当前状态；switch：在 Loop Down 前切换状态。 */
+  mode: 'branch' | 'switch';
+  stateALabel: string;
+  stateBLabel: string;
+  switchTo: 'toggle' | 'stateA' | 'stateB';
 }>;
 
 export type MoveDirection = 'up' | 'down' | 'left' | 'right' | 'stop';
 export type SpatialTargetMode = 'detection' | 'polyline';
+export type SpatialTargetEdge = 'nearest' | 'top' | 'bottom' | 'left' | 'right';
 export type MoveControl = 'gamepad' | 'gamepadAnalog' | 'keyboard';
 export type MovePlayerControlMode = 'continuous' | 'pulse';
 
@@ -237,7 +233,7 @@ export type MovePlayerControlMode = 'continuous' | 'pulse';
  * gamepadAnalog 面向 PS5 Direct Remote Play，通过左摇杆输出连续向量。
  */
 export type MovePlayerNode = WorkflowNodeBase<'movePlayer', {
-  /** continuous：逐帧检测并持续保持输入，接近目标只释放输入并继续监测；pulse：兼容旧行为的单次按压。 */
+  /** continuous：逐帧检测并持续保持输入；pulse：兼容旧行为的单次按压。 */
   controlMode?: MovePlayerControlMode;
   /** continuous 自动方向使用的 Spatial Detector；留空时使用流程中最近的一个。 */
   detectorNodeId?: string;
@@ -262,8 +258,10 @@ export type MovePlayerNode = WorkflowNodeBase<'movePlayer', {
   /** pulse 模式的单次按压时长。 */
   durationMs: number;
   delayMs: number;
-  /** stable arrival 时释放输入；持续闭环本身不会因此结束。 */
+  /** stable arrival 或进入停止距离时释放输入。 */
   stopWhenArrived: boolean;
+  /** 释放输入后结束 Move Player，并继续执行后续节点；关闭时保持持续监测。 */
+  exitOnArrival?: boolean;
 }>;
 
 export type OcrEngine = 'auto' | 'macosVision' | 'windowsOcr' | 'tesseract' | 'paddleOcr';
@@ -492,7 +490,7 @@ export type WorkflowNode =
   | LiveVisionNode
   | GamepadNode
   | SpatialDetectorNode
-  | GameplayStateNode
+  | WorkflowStateNode
   | MovePlayerNode;
 
 export type WorkflowEdge = {
@@ -773,10 +771,8 @@ export type NodeRunResult = {
   spatialReady?: boolean;
   /** Move Player 实际选择的移动方向。 */
   moveDirection?: MoveDirection;
-  /** gameplayState 解析后的稳定攻防状态。 */
-  gameplayState?: GameplayStateValue;
-  gameplayStateRaw?: GameplayStateValue;
-  gameplayStateChanged?: boolean;
+  /** State 判断或切换后的状态值。 */
+  stateValue?: WorkflowStateValue;
   /** gamepadAnalog 实际输出的摇杆向量。 */
   moveVector?: Point2D;
   moveMagnitude?: number;
@@ -853,89 +849,6 @@ export function transformPointWithHomography(point: Point2D, h: number[]): Point
   };
 }
 
-/** 返回点到矩形边缘的最近点；点在矩形内部时投影到最近边。 */
-export function closestPointOnBox(point: Point2D, box: [number, number, number, number]): Point2D {
-  const [x, y, width, height] = box;
-  const left = x;
-  const top = y;
-  const right = x + width;
-  const bottom = y + height;
-  const inside = point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
-  if (!inside) {
-    return {
-      x: Math.max(left, Math.min(right, point.x)),
-      y: Math.max(top, Math.min(bottom, point.y)),
-    };
-  }
-  const candidates: Point2D[] = [
-    { x: left, y: point.y },
-    { x: right, y: point.y },
-    { x: point.x, y: top },
-    { x: point.x, y: bottom },
-  ];
-  return candidates.reduce((best, candidate) => {
-    const bestDistance = (best.x - point.x) ** 2 + (best.y - point.y) ** 2;
-    const candidateDistance = (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2;
-    return candidateDistance < bestDistance ? candidate : best;
-  }, candidates[0]);
-}
-
-/** 计算两个矩形框边界之间的最短距离，重叠时返回 0。 */
-export function closestPointsBetweenBoxes(
-  playerBox: [number, number, number, number],
-  targetBox: [number, number, number, number],
-): { player: Point2D; target: Point2D; distance: number } {
-  const [px, py, pw, ph] = playerBox;
-  const [tx, ty, tw, th] = targetBox;
-  const playerCenter = { x: px + pw / 2, y: py + ph / 2 };
-  const targetCenter = { x: tx + tw / 2, y: ty + th / 2 };
-  const playerRight = px + pw;
-  const playerBottom = py + ph;
-  const targetRight = tx + tw;
-  const targetBottom = ty + th;
-  const overlapX = px <= targetRight && playerRight >= tx;
-  const overlapY = py <= targetBottom && playerBottom >= ty;
-  if (overlapX && overlapY) {
-    return { player: playerCenter, target: targetCenter, distance: 0 };
-  }
-
-  let playerPoint: Point2D;
-  let targetPoint: Point2D;
-  if (!overlapX && !overlapY) {
-    playerPoint = {
-      x: playerCenter.x < targetCenter.x ? playerRight : px,
-      y: playerCenter.y < targetCenter.y ? playerBottom : py,
-    };
-    targetPoint = {
-      x: playerCenter.x < targetCenter.x ? tx : targetRight,
-      y: playerCenter.y < targetCenter.y ? ty : targetBottom,
-    };
-  } else if (!overlapX) {
-    playerPoint = {
-      x: playerCenter.x < targetCenter.x ? playerRight : px,
-      y: Math.max(py, Math.min(playerBottom, targetCenter.y)),
-    };
-    targetPoint = {
-      x: playerCenter.x < targetCenter.x ? tx : targetRight,
-      y: Math.max(ty, Math.min(targetBottom, playerCenter.y)),
-    };
-  } else {
-    playerPoint = {
-      x: Math.max(px, Math.min(playerRight, targetCenter.x)),
-      y: playerCenter.y < targetCenter.y ? playerBottom : py,
-    };
-    targetPoint = {
-      x: Math.max(tx, Math.min(targetRight, playerCenter.x)),
-      y: playerCenter.y < targetCenter.y ? ty : targetBottom,
-    };
-  }
-  return {
-    player: playerPoint,
-    target: targetPoint,
-    distance: Math.hypot(targetPoint.x - playerPoint.x, targetPoint.y - playerPoint.y),
-  };
-}
-
 export function normalizeVector(vector: Point2D): Point2D {
   const length = Math.hypot(vector.x, vector.y);
   if (length < 1e-9) return { x: 0, y: 0 };
@@ -970,6 +883,8 @@ export type WorkflowRunHandle = {
   message?: string;
   runId?: string;
   runMode?: 'local' | 'stream';
+  /** 用于确认运行进程确实加载了并行执行器，避免旧 Electron 主进程静默运行。 */
+  executorVersion?: string;
 };
 
 export const defaultWorkflowDocument = (): WorkflowDocument => ({
@@ -978,7 +893,7 @@ export const defaultWorkflowDocument = (): WorkflowDocument => ({
   edges: [],
 });
 
-export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] => {
+export const createNodePorts = (type: WorkflowNode['type'], loopRole?: 'begin' | 'down'): PortDefinition[] => {
   switch (type) {
     case 'click':
       return [
@@ -1003,10 +918,17 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
         { id: 'false', label: 'False', direction: 'output', dataType: 'flow' },
       ];
     case 'loop':
-      return [
-        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
-        { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
-      ];
+      return loopRole === 'down'
+        ? [
+            { id: 'in', label: '循环体', direction: 'input', dataType: 'flow' },
+            { id: 'again', label: '回环', direction: 'output', dataType: 'flow' },
+            { id: 'next', label: '顺序', direction: 'output', dataType: 'flow' },
+          ]
+        : [
+            { id: 'in', label: '顺序入口', direction: 'input', dataType: 'flow' },
+            { id: 'again', label: '回环入口', direction: 'input', dataType: 'flow' },
+            { id: 'body', label: '循环体', direction: 'output', dataType: 'flow' },
+          ];
     case 'recognize':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
@@ -1032,7 +954,12 @@ export const createNodePorts = (type: WorkflowNode['type']): PortDefinition[] =>
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
         { id: 'out', label: 'Out', direction: 'output', dataType: 'flow' },
       ];
-    case 'gameplayState':
+    case 'state':
+      return [
+        { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
+        { id: 'true', label: '状态 A', direction: 'output', dataType: 'flow' },
+        { id: 'false', label: '状态 B', direction: 'output', dataType: 'flow' },
+      ];
     case 'movePlayer':
       return [
         { id: 'in', label: 'In', direction: 'input', dataType: 'flow' },
@@ -1439,6 +1366,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
           targetLabel: 'target',
           targetMode: 'detection',
           targetPolyline: [],
+          targetEdge: 'nearest',
           threshold: 60,
           playerAnchor: 'boxCenter',
           targetAnchor: 'boxDistance',
@@ -1446,21 +1374,16 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
           stabilityFrames: 3,
         },
       };
-    case 'gameplayState':
+    case 'state':
       return {
         ...base,
         type,
-        title: 'Gameplay State',
+        title: 'State',
         data: {
-          captureMode: 'frame',
-          source: 'stream',
-          fps: 'source',
-          timeoutMs: 5000,
-          threshold: 60,
-          offenseLabel: 'offense_marker',
-          defenseLabel: 'defense_marker',
-          confirmFrames: 3,
-          holdFrames: 2,
+          mode: 'branch',
+          stateALabel: '进攻',
+          stateBLabel: '防守',
+          switchTo: 'toggle',
         },
       };
     case 'movePlayer':
@@ -1482,6 +1405,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
           durationMs: 120,
           delayMs: 80,
           stopWhenArrived: true,
+          exitOnArrival: true,
           keyboardUp: 'w',
           keyboardDown: 's',
           keyboardLeft: 'a',

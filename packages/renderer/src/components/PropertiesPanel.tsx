@@ -1,4 +1,4 @@
-import type { CloudApiProfile, ConditionType, GamepadAction, MoveDirection, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import type { CloudApiProfile, GamepadAction, MoveDirection, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
 import { FrameRateSelect } from './FrameRateSelect';
@@ -638,6 +638,56 @@ export function PropertiesPanel({
           </section>
         )}
 
+        {node.type === 'state' && (
+          <section className="properties-panel__group">
+            <h3>State 配置</h3>
+            <p className="properties-panel__hint">
+              State 判断节点有两个输出；State 切换节点改变下一轮走哪条输出。
+            </p>
+            <label>
+              模式
+              <CustomSelect
+                value={node.data.mode}
+                options={[
+                  { value: 'branch', label: '判断状态（两个输出）' },
+                  { value: 'switch', label: '切换状态' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'branch' | 'switch' }))}
+              />
+            </label>
+            <div className="grid-two">
+              <label>
+                状态 A 名称
+                <input
+                  value={node.data.stateALabel}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { stateALabel: e.target.value }))}
+                />
+              </label>
+              <label>
+                状态 B 名称
+                <input
+                  value={node.data.stateBLabel}
+                  onChange={(e) => onChangeNode(updateNodeData(node, { stateBLabel: e.target.value }))}
+                />
+              </label>
+            </div>
+            {node.data.mode === 'switch' && (
+              <label>
+                切换到
+                <CustomSelect
+                  value={node.data.switchTo}
+                  options={[
+                    { value: 'toggle', label: '切换到另一边' },
+                    { value: 'stateA', label: node.data.stateALabel || '状态 A' },
+                    { value: 'stateB', label: node.data.stateBLabel || '状态 B' },
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { switchTo: v as 'toggle' | 'stateA' | 'stateB' }))}
+                />
+              </label>
+            )}
+          </section>
+        )}
+
         {node.type === 'screenshot' && (
           <section className="properties-panel__group">
             <h3>截图配置</h3>
@@ -803,111 +853,28 @@ export function PropertiesPanel({
           </section>
         )}
 
-        {node.type === 'if' && (() => {
-          const conditionType = node.data.conditionType ?? 'lastOk';
-          const conditionOptions: { value: ConditionType; label: string; description: string }[] = [
-            { value: 'lastOk', label: '上一次节点', description: '检查前面连线的节点是否执行成功' },
-            { value: 'nodeCheck', label: '指定节点', description: '监视某个节点的状态（不需要连线）' },
-            { value: 'spatialArrived', label: '空间检测已到达', description: '最近一次 Spatial Detector 已连续满足到达阈值' },
-            { value: 'spatialNotArrived', label: '空间检测未到达', description: '最近一次 Spatial Detector 尚未满足到达阈值' },
-            { value: 'gameplayOffense', label: '游戏正在进攻', description: '最近一次 Gameplay State 稳定状态为 offense' },
-            { value: 'gameplayDefense', label: '游戏正在防守', description: '最近一次 Gameplay State 稳定状态为 defense' },
-            { value: 'gameplayStateChanged', label: '攻防状态已切换', description: '最近一次 Gameplay State 发生确认后的状态变化' },
-            { value: 'custom', label: '自定义表达式', description: '手写JavaScript表达式（高级模式）' },
-          ];
-          const currentOption = conditionOptions.find((opt) => opt.value === conditionType) ?? conditionOptions[0];
-
-          // Auto-generate expression based on conditionType
-          const getExpression = (type: ConditionType): string => {
-            switch (type) {
-              case 'lastOk': return 'ctx.lastOk';
-              case 'nodeCheck': {
-                // Find node by title
-                const targetTitle = node.data.targetNodeTitle ?? '';
-                const targetNode = allNodes.find((n) => n.title === targetTitle);
-                return targetNode ? `ctx.results['${targetNode.id}']?.status === 'ok'` : 'ctx.lastOk';
-              }
-              case 'spatialArrived': return 'ctx.spatial?.arrived === true';
-              case 'spatialNotArrived': return 'ctx.spatial?.arrived !== true';
-              case 'gameplayOffense': return 'ctx.gameplayState === "offense"';
-              case 'gameplayDefense': return 'ctx.gameplayState === "defense"';
-              case 'gameplayStateChanged': return 'ctx.gameplayStateChanged === true';
-              case 'custom': return node.data.expression ?? 'true';
-              default: return 'ctx.lastOk';
-            }
-          };
-
-          const handleConditionTypeChange = (type: ConditionType) => {
-            const expr = getExpression(type);
-            onChangeNode(updateNodeData(node, { conditionType: type, expression: expr }));
-          };
-
-          return (
-            <section className="properties-panel__group">
-              <h3>判断配置</h3>
-              <label>
-                条件类型
-                <CustomSelect
-                  value={conditionType}
-                  options={conditionOptions.map((opt) => ({ value: opt.value, label: opt.label }))}
-                  onChange={(v) => handleConditionTypeChange(v as ConditionType)}
-                />
-              </label>
-              <p className="properties-panel__hint">{currentOption.description}</p>
-
-              {conditionType === 'custom' ? (
-                <>
-                  <label>
-                    表达式
-                    <input
-                      value={node.data.expression ?? ''}
-                      onChange={(e) => onChangeNode(updateNodeData(node, { expression: e.target.value }))}
-                      placeholder="例如：ctx.lastOk && ctx.last.x > 300"
-                    />
-                  </label>
-                  <div className="properties-panel__hint">
-                    <p>可用变量：</p>
-                    <ul>
-                      <li><code>ctx.lastOk</code> — 上一次检测是否成功</li>
-                      <li><code>ctx.last</code> — 上一次检测结果（含 x, y, nodeId）</li>
-                      <li><code>ctx.frame</code> — 是否有截图</li>
-                      <li><code>ctx.spatial</code> — 最近一次空间检测的距离、方向、世界坐标和到达状态</li>
-                      <li><code>ctx.results</code> — 所有节点的执行结果</li>
-                    </ul>
-                  </div>
-                </>
-              ) : null}
-              {conditionType === 'nodeCheck' ? (
-                <label>
-                  选择节点
-                  <CustomSelect
-                    value={node.data.targetNodeTitle ?? ''}
-                    options={[
-                      { value: '', label: '请选择节点' },
-                      ...allNodes
-                        .filter((n) => n.id !== node.id)
-                        .map((n) => ({ value: n.title, label: n.title }))
-                    ]}
-                    onChange={(v) => {
-                      const expr = getExpression(conditionType);
-                      onChangeNode(updateNodeData(node, { targetNodeTitle: v, expression: expr }));
-                    }}
-                  />
-                </label>
-              ) : null}
-              <p className="properties-panel__hint" style={{ fontSize: '11px', opacity: 0.6 }}>
-                映射表达式：{node.data.expression ?? getExpression(conditionType)}
-              </p>
-            </section>
-          );
-        })()}
+        {node.type === 'if' && (
+          <section className="properties-panel__group">
+            <h3>判断配置</h3>
+            <p className="properties-panel__hint">
+              If 只判断直接连接到它的上一个节点：上一节点成功走 True，失败或跳过走 False。
+            </p>
+            <div className="properties-panel__hint">
+              <ul>
+                <li>任何节点都可以接 If。</li>
+                <li>前节点失败时也会继续执行 If。</li>
+                <li>旧的条件表达式配置不再影响 If 分支。</li>
+              </ul>
+            </div>
+          </section>
+        )}
 
         {node.type === 'loop' && (
           <section className="properties-panel__group">
             <h3>循环配置</h3>
             <p className="properties-panel__hint">Loop 通过角色区分：Begin 负责开始循环，Down 负责循环结束后继续。每个节点只有左侧输入点和右侧输出点。</p>
             {node.data.role === 'down' ? (
-              <p className="properties-panel__hint">循环次数/条件请在配对的 Loop Begin 上设置，Down 只负责结束循环并继续后续步骤。</p>
+              <p className="properties-panel__hint">循环模式请在配对的 Loop Begin 上设置。untilBreak 模式下进入 Down 表示 Break。</p>
             ) : (
               <>
                 <label>
@@ -917,11 +884,16 @@ export function PropertiesPanel({
                     options={[
                       { value: 'count', label: '次数' },
                       { value: 'condition', label: '条件' },
+                      { value: 'untilBreak', label: '直到 Break' },
                     ]}
-                    onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' }))}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { mode: v as 'count' | 'condition' | 'untilBreak' }))}
                   />
                 </label>
-                {node.data.mode === 'count' ? (
+                {node.data.mode === 'untilBreak' ? (
+                  <p className="properties-panel__hint">
+                    不限制次数：循环体回边表示 Continue；任意分支进入 Loop Down 表示 Break 并继续后续步骤。
+                  </p>
+                ) : node.data.mode === 'count' ? (
                   <label>
                     次数
                     <NumberInput
@@ -1267,6 +1239,22 @@ export function PropertiesPanel({
                   onChange={(v) => onChangeNode(updateNodeData(node, { targetAnchor: v as 'boxDistance' | 'boxCenter' | 'nearestBoxPoint' | 'keypoint' }))}
                 />
               </label>
+              {node.data.targetAnchor === 'boxDistance' && (
+                <label>
+                  目标边
+                  <CustomSelect
+                    value={node.data.targetEdge ?? 'nearest'}
+                    options={[
+                      { value: 'nearest', label: '最近边' },
+                      { value: 'top', label: '只算上边' },
+                      { value: 'bottom', label: '只算下边' },
+                      { value: 'left', label: '只算左边' },
+                      { value: 'right', label: '只算右边' },
+                    ]}
+                    onChange={(v) => onChangeNode(updateNodeData(node, { targetEdge: v as 'nearest' | 'top' | 'bottom' | 'left' | 'right' }))}
+                  />
+                </label>
+              )}
             </div>
             {node.data.targetAnchor !== 'boxDistance' && node.data.playerAnchor === 'keypoint' && (
               <label>
@@ -1290,7 +1278,7 @@ export function PropertiesPanel({
             )}
             <div className="grid-two">
               <label>
-                到达阈值
+                停止/到达阈值
                 <NumberInput
                   value={node.data.arrivalTolerance}
                   fallback={5}
@@ -1310,8 +1298,8 @@ export function PropertiesPanel({
                 />
               </label>
             </div>
-            <p className="properties-panel__hint">未配置标定时，阈值单位是图像像素；配置后，距离和阈值使用世界坐标单位。</p>
-            <p className="properties-panel__hint">如果选择“两框边界最近距离”，系统会直接计算 Player 框和 Target 框边界之间的像素距离，不需要设置 Player/Target 锚点；两框重叠时距离为 0。</p>
+            <p className="properties-panel__hint">未配置标定时，阈值单位是图像像素；配置后，距离和阈值使用世界坐标单位。Move Player 会取该阈值和自身停止距离中的较大值。</p>
+            <p className="properties-panel__hint">如果选择“两框边界最近距离”，系统会直接计算 Player 框和 Target 框边界之间的像素距离；可进一步选择只计算上、下、左或右边。两框重叠时距离为 0。</p>
             <label>
               目标类型
               <CustomSelect
@@ -1517,7 +1505,7 @@ export function PropertiesPanel({
             )}
             {(node.data.controlMode ?? 'continuous') === 'continuous' ? (
               <label>
-                停止距离（进入后释放按键并继续监测）
+                停止距离（与到达阈值取较大值）
                 <NumberInput
                   value={node.data.deadZone}
                   fallback={10}
@@ -1559,11 +1547,19 @@ export function PropertiesPanel({
               </label>
             )}
             <label className="checkbox-row">
-              <span>稳定到达时释放输入（持续闭环继续监测）</span>
+              <span>到达时释放输入</span>
               <input
                 type="checkbox"
                 checked={node.data.stopWhenArrived}
                 onChange={(e) => onChangeNode(updateNodeData(node, { stopWhenArrived: e.target.checked }))}
+              />
+            </label>
+            <label className="checkbox-row">
+              <span>到达后结束节点并继续下一步</span>
+              <input
+                type="checkbox"
+                checked={node.data.exitOnArrival ?? true}
+                onChange={(e) => onChangeNode(updateNodeData(node, { exitOnArrival: e.target.checked }))}
               />
             </label>
           </section>

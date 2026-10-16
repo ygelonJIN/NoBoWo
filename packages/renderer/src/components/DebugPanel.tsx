@@ -14,7 +14,7 @@ const NODE_TYPE_LABELS: Record<string, string> = {
   if: '条件',
   loop: '循环',
   liveVision: '实时检测',
-  gameplayState: '攻防状态',
+  state: '状态',
   spatialDetector: '空间检测',
   movePlayer: '移动玩家',
 };
@@ -97,6 +97,7 @@ function orderWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNo
   const indegree = new Map(nodes.map((n) => [n.id, 0]));
   const adjacency = new Map(nodes.map((n) => [n.id, [] as string[]]));
   for (const edge of edges) {
+    if (edge.sourcePort === 'again' || edge.targetPort === 'again') continue;
     if (byId.has(edge.source) && byId.has(edge.target)) {
       adjacency.get(edge.source)!.push(edge.target);
       indegree.set(edge.target, (indegree.get(edge.target) ?? 0) + 1);
@@ -125,9 +126,11 @@ function getNodeLabel(node: WorkflowNode): string {
     case 'screenshot':
       return node.data.regionMode === 'full' ? '全屏截图' : '选区截图';
     case 'if':
-      return node.data.expression || '条件判断';
+      return '判断上一节点成功/失败';
     case 'loop':
-      return node.data.mode === 'count' ? `循环 ${node.data.count ?? 3} 次` : '条件循环';
+      return node.data.mode === 'count'
+        ? `循环 ${node.data.count ?? 3} 次`
+        : node.data.mode === 'untilBreak' ? '循环直到 Break' : '条件循环';
     case 'scroll': {
       const presetLabel = node.data.preset === 'small' ? '小幅' : node.data.preset === 'medium' ? '中幅' : node.data.preset === 'large' ? '大幅' : '自定义';
       return `滚动 ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;

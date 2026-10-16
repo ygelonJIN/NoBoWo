@@ -3,6 +3,14 @@ import type { MoveDirection, Point2D } from './index';
 /** 持续移动闭环固定按用户约定的每秒30帧执行。 */
 export const CONTINUOUS_MOVE_FPS = 30 as const;
 
+/** 统一 Move Player 的即时停止距离与 Spatial Detector 的稳定到达阈值。 */
+export function resolveContinuousStopDistance(
+  moveDeadZone: number | undefined,
+  spatialArrivalTolerance: number | undefined,
+): number {
+  return Math.max(0, moveDeadZone ?? 0, spatialArrivalTolerance ?? 0);
+}
+
 export type ContinuousMoveFrameInput = {
   distance: number;
   direction: Point2D;
@@ -13,8 +21,8 @@ export type ContinuousMoveDecision = {
   direction: MoveDirection;
   action: 'hold' | 'release';
   reason: 'no_spatial' | 'manual_stop' | 'within_stop_distance' | 'arrived' | 'move';
-  /** 持续控制帧只决定本帧输入，不产生节点终止条件。 */
-  shouldContinue: true;
+  /** 到达并启用 exitOnArrival 时为 false，表示结束持续移动并继续后续节点。 */
+  shouldContinue: boolean;
 };
 
 export function directionFromVector(vector: Point2D): Exclude<MoveDirection, 'stop'> | 'stop' {
@@ -33,14 +41,18 @@ export function decideContinuousMoveFrame(
     direction: MoveDirection;
     stopDistance: number;
     releaseWhenArrived: boolean;
+    exitOnArrival: boolean;
   },
 ): ContinuousMoveDecision {
-  const release = (reason: ContinuousMoveDecision['reason']): ContinuousMoveDecision => ({
-    direction: 'stop',
-    action: 'release',
-    reason,
-    shouldContinue: true,
-  });
+  const release = (reason: ContinuousMoveDecision['reason']): ContinuousMoveDecision => {
+    const reachedTarget = reason === 'within_stop_distance' || reason === 'arrived';
+    return {
+      direction: 'stop',
+      action: 'release',
+      reason,
+      shouldContinue: !(options.exitOnArrival && reachedTarget),
+    };
+  };
 
   if (!spatial) return release('no_spatial');
   if (spatial.distance <= Math.max(0, options.stopDistance)) return release('within_stop_distance');

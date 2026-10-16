@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CONTINUOUS_MOVE_FPS, decideContinuousMoveFrame } from '../dist/movementControl.js';
+import {
+  CONTINUOUS_MOVE_FPS,
+  decideContinuousMoveFrame,
+  resolveContinuousStopDistance,
+} from '../dist/movementControl.js';
 
 const options = {
   directionMode: 'auto',
   direction: 'stop',
   stopDistance: 10,
   releaseWhenArrived: true,
+  exitOnArrival: false,
 };
 
 const frame = (distance, arrived = false) => ({
@@ -17,6 +22,12 @@ const frame = (distance, arrived = false) => ({
 
 test('continuous movement runs at the required 30 frames per second', () => {
   assert.equal(CONTINUOUS_MOVE_FPS, 30);
+});
+
+test('stop distance accepts either Move Player or Spatial Detector configuration', () => {
+  assert.equal(resolveContinuousStopDistance(80, 10), 80);
+  assert.equal(resolveContinuousStopDistance(10, 80), 80);
+  assert.equal(resolveContinuousStopDistance(undefined, 80), 80);
 });
 
 test('continuous movement holds across distant frames without terminating', () => {
@@ -52,5 +63,46 @@ test('missing spatial data releases input without ending continuous control', ()
   const decision = decideContinuousMoveFrame(null, options);
   assert.equal(decision.action, 'release');
   assert.equal(decision.reason, 'no_spatial');
+  assert.equal(decision.shouldContinue, true);
+});
+
+test('entering the stop distance ends continuous movement when exitOnArrival is enabled', () => {
+  const decision = decideContinuousMoveFrame(frame(10), { ...options, exitOnArrival: true });
+  assert.deepEqual(decision, {
+    direction: 'stop',
+    action: 'release',
+    reason: 'within_stop_distance',
+    shouldContinue: false,
+  });
+});
+
+test('a stop distance of 80 ends movement before entering the target box', () => {
+  const decision = decideContinuousMoveFrame(frame(75), {
+    ...options,
+    stopDistance: 80,
+    exitOnArrival: true,
+  });
+  assert.equal(decision.action, 'release');
+  assert.equal(decision.reason, 'within_stop_distance');
+  assert.equal(decision.shouldContinue, false);
+});
+
+test('stable arrival ends continuous movement when exitOnArrival is enabled', () => {
+  const decision = decideContinuousMoveFrame(frame(12, true), { ...options, exitOnArrival: true });
+  assert.deepEqual(decision, {
+    direction: 'stop',
+    action: 'release',
+    reason: 'arrived',
+    shouldContinue: false,
+  });
+});
+
+test('disabling stopWhenArrived keeps monitoring after spatial arrival outside the stop distance', () => {
+  const decision = decideContinuousMoveFrame(frame(12, true), {
+    ...options,
+    releaseWhenArrived: false,
+    exitOnArrival: true,
+  });
+  assert.equal(decision.action, 'hold');
   assert.equal(decision.shouldContinue, true);
 });

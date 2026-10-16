@@ -771,6 +771,13 @@ textarea {
 .workflow-edge--branch-false {
   stroke: rgba(var(--rgb-danger-hot), 0.55);
 }
+.workflow-edge--loop-back {
+  stroke: var(--color-purple);
+  stroke-dasharray: 9 7;
+}
+.workflow-edge--loop-next {
+  stroke: rgba(var(--rgb-success), 0.72);
+}
 .workflow-edge__label {
   font-size: 12px;
   font-weight: 700;
@@ -797,6 +804,8 @@ textarea {
     box-shadow 120ms ease,
     background 120ms ease,
     opacity 120ms ease;
+  overflow: hidden;
+  padding: 0;
 }
 .node-handle:hover {
   transform: scale(1.18);
@@ -831,9 +840,45 @@ textarea {
 }
 .node-handle--if-true {
   top: 25%;
+  background: var(--color-success);
 }
 .node-handle--if-false {
   top: 75%;
+  background: var(--color-danger-hot);
+}
+.node-handle--loop-begin-in,
+.node-handle--loop-down-again {
+  top: 32%;
+}
+.node-handle--loop-begin-again,
+.node-handle--loop-down-next {
+  top: 72%;
+}
+.node-handle--loop-begin-again {
+  background: var(--color-purple);
+}
+.node-handle--loop-down-again {
+  background: var(--color-purple);
+}
+.node-handle--loop-down-next {
+  background: rgba(var(--rgb-success), 0.9);
+}
+.workflow-node--loop .node-handle {
+  background: var(--color-purple);
+}
+.node-handle__label {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(var(--rgb-black), 0.45);
 }
 .node-handle--source.node-handle--snap,
 .node-handle--target.node-handle--snap {

@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 contextBridge.exposeInMainWorld('workflowAPI', {
+  getExecutorVersion: (): Promise<string> => ipcRenderer.invoke('workflow:getExecutorVersion'),
   getState: (): Promise<WorkflowRunSnapshot> => ipcRenderer.invoke('workflow:getState'),
   run: (workflow: WorkflowDocument): Promise<WorkflowRunHandle> => ipcRenderer.invoke('workflow:run', workflow),
   pause: (): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke('workflow:pause'),

@@ -41,6 +41,7 @@ declare global {
   interface Window {
     electronAPI: Record<string, never>;
     workflowAPI?: {
+      getExecutorVersion?: () => Promise<string>;
       getState: () => Promise<WorkflowRunSnapshot>;
       run: (workflow: WorkflowDocument) => Promise<WorkflowRunHandle & { runMode?: 'local' | 'stream' }>;
       pause: () => Promise<{ ok: boolean; message?: string }>;

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   calculateSpatialMovement,
+  closestPointsBetweenBoxes,
   closestPointOnPolyline,
 } from '../dist/spatialGeometry.js';
 
@@ -39,4 +40,18 @@ test('movement becomes neutral inside the dead zone', () => {
     brakeDistance: 120,
   });
   assert.deepEqual(movement, { vector: { x: 0, y: 0 }, magnitude: 0 });
+});
+
+test('selected target edge ignores nearer perpendicular side edges', () => {
+  const playerBox = [150, 150, 20, 20];
+  const targetBox = [100, 100, 200, 20];
+
+  const nearest = closestPointsBetweenBoxes(playerBox, targetBox);
+  const top = closestPointsBetweenBoxes(playerBox, targetBox, 'top');
+  const bottom = closestPointsBetweenBoxes(playerBox, targetBox, 'bottom');
+
+  assert.equal(nearest.distance, 30);
+  assert.equal(top.distance, 50);
+  assert.equal(bottom.distance, 30);
+  assert.deepEqual(top.target, { x: 160, y: 100 });
 });

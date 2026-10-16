@@ -44,6 +44,12 @@ const CONTROL_WINDOW_ACTIVATE_MS = 1000;
 
 type Point = { x: number; y: number };
 type ContextMenu = { x: number; y: number; edgeId?: string };
+type ConnectionSnap = {
+  node: WorkflowNode;
+  targetPort: 'in' | 'again';
+  targetPoint: Point;
+  distance: number;
+};
 
 const defaultSeedNodes: WorkflowNode[] = [createDefaultNode('click', 1), createDefaultNode('wait', 2), createDefaultNode('loop', 3)];
 
@@ -125,7 +131,7 @@ function getSourcePoint(node: WorkflowNode, sourcePort?: string): Point {
   const x = node.position.x + (node.width ?? NODE_WIDTH);
   const centerY = node.position.y + (node.height ?? NODE_HEIGHT) / 2;
 
-  if (node.type === 'if' && sourcePort) {
+  if ((node.type === 'if' || (node.type === 'state' && node.data.mode === 'branch')) && sourcePort) {
     const nodeHeight = node.height ?? NODE_HEIGHT;
     if (sourcePort === 'true') {
       return { x, y: node.position.y + nodeHeight * 0.25 };
@@ -133,12 +139,24 @@ function getSourcePoint(node: WorkflowNode, sourcePort?: string): Point {
       return { x, y: node.position.y + nodeHeight * 0.75 };
     }
   }
+  if (node.type === 'loop' && node.data.role === 'down' && sourcePort) {
+    const nodeHeight = node.height ?? NODE_HEIGHT;
+    if (sourcePort === 'again') return { x, y: node.position.y + nodeHeight * 0.32 };
+    if (sourcePort === 'next') return { x, y: node.position.y + nodeHeight * 0.72 };
+  }
 
   return { x, y: centerY };
 }
 
-function getTargetPoint(node: WorkflowNode): Point {
-  return { x: node.position.x, y: node.position.y + (node.height ?? NODE_HEIGHT) / 2 };
+function getTargetPoint(node: WorkflowNode, targetPort = 'in'): Point {
+  const nodeHeight = node.height ?? NODE_HEIGHT;
+  if (node.type === 'loop' && node.data.role === 'begin') {
+    return {
+      x: node.position.x,
+      y: node.position.y + nodeHeight * (targetPort === 'again' ? 0.72 : 0.32),
+    };
+  }
+  return { x: node.position.x, y: node.position.y + nodeHeight / 2 };
 }
 
 function getNodeBounds(node: WorkflowNode) {
@@ -150,20 +168,25 @@ function getNodeBounds(node: WorkflowNode) {
   };
 }
 
-function getConnectionSnap(nodes: WorkflowNode[], sourceId: string, point: Point, viewport: Point, zoom: number) {
+function getConnectionSnap(nodes: WorkflowNode[], sourceId: string, point: Point, viewport: Point, zoom: number): ConnectionSnap | null {
   const canvasPoint = clientToCanvas(point, viewport, zoom);
-  let nearest: WorkflowNode | null = null;
+  let nearest: ConnectionSnap | null = null;
   let nearestDistance = SNAP_RADIUS;
   for (const node of nodes) {
     if (node.id === sourceId) continue;
-    const target = getTargetPoint(node);
-    const distance = Math.hypot(canvasPoint.x - target.x, canvasPoint.y - target.y);
-    if (distance < nearestDistance) {
-      nearest = node;
-      nearestDistance = distance;
+    const targetPorts: Array<'in' | 'again'> = node.type === 'loop' && node.data.role === 'begin'
+      ? ['in', 'again']
+      : ['in'];
+    for (const targetPort of targetPorts) {
+      const targetPoint = getTargetPoint(node, targetPort);
+      const distance = Math.hypot(canvasPoint.x - targetPoint.x, canvasPoint.y - targetPoint.y);
+      if (distance < nearestDistance) {
+        nearest = { node, targetPort, targetPoint, distance };
+        nearestDistance = distance;
+      }
     }
   }
-  return nearest ? { node: nearest, targetPoint: getTargetPoint(nearest), distance: nearestDistance } : null;
+  return nearest;
 }
 
 function hasNodeOverlap(nodes: WorkflowNode[], activeNode: WorkflowNode) {
@@ -224,9 +247,11 @@ function getNodeSummary(node: WorkflowNode): string {
         ? '全屏截图'
         : '选区截图';
     case 'if':
-      return node.data.expression || '条件判断';
+      return '判断上一节点成功/失败';
     case 'loop':
-      return node.data.mode === 'count' ? `循环 ${node.data.count ?? 3} 次` : '条件循环';
+      return node.data.mode === 'count'
+        ? `循环 ${node.data.count ?? 3} 次`
+        : node.data.mode === 'untilBreak' ? '循环直到 Break' : '条件循环';
     case 'scroll': {
       const presetLabel = node.data.preset === 'small' ? '小幅' : node.data.preset === 'medium' ? '中幅' : node.data.preset === 'large' ? '大幅' : '自定义';
       return `滚动${directionLabel(node.data.direction)} · ${presetLabel}${node.data.preset === 'custom' ? ` ${node.data.customAmount ?? 300}` : ''}`;
@@ -247,10 +272,12 @@ function getNodeSummary(node: WorkflowNode): string {
       return `实时检测 · ${node.data.detectMode === 'all' ? 'YOLO+模板+OCR' : node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'ocr' ? 'OCR' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${formatFrameRateSetting(node.data.fps)}`;
     case 'spatialDetector':
       return `空间检测 · ${(node.data.captureMode ?? 'live') === 'live' ? `实时取景（${formatFrameRateSetting(node.data.fps)}）` : '单帧'} · ${node.data.playerLabel || 'player'} → ${(node.data.targetMode ?? 'detection') === 'polyline' ? '三分线折线' : (node.data.targetLabel || 'target')} · ${node.data.calibration ? '世界坐标' : '图像坐标'}`;
-    case 'gameplayState':
-      return `攻防状态 · ${(node.data.captureMode ?? 'frame') === 'live' ? `实时（${formatFrameRateSetting(node.data.fps)}）` : '单帧'} · ${node.data.offenseLabel || 'offense'} / ${node.data.defenseLabel || 'defense'} · 确认 ${node.data.confirmFrames ?? 3} 帧 / 保持 ${node.data.holdFrames ?? 2} 帧`;
+    case 'state':
+      return node.data.mode === 'branch'
+        ? `State 判断 · ${node.data.stateALabel || '状态 A'} / ${node.data.stateBLabel || '状态 B'}`
+        : `State ${node.data.switchTo === 'toggle' ? '切换到另一边' : `切换到 · ${node.data.switchTo === 'stateA' ? node.data.stateALabel || '状态 A' : node.data.stateBLabel || '状态 B'}`}`;
     case 'movePlayer':
-      return `移动 · ${(node.data.controlMode ?? 'continuous') === 'continuous' ? `永久持续（停止距离 ${node.data.deadZone ?? 10}，直到手动停止）` : '单次脉冲'} · ${node.data.directionMode === 'auto' ? '自动方向' : node.data.direction} · ${node.data.control === 'keyboard' ? '键盘' : node.data.control === 'gamepadAnalog' ? 'PS5 模拟摇杆' : '左摇杆方向'}`;
+      return `移动 · ${(node.data.controlMode ?? 'continuous') === 'continuous' ? `持续移动（停止距离 ${node.data.deadZone ?? 10}，${(node.data.exitOnArrival ?? true) ? '到达后继续下一步' : '直到手动停止'}）` : '单次脉冲'} · ${node.data.directionMode === 'auto' ? '自动方向' : node.data.direction} · ${node.data.control === 'keyboard' ? '键盘' : node.data.control === 'gamepadAnalog' ? 'PS5 模拟摇杆' : '左摇杆方向'}`;
     case 'recognize':
       return '';
   }
@@ -413,7 +440,10 @@ export function App() {
     const off = window.workflowAPI.onEvent((event) => {
       if (event.t === 'start') {
         clearVisionOverlay('workflow:');
-        setWorkflowRunLogs([`[${new Date().toLocaleTimeString()}] 开始运行（${event.nodeCount} 个节点）`]);
+        setWorkflowRunLogs([
+          `[${new Date().toLocaleTimeString()}] 开始运行（${event.nodeCount} 个节点）`,
+          `[${new Date().toLocaleTimeString()}] 执行器：${event.message ?? '旧版本（未返回版本号）'}`,
+        ]);
       } else if (event.t === 'log') {
         setWorkflowRunLogs((current) => [...current.slice(-199), `[${new Date().toLocaleTimeString()}] ${event.message}`]);
       } else if (event.t === 'nodeStart') {
@@ -738,7 +768,7 @@ export function App() {
       }
       if (connecting) {
         const snap = getConnectionSnap(nodes, connecting.sourceId, point, viewport, zoom);
-        setConnecting({ ...connecting, point, snapTargetId: snap?.node.id });
+        setConnecting({ ...connecting, point, snapTargetId: snap?.node.id, targetHandleId: snap?.targetPort ?? 'in' });
       }
     },
     [connecting, dragging, getLocalPoint, panning, viewport, zoom],
@@ -751,9 +781,10 @@ export function App() {
         const snap = getConnectionSnap(nodes, connecting.sourceId, point, viewport, zoom);
         if (snap && snap.node.id !== connecting.sourceId) {
           setEdges((current) => {
-            if (current.some((edge) => edge.source === connecting.sourceId && edge.target === snap.node.id && edge.sourcePort === connecting.sourceHandleId)) return current;
             const sourcePort = connecting.sourceHandleId !== 'out' ? connecting.sourceHandleId : undefined;
-            return [...current, { id: `edge-${Date.now()}`, source: connecting.sourceId, sourcePort, target: snap.node.id, targetPort: 'in' }];
+            const targetPort = snap.targetPort !== 'in' ? snap.targetPort : undefined;
+            if (current.some((edge) => edge.source === connecting.sourceId && edge.target === snap.node.id && edge.sourcePort === sourcePort && edge.targetPort === targetPort)) return current;
+            return [...current, { id: `edge-${Date.now()}`, source: connecting.sourceId, sourcePort, target: snap.node.id, targetPort }];
           });
         }
       }
@@ -848,9 +879,22 @@ export function App() {
       });
       return;
     }
+    const executorVersion = await window.workflowAPI.getExecutorVersion?.();
+    if (executorVersion !== 'state-v9') {
+      setWorkflowRunNotice({
+        main: '当前正在使用旧执行器，已阻止运行',
+        hint: `检测到 ${executorVersion ?? '未知版本'}，请按 Cmd+Q 完全退出应用后重新启动`,
+      });
+      return;
+    }
     const result = await window.workflowAPI.run({ version: 1, nodes, edges });
     if (!result.started) {
       setWorkflowRunNotice({ main: result.message ?? '工作流启动失败', hint: '已有工作流在执行中，可在控制面板点击「继续」或「停止」' });
+    } else if (result.executorVersion !== 'state-v9') {
+      setWorkflowRunNotice({
+        main: '当前正在使用旧执行器',
+        hint: '请完全退出应用后重新启动；仅点击运行不会重新加载 Electron 主进程',
+      });
     } else {
       setWorkflowRunNotice(null);
       setDebugPanelOpen(result.runMode !== 'local');
@@ -1102,8 +1146,8 @@ export function App() {
                 </div>
               </div>
               <div className="toolbar__actions">
-                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad', 'gameplayState', 'spatialDetector', 'movePlayer'] as WorkflowNode['type'][]).map((type) => (
-                  <button key={type} onClick={() => addNode(type)}>{type === 'loop' ? 'loop' : type === 'liveVision' ? 'liveVision' : type}</button>
+                {(['recognize', 'click', 'wait', 'screenshot', 'if', 'loop', 'scroll', 'keyboard', 'liveVision', 'gamepad', 'state', 'spatialDetector', 'movePlayer'] as WorkflowNode['type'][]).map((type) => (
+                  <button key={type} onClick={() => addNode(type)}>{type === 'state' ? 'State' : type}</button>
                 ))}
               </div>
             </div>
@@ -1117,7 +1161,7 @@ export function App() {
               const target = nodes.find((node) => node.id === edge.target);
               if (!source || !target) return null;
               const start = getSourcePoint(source, edge.sourcePort);
-              const end = getTargetPoint(target);
+              const end = getTargetPoint(target, edge.targetPort);
               const isSelected = selectedEdgeId === edge.id;
               const isDisabled = source.enabled === false || target.enabled === false;
               const branchClass =
@@ -1125,8 +1169,14 @@ export function App() {
                   ? 'workflow-edge--branch-true'
                   : source.type === 'if' && edge.sourcePort === 'false'
                     ? 'workflow-edge--branch-false'
-                    : '';
-              const d = `M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`;
+                    : source.type === 'loop' && edge.sourcePort === 'again'
+                      ? 'workflow-edge--loop-back'
+                      : source.type === 'loop' && edge.sourcePort === 'next'
+                        ? 'workflow-edge--loop-next'
+                        : '';
+              const d = branchClass === 'workflow-edge--loop-back'
+                ? `M ${start.x} ${start.y} C ${start.x + 180} ${start.y + 160}, ${end.x - 180} ${end.y + 160}, ${end.x} ${end.y}`
+                : `M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`;
               return (
                 <g key={edge.id} className={`workflow-edge-group ${isSelected ? 'workflow-edge-group--selected' : ''} ${isDisabled ? 'workflow-edge-group--disabled' : ''}`}>
                   <path className="workflow-edge workflow-edge--hit" d={d} onClick={(e) => handleEdgePointerDown(e, edge.id)} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelectedEdgeId(edge.id); const point = getLocalPoint(e); setContextMenu({ x: point.x, y: point.y, edgeId: edge.id }); }} />
@@ -1137,9 +1187,9 @@ export function App() {
             {connecting && (() => {
               const source = nodes.find((node) => node.id === connecting.sourceId);
               if (!source) return null;
-              const start = getSourcePoint(source);
+              const start = getSourcePoint(source, connecting.sourceHandleId);
               const snappedTarget = connecting.snapTargetId ? nodes.find((node) => node.id === connecting.snapTargetId) : null;
-              const end = snappedTarget ? getTargetPoint(snappedTarget) : clientToCanvas(connecting.point, viewport, zoom);
+              const end = snappedTarget ? getTargetPoint(snappedTarget, connecting.targetHandleId) : clientToCanvas(connecting.point, viewport, zoom);
               return <path className="workflow-edge workflow-edge--draft" d={`M ${start.x} ${start.y} C ${start.x + 80} ${start.y}, ${end.x - 80} ${end.y}, ${end.x} ${end.y}`} />;
             })()}
           </g>
@@ -1191,29 +1241,65 @@ export function App() {
               ) : (
                 <div className="workflow-node__body">{getNodeSummary(node)}</div>
               )}
-              {node.type === 'if' ? (
+              {node.type === 'if' || (node.type === 'state' && node.data.mode === 'branch') ? (
                 <>
                   <button
                     className={`node-handle node-handle--source node-handle--if node-handle--if-true ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
-                    aria-label="连接输出（真）"
-                    title="条件为真时走这条线"
+                    aria-label="连接状态 A 输出"
+                    title={node.type === 'state' ? `当前为${node.data.stateALabel || '状态 A'}时走这条线` : '条件为真时走这条线'}
                     onMouseDown={(event) => handleSourcePointerDown(event, node, 'true')}
-                  />
+                  >
+                    <span className="node-handle__label">{node.type === 'state' ? 'A' : 'T'}</span>
+                  </button>
                   <button
                     className={`node-handle node-handle--source node-handle--if node-handle--if-false ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
-                    aria-label="连接输出（假）"
-                    title="条件为假时走这条线"
+                    aria-label="连接状态 B 输出"
+                    title={node.type === 'state' ? `当前为${node.data.stateBLabel || '状态 B'}时走这条线` : '条件为假时走这条线'}
                     onMouseDown={(event) => handleSourcePointerDown(event, node, 'false')}
-                  />
+                  >
+                    <span className="node-handle__label">{node.type === 'state' ? 'B' : 'F'}</span>
+                  </button>
+                </>
+              ) : node.type === 'loop' && node.data.role === 'down' ? (
+                <>
+                  <button
+                    className={`node-handle node-handle--source node-handle--loop node-handle--loop-down-again ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
+                    aria-label="连接回环输出"
+                    title="回到配对 Loop Begin，继续下一轮循环"
+                    onMouseDown={(event) => handleSourcePointerDown(event, node, 'again')}
+                  >
+                    <span className="node-handle__label">○</span>
+                  </button>
+                  <button
+                    className={`node-handle node-handle--source node-handle--loop node-handle--loop-down-next ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
+                    aria-label="连接顺序输出"
+                    title="循环结束后继续执行后续节点"
+                    onMouseDown={(event) => handleSourcePointerDown(event, node, 'next')}
+                  >
+                    <span className="node-handle__label">—</span>
+                  </button>
                 </>
               ) : (
                 <button
                   className={`node-handle node-handle--source ${connecting?.snapTargetId === node.id ? 'node-handle--snap' : ''}`}
                   aria-label="连接输出"
-                  onMouseDown={(event) => handleSourcePointerDown(event, node)}
-                />
+                  title={node.type === 'loop' ? '连接循环体第一个节点' : '连接后继节点；连接多个后继时将同时并行执行'}
+                  onMouseDown={(event) => handleSourcePointerDown(event, node, node.type === 'loop' ? 'body' : 'out')}
+                >
+                </button>
               )}
-              <span className={`node-handle node-handle--target ${isSnapTarget ? 'node-handle--snap' : ''}`} aria-hidden="true" />
+              {node.type === 'loop' && node.data.role !== 'down' ? (
+                <>
+                  <span className={`node-handle node-handle--target node-handle--loop-begin-in ${isSnapTarget ? 'node-handle--snap' : ''}`} title="顺序进入 Loop">
+                    <span className="node-handle__label">—</span>
+                  </span>
+                  <span className={`node-handle node-handle--target node-handle--loop-begin-again ${isSnapTarget ? 'node-handle--snap' : ''}`} title="Loop Down 回环入口">
+                    <span className="node-handle__label">○</span>
+                  </span>
+                </>
+              ) : (
+                <span className={`node-handle node-handle--target ${isSnapTarget ? 'node-handle--snap' : ''}`} aria-hidden="true" />
+              )}
             </div>
             );
           })}

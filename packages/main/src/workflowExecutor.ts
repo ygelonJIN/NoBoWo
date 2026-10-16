@@ -1,10 +1,15 @@
 import { app, desktopCapturer, screen } from 'electron';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import {
   buildSpatialOverlayMarkers,
+  canRouteFailureToIf,
+  classifyLoopBodyTarget,
+  combineParallelWorkflowChainEnds,
+  createParallelWorkflowContexts,
   calculateSpatialMovement,
   closestPointOnBox,
   closestPointOnPolyline,
@@ -13,8 +18,16 @@ import {
   createPartialSpatialResult,
   decideContinuousMoveFrame,
   directionFromVector,
+  findWorkflowEdgeBySource,
+  findWorkflowEdgesBySource,
+  ifBranchForPreviousStatus,
+  isUntilBreakLoop,
   normalizeVector,
-  updateGameplayStateTracker,
+  resolveContinuousStopDistance,
+  resolveLoopPair,
+  runParallelWorkflowBranches,
+  type WorkflowChainEnd,
+  WorkflowStateMachine,
   resolveFrameRateSetting,
   solveHomography,
   summarizeSpatialObservations,
@@ -23,9 +36,6 @@ import {
 } from '@nobowo/core';
 import type {
   CloudApiProfile,
-  GameplayStateNode,
-  GameplayStateTracker,
-  GameplayStateValue,
   LegacyFrameRateSetting,
   LoopNode,
   MoveDirection,
@@ -53,6 +63,8 @@ import type {
   WorkflowRunHandle,
   WorkflowRunSnapshot,
   WorkflowRunStatus,
+  WorkflowStateNode,
+  WorkflowStateValue,
   YoloDetection,
   YoloModel,
 } from '@nobowo/core';
@@ -68,6 +80,8 @@ const STRATEGY_NAMES: Record<RecognizeStrategyKey, string> = {
   ocr: 'OCR',
   cloudApi: '云端 API',
 };
+
+export const WORKFLOW_EXECUTOR_VERSION = 'state-v9';
 
 // ===== 只读存储辅助（与 main.ts 保持一致；执行引擎运行时只读不写这些数据）=====
 
@@ -185,9 +199,9 @@ async function ensureOcrLangData(): Promise<{ langPath: string; gzip: boolean }>
 type RunContext = {
   lastFrame: string | null;
   lastRecognize: { x: number; y: number; nodeId: string; strategy?: RecognizeStrategyKey } | null;
+  /** 直接前一个节点的最终结果，If 默认只根据它选择 True/False。 */
+  lastResult: NodeRunResult | null;
   lastSpatial: SpatialResult | null;
-  lastGameplayState: GameplayStateValue | null;
-  lastGameplayStateChanged: boolean;
   lastCapture: {
     source: 'screen' | 'window' | 'stream';
     sourceKind: VisionOverlaySourceKind;
@@ -204,6 +218,23 @@ type RunContext = {
   } | null;
 };
 
+function createRunContext(): RunContext {
+  return {
+    lastFrame: null,
+    lastRecognize: null,
+    lastResult: null,
+    lastSpatial: null,
+    lastCapture: null,
+  };
+}
+
+function cloneRunContext(context: RunContext): RunContext {
+  return {
+    ...context,
+    lastCapture: context.lastCapture ? { ...context.lastCapture } : null,
+  };
+}
+
 type SpatialCaptureContext = {
   width: number;
   height: number;
@@ -213,13 +244,16 @@ type SpatialCaptureContext = {
 
 type EvalContext = {
   last: { x: number; y: number; nodeId: string; strategy?: RecognizeStrategyKey } | null;
+  previous: NodeRunResult | null;
   lastOk: boolean;
   frame: boolean;
   spatial: SpatialResult | null;
-  gameplayState: GameplayStateValue | null;
-  gameplayStateChanged: boolean;
+  state: WorkflowStateValue;
   results: Record<string, NodeRunResult>;
 };
+
+type ChainEnd = WorkflowChainEnd;
+type ChainAdvance = { kind: 'advance' } | { kind: 'end'; end: ChainEnd };
 
 type TemplateStrategyConfig = {
   templateId?: string;
@@ -383,24 +417,24 @@ export class WorkflowExecutor {
   private resumeRetry = false;
   private runGeneration = 0;
   private pauseWaiters: Array<() => void> = [];
-  private currentNodeId: string | null = null;
+  private readonly runContexts = new AsyncLocalStorage<RunContext>();
+  private rootContext: RunContext = createRunContext();
+  private currentNodeIds = new Set<string>();
   private currentStep = 0;
-  private context: RunContext = {
-    lastFrame: null,
-    lastRecognize: null,
-    lastSpatial: null,
-    lastGameplayState: null,
-    lastGameplayStateChanged: false,
-    lastCapture: null,
-  };
   private spatialStableFrames: Record<string, number> = {};
   private spatialObservations: Record<string, SpatialObservationStore> = {};
-  private gameplayStateTrackers: Record<string, GameplayStateTracker> = {};
+  private readonly workflowState = new WorkflowStateMachine();
+  private activeLoopIds = new Set<string>();
   private yoloSession: YoloInferenceSession | null = null;
   private yoloSessionKey = '';
   private nodeStates: Record<string, NodeRunStatus> = {};
   private nodeResults: Record<string, NodeRunResult> = {};
+  private handledFailureNodeIds = new Set<string>();
   private onEventCallback: ((event: WorkflowRunEvent) => void) | null = null;
+
+  private get context(): RunContext {
+    return this.runContexts.getStore() ?? this.rootContext;
+  }
 
   onEvent(callback: (event: WorkflowRunEvent) => void): void {
     this.onEventCallback = callback;
@@ -466,33 +500,39 @@ export class WorkflowExecutor {
     this.stopped = false;
     this.resumeRetry = false;
     this.pauseWaiters = [];
-    this.currentNodeId = null;
+    this.currentNodeIds.clear();
     this.currentStep = 0;
-    this.context = {
-      lastFrame: null,
-      lastRecognize: null,
-      lastSpatial: null,
-      lastGameplayState: null,
-      lastGameplayStateChanged: false,
-      lastCapture: null,
-    };
-    this.gameplayStateTrackers = {};
+    this.rootContext = createRunContext();
+    this.workflowState.reset();
+    this.activeLoopIds.clear();
     this.spatialStableFrames = {};
     this.spatialObservations = {};
     this.nodeStates = {};
     this.nodeResults = {};
+    this.handledFailureNodeIds.clear();
     this.resetYoloSession();
 
-    this.emit({ t: 'start', runId: this.runId, nodeCount: workflow.nodes.filter((n) => n.enabled !== false).length });
+    this.emit({
+      t: 'start',
+      runId: this.runId,
+      nodeCount: workflow.nodes.filter((n) => n.enabled !== false).length,
+      message: WORKFLOW_EXECUTOR_VERSION,
+    });
+    this.emit({
+      t: 'log',
+      runId: this.runId,
+      level: 'info',
+      message: `执行器已启动：${WORKFLOW_EXECUTOR_VERSION} · 节点级并行分叉 · Loop Down/回边控制`,
+    });
     void this.execute(generation);
-    return { started: true, runId: this.runId };
+    return { started: true, runId: this.runId, executorVersion: WORKFLOW_EXECUTOR_VERSION };
   }
 
   pause(): { ok: boolean; message?: string } {
     if (this.status !== 'running') return { ok: false, message: '当前没有运行中的工作流' };
     this.paused = 'user';
     this.status = 'paused';
-    this.emit({ t: 'pause', runId: this.runId!, nodeId: this.currentNodeId ?? undefined });
+    this.emit({ t: 'pause', runId: this.runId!, nodeId: Array.from(this.currentNodeIds)[0] });
     return { ok: true };
   }
 
@@ -535,7 +575,9 @@ export class WorkflowExecutor {
 
       for (const entry of orderedEntries) {
         if (!isCurrent()) break;
-        await this.executeChain(entry.id, null, generation);
+        await this.runContexts.run(createRunContext(), () =>
+          this.executeChain(entry.id, null, generation, { resetLastResult: true }),
+        );
       }
     } catch (err) {
       if (this.runGeneration !== generation) return;
@@ -549,7 +591,7 @@ export class WorkflowExecutor {
           ok: false,
           nodeCount: workflow.nodes.length,
           failedNodeIds: Object.values(this.nodeResults)
-            .filter((result) => result.status === 'fail')
+            .filter((result) => result.status === 'fail' && !this.handledFailureNodeIds.has(result.nodeId))
             .map((result) => result.nodeId),
           durationMs: Date.now() - startedAt,
           message,
@@ -571,7 +613,7 @@ export class WorkflowExecutor {
     }
 
     const failedIds = Object.values(this.nodeResults)
-      .filter((result) => result.status === 'fail')
+      .filter((result) => result.status === 'fail' && !this.handledFailureNodeIds.has(result.nodeId))
       .map((result) => result.nodeId);
     this.status = 'done';
     this.resetYoloSession();
@@ -612,96 +654,259 @@ export class WorkflowExecutor {
     }
   }
 
-  /** 沿单链执行：loopBackId 指回循环节点时表示一次循环体迭代结束 */
-  private async executeChain(startNodeId: string, loopBackId: string | null, generation: number): Promise<void> {
+  /**
+   * 执行流程链。一个输出端口连接多个后继时，各后继使用独立上下文同时执行。
+   * loopBackId 指回循环节点时表示一次循环体迭代结束。
+   */
+  private async executeChain(
+    startNodeId: string,
+    loopBackId: string | null,
+    generation: number,
+    options: { resetLastResult?: boolean; visitedNodeIds?: ReadonlySet<string> } = {},
+  ): Promise<ChainEnd> {
     const runId = this.runId!;
     const isCurrent = () => this.runGeneration === generation && !this.stopped;
     let current = startNodeId;
+    const visited = new Set(options.visitedNodeIds ?? []);
+    if (options.resetLastResult !== false) this.context.lastResult = null;
+
+    const advance = async (
+      node: WorkflowNode,
+      result: NodeRunResult,
+      nextNodeIds: string[],
+    ): Promise<ChainAdvance> => {
+      const targets = Array.from(new Set(nextNodeIds));
+      if (targets.length === 0) return { kind: 'end', end: 'complete' };
+
+      const reachesLoopBack = loopBackId !== null && targets.includes(loopBackId);
+      const branchTargets = loopBackId ? targets.filter((target) => target !== loopBackId) : targets;
+      if (reachesLoopBack && branchTargets.length === 0) return { kind: 'end', end: 'boundary' };
+
+      if (branchTargets.length > 1 || (reachesLoopBack && branchTargets.length === 1)) {
+        this.emit({
+          t: 'log',
+          runId,
+          level: 'info',
+          message: `并行分叉：${node.title} 同时启动 ${targets.length} 条分支`,
+          nodeId: node.id,
+        });
+        const branchContexts = createParallelWorkflowContexts(
+          this.context,
+          cloneRunContext,
+          branchTargets.length,
+        );
+        const branchLabels: string[] = [];
+        const branchTasks: Array<() => Promise<ChainEnd>> = branchTargets.map((target, index) => async () => {
+          const branchContext = branchContexts[index];
+          const targetNode = this.findNode(target);
+          const label = `${targetNode?.title ?? target} (${target})`;
+          branchLabels[index] = label;
+          this.emit({
+            t: 'log',
+            runId,
+            level: 'info',
+            message: `并行分支启动 [${index + 1}/${targets.length}]：${label}`,
+            nodeId: node.id,
+          });
+          const end = await this.runContexts.run(branchContext, () =>
+            this.executeChain(target, loopBackId, generation, {
+              resetLastResult: false,
+              visitedNodeIds: new Set(visited),
+            }),
+          );
+          const endLabel = end === 'boundary'
+            ? '已到达 Loop Down'
+            : end === 'continue'
+              ? '触发回边，转入下一轮'
+              : end === 'stopped'
+                ? '执行停止'
+                : '普通分支结束，未进入 Loop Down';
+          this.emit({
+            t: 'log',
+            runId,
+            level: end === 'stopped' ? 'warn' : 'info',
+            message: `并行分支结束 [${index + 1}/${targets.length}]：${label} → ${endLabel}`,
+            nodeId: node.id,
+          });
+          return end;
+        });
+        if (reachesLoopBack) {
+          const boundaryIndex = branchTasks.length;
+          const label = `直接连接 ${loopBackId}`;
+          branchLabels[boundaryIndex] = label;
+          branchTasks.push(async () => {
+            this.emit({
+              t: 'log',
+              runId,
+              level: 'info',
+              message: `并行分支启动 [${boundaryIndex + 1}/${targets.length}]：${label} → 已到达 Loop Down`,
+              nodeId: node.id,
+            });
+            return 'boundary';
+          });
+        }
+        const branchRun = await runParallelWorkflowBranches(branchTasks);
+        const branchSummary = branchRun.results
+          .map((end, index) => `${branchLabels[index] ?? `分支${index + 1}`}=${end === 'boundary' ? 'LoopDown' : end === 'continue' ? 'NextIteration' : end}`)
+          .join(' · ');
+        this.emit({
+          t: 'log',
+          runId,
+          level: 'info',
+          message: `并行分叉完成：峰值并发 ${branchRun.maxConcurrent} · ${branchSummary}`,
+          nodeId: node.id,
+        });
+        return { kind: 'end', end: combineParallelWorkflowChainEnds(branchRun.results) };
+      }
+
+      if (branchTargets.length === 1) {
+        current = branchTargets[0];
+        return { kind: 'advance' };
+      }
+      return { kind: 'end', end: reachesLoopBack ? 'boundary' : 'complete' };
+    };
 
     while (current && isCurrent()) {
-      if (!(await this.checkpoint(generation))) return;
+      if (!(await this.checkpoint(generation))) return 'stopped';
+      if (loopBackId !== null && visited.has(current)) {
+        this.emit({
+          t: 'log',
+          runId,
+          level: 'info',
+          message: `循环分支回边：${current} 已在本轮执行，转入下一轮 Loop Body`,
+          nodeId: current,
+        });
+        return 'continue';
+      }
       const node = this.workflow!.nodes.find((item) => item.id === current);
       if (!node) {
         this.emit({ t: 'log', runId, level: 'warn', message: `找不到节点：${current}` });
-        return;
+        return 'complete';
       }
 
       if (node.enabled === false) {
+        visited.add(node.id);
         this.nodeStates[node.id] = 'skipped';
         const result: NodeRunResult = { nodeId: node.id, status: 'skipped', message: '节点已停用，跳过' };
         this.nodeResults[node.id] = result;
+        this.context.lastResult = result;
         this.currentStep += 1;
         this.emit({ t: 'nodeStart', runId, nodeId: node.id, step: this.currentStep, totalSteps: this.workflow?.nodes.length });
         this.emit({ t: 'nodeEnd', runId, nodeId: node.id, result });
-        const next = this.resolveNext(node, result);
-        if (loopBackId && next === loopBackId) return;
-        if (!next) return;
-        current = next;
+        this.emit({
+          t: 'log',
+          runId,
+          level: 'info',
+          message: `分支节点跳过：${node.id} · ${node.title}`,
+          nodeId: node.id,
+        });
+        const next = this.resolveNexts(node, result);
+        const action = await advance(node, result, next);
+        if (action.kind === 'end') return action.end;
         continue;
       }
 
-      this.currentNodeId = node.id;
+      this.currentNodeIds.add(node.id);
+      visited.add(node.id);
       this.nodeStates[node.id] = 'running';
       this.emit({ t: 'nodeStart', runId, nodeId: node.id });
+      this.emit({
+        t: 'log',
+        runId,
+        level: 'info',
+        message: `分支节点开始：${node.id} · ${node.title}`,
+        nodeId: node.id,
+      });
 
       const startedAt = Date.now();
       let result: NodeRunResult;
       try {
-        result = await this.executeNode(node, generation);
+        result = await this.executeNode(node, generation) ?? {
+          nodeId: node.id,
+          status: 'fail',
+          message: `节点类型 ${(node as WorkflowNode & { type: string }).type} 未返回执行结果`,
+        };
       } catch (err) {
         result = { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
       }
       result.elapsedMs = Date.now() - startedAt;
-      this.currentNodeId = null;
+      this.currentNodeIds.delete(node.id);
       this.nodeStates[node.id] = result.status;
       this.nodeResults[node.id] = result;
+      this.context.lastResult = result;
       this.emit({ t: 'nodeEnd', runId, nodeId: node.id, result });
+      this.emit({
+        t: 'log',
+        runId,
+        level: result.status === 'ok' ? 'info' : 'error',
+        message: `分支节点结束：${node.id} · ${node.title} → ${result.status}${result.message ? `（${result.message}）` : ''}`,
+        nodeId: node.id,
+      });
 
+      const next = this.resolveNexts(node, result);
       if (result.status === 'fail') {
+        const nextNodes = next.map((target) => this.findNode(target));
+        if (next.length > 0 && nextNodes.every((nextNode) => canRouteFailureToIf(nextNode))) {
+          this.handledFailureNodeIds.add(node.id);
+          this.emit({
+            t: 'log',
+            runId,
+            level: 'info',
+            message: `节点失败，结果交给 If 判断：${result.message ?? '无失败详情'}`,
+            nodeId: node.id,
+          });
+          const action = await advance(node, result, next);
+          if (action.kind === 'end') return action.end;
+          continue;
+        }
         this.paused = 'fail';
         this.status = 'paused';
         this.emit({ t: 'pause', runId, nodeId: node.id, message: result.message ?? '节点执行失败' });
         await this.waitForResumeOrStop(generation);
-        if (!isCurrent()) return;
+        if (!isCurrent()) return 'stopped';
         if (this.resumeRetry) {
           current = node.id;
           continue;
         }
-        const next = this.resolveNext(node, result);
-        if (loopBackId && next === loopBackId) return;
-        if (!next) return;
-        current = next;
+        const action = await advance(node, result, next);
+        if (action.kind === 'end') return action.end;
         continue;
       }
 
-      const next = this.resolveNext(node, result);
-      if (loopBackId && next === loopBackId) return;
-      if (!next) return;
-      current = next;
+      const action = await advance(node, result, next);
+      if (action.kind === 'end') return action.end;
     }
+    return this.stopped || this.runGeneration !== generation ? 'stopped' : 'complete';
+  }
+
+  private resolveNexts(node: WorkflowNode, result: NodeRunResult): string[] {
+    if (node.type === 'spatialDetector' && result.moveIntegrated) {
+      return this.nextsOf(node.id, 'out').flatMap((moveId) => this.nextsOf(moveId, 'out'));
+    }
+    if (node.type === 'state' && node.data.mode === 'branch') {
+      return this.nextsOf(node.id, result.branch ?? 'false');
+    }
+    if (node.type === 'if') return this.nextsOf(node.id, result.branch ?? 'false');
+    if (node.type === 'loop') {
+      // Loop Down 的回环端口只描述循环结构；顺序端口才是循环结束后的出口。
+      const loop = node as LoopNode;
+      const pair = resolveLoopPair(this.workflow!.nodes, this.workflow!.edges, loop);
+      return pair ? this.nextsOf(pair.down.id, 'next') : [];
+    }
+    return this.nextsOf(node.id, 'out');
   }
 
   private resolveNext(node: WorkflowNode, result: NodeRunResult): string | null {
-    if (node.type === 'spatialDetector' && result.moveIntegrated) {
-      const moveId = this.nextOf(node.id, 'out');
-      return moveId ? this.nextOf(moveId, 'out') : null;
-    }
-    if (node.type === 'if') return this.nextOf(node.id, result.branch ?? 'false');
-    if (node.type === 'loop') {
-      // 循环的出口始终是配对 Down 的 out 端口（Begin 只标记循环体起点）
-      const loop = node as LoopNode;
-      if (loop.data.role === 'down') return this.nextOf(loop.id, 'out');
-      const paired = this.findLoopPair(loop, 'down');
-      return paired ? this.nextOf(paired.id, 'out') : null;
-    }
-    return this.nextOf(node.id, 'out');
+    return this.resolveNexts(node, result)[0] ?? null;
   }
 
-  private nextOf(nodeId: string, port: string): string | null {
-    const edge = this.workflow!.edges.find(
-      (item) => item.source === nodeId && ((item.sourcePort ?? 'out') === port || (port === 'body' && item.sourcePort === 'begin') || (port === 'done' && item.sourcePort === 'down')),
-    );
+  private nextOf(nodeId: string, port: 'out' | 'true' | 'false' | 'body' | 'again' | 'next'): string | null {
+    const edge = findWorkflowEdgeBySource(this.workflow!.edges, nodeId, port);
     return edge?.target ?? null;
+  }
+
+  private nextsOf(nodeId: string, port: 'out' | 'true' | 'false' | 'body' | 'again' | 'next'): string[] {
+    return findWorkflowEdgesBySource(this.workflow!.edges, nodeId, port).map((edge) => edge.target);
   }
 
   // ===== 节点执行 =====
@@ -896,62 +1101,17 @@ export class WorkflowExecutor {
       }
 
       case 'if': {
-        const conditionType = node.data.conditionType ?? 'lastOk';
-        let expr = node.data.expression?.trim() || 'true';
-
-        // Auto-generate expression based on conditionType if not custom
-        if (conditionType !== 'custom') {
-          switch (conditionType) {
-            case 'lastOk':
-              expr = 'ctx.lastOk';
-              break;
-            case 'nodeCheck': {
-              // Find node by title
-              const targetTitle = node.data.targetNodeTitle ?? '';
-              const targetNode = this.workflow?.nodes.find((n) => n.title === targetTitle);
-              expr = targetNode ? `ctx.results['${targetNode.id}']?.status === 'ok'` : 'ctx.lastOk';
-              break;
-            }
-            case 'spatialArrived':
-              expr = 'ctx.spatial?.arrived === true';
-              break;
-            case 'spatialNotArrived':
-              expr = 'ctx.spatial?.arrived !== true';
-              break;
-            case 'gameplayOffense':
-              expr = 'ctx.gameplayState === "offense"';
-              break;
-            case 'gameplayDefense':
-              expr = 'ctx.gameplayState === "defense"';
-              break;
-            case 'gameplayStateChanged':
-              expr = 'ctx.gameplayStateChanged === true';
-              break;
-          }
-        }
-
-        let branch: 'true' | 'false';
-        try {
-          branch = this.evalExpression(expr) ? 'true' : 'false';
-        } catch (err) {
-          return {
-            nodeId: node.id,
-            status: 'fail',
-            message: `表达式求值失败：${err instanceof Error ? err.message : String(err)}`,
-          };
-        }
-
-        const conditionLabel = conditionType === 'lastOk' ? '上一次节点' :
-          conditionType === 'nodeCheck' ? `指定节点：${node.data.targetNodeTitle ?? '未选择'}` :
-          conditionType === 'spatialArrived' ? '空间检测已到达' :
-          conditionType === 'spatialNotArrived' ? '空间检测未到达' :
-          conditionType === 'gameplayOffense' ? '游戏状态为进攻' :
-          conditionType === 'gameplayDefense' ? '游戏状态为防守' :
-          conditionType === 'gameplayStateChanged' ? '攻防状态发生变化' :
-          '自定义条件';
-
-        log('info', `条件「${conditionLabel}」为${branch === 'true' ? '真' : '假'}`);
-        return { nodeId: node.id, status: 'ok', branch, message: `条件「${conditionLabel}」→ ${branch === 'true' ? '真' : '假'}` };
+        // If 只捕获直接前一个节点的最终状态；旧 conditionType/expression 字段仅为数据兼容保留。
+        const previous = this.context.lastResult;
+        const branch = ifBranchForPreviousStatus(previous?.status);
+        const previousLabel = previous ? `${previous.nodeId}${previous.status === 'ok' ? '成功' : '失败'}` : '无上一节点';
+        log('info', `判断上一节点：${previousLabel} → ${branch === 'true' ? 'True' : 'False'}`);
+        return {
+          nodeId: node.id,
+          status: 'ok',
+          branch,
+          message: `上一节点${branch === 'true' ? '成功' : '失败'} → ${branch === 'true' ? 'True' : 'False'}`,
+        };
       }
 
       case 'loop':
@@ -1283,8 +1443,8 @@ export class WorkflowExecutor {
         return { nodeId: node.id, status: 'fail', message: '实时检测被中止', ...processingMetrics(), liveFps: Math.round(frames / Math.max(0.001, (Date.now() - start) / 1000)), liveFrameCount: frames, liveHitCount: hits, liveHitRate: frames > 0 ? hits / frames : 0, liveLatestHit: latestHit ?? undefined };
       }
 
-      case 'gameplayState':
-        return this.executeGameplayState(node, generation);
+      case 'state':
+        return this.executeWorkflowState(node, generation);
 
       case 'spatialDetector':
         return this.executeSpatialDetector(node, generation);
@@ -1303,123 +1463,237 @@ export class WorkflowExecutor {
         }
         return this.runRecognize(node, frame);
       }
-    }
-  }
-
-  /**
-   * pairId 缺失或不一致时，按连线结构推断 Loop Begin/Down 的配对。
-   * 结构约定：Begin.out → 循环体第一个节点 → … → Down.in，Down.out → 循环后继续的节点。
-   */
-  private findLoopPair(node: LoopNode, want: 'begin' | 'down'): LoopNode | undefined {
-    const nodes = this.workflow!.nodes;
-    const others = nodes.filter((candidate): candidate is LoopNode => candidate.type === 'loop' && candidate.id !== node.id && candidate.data.role === want);
-    if (others.length === 0) return undefined;
-    if (others.length === 1) return others[0];
-
-    if (node.data.role === 'begin') {
-      let current = this.nextOf(node.id, 'out');
-      const visited = new Set<string>();
-      while (current && !visited.has(current)) {
-        visited.add(current);
-        const cur = nodes.find((candidate) => candidate.id === current);
-        if (!cur) return undefined;
-        if (cur.type === 'loop') return cur.data.role === 'down' ? (cur as LoopNode) : undefined;
-        current = this.nextOf(cur.id, 'out');
+      default: {
+        const legacyNode = node as unknown as WorkflowNode & { type: string };
+        return {
+          nodeId: legacyNode.id,
+          status: 'fail',
+          message: `节点类型 ${legacyNode.type} 已删除或不受当前执行器支持；请改用 State 节点`,
+        };
       }
-      return undefined;
     }
-
-    const matching = others.filter((candidate) => {
-      let current = this.nextOf(candidate.id, 'out');
-      const visited = new Set<string>();
-      while (current && !visited.has(current)) {
-        visited.add(current);
-        if (current === node.id) return true;
-        const cur = nodes.find((candidateNode) => candidateNode.id === current);
-        if (!cur) return false;
-        if (cur.type === 'loop') return false;
-        current = this.nextOf(cur.id, 'out');
-      }
-      return false;
-    });
-    return matching.length === 1 ? matching[0] : undefined;
   }
 
   private async executeLoop(node: LoopNode, generation: number): Promise<NodeRunResult> {
     const runId = this.runId!;
-    const pairId = node.data.pairId;
-    const other = pairId
-      ? this.workflow!.nodes.find((candidate) => candidate.type === 'loop' && candidate.data.pairId === pairId && candidate.id !== node.id) as LoopNode | undefined
-      : undefined;
-
-    // 优先按 pairId 配对；pairId 缺失或不一致时，按连线结构推断配对
-    let begin: LoopNode | undefined;
-    let down: LoopNode | undefined;
-    if (node.data.role === 'begin') {
-      begin = node;
-      down = other?.data.role === 'down' ? other : this.findLoopPair(node, 'down');
-    } else {
-      down = node;
-      begin = other?.data.role === 'begin' ? other : this.findLoopPair(node, 'begin');
+    const pair = resolveLoopPair(this.workflow!.nodes, this.workflow!.edges, node);
+    if (!pair) return { nodeId: node.id, status: 'fail', message: 'Loop Begin/Down 尚未通过回环端口或 pairId 配对' };
+    const { begin, down } = pair;
+    const feedback = findWorkflowEdgeBySource(this.workflow!.edges, down.id, 'again');
+    const bodyEdge = findWorkflowEdgeBySource(this.workflow!.edges, begin.id, 'body');
+    const nextEdge = findWorkflowEdgeBySource(this.workflow!.edges, down.id, 'next');
+    const untilBreak = isUntilBreakLoop(begin);
+    const hasExplicitLoopPorts = bodyEdge?.sourcePort === 'body'
+      || nextEdge?.sourcePort === 'next'
+      || feedback?.sourcePort === 'again';
+    if (!untilBreak && hasExplicitLoopPorts && (!feedback || feedback.target !== begin.id || (feedback.targetPort ?? 'in') !== 'again')) {
+      return { nodeId: node.id, status: 'fail', message: 'Loop Down 的「回环」必须连接到配对 Loop Begin 的「回环入口」' };
     }
-    if (!begin || !down) return { nodeId: node.id, status: 'fail', message: 'Loop Begin/Down 尚未配对' };
+    if (node.data.role === 'down' && !this.activeLoopIds.has(begin.id)) {
+      return {
+        nodeId: node.id,
+        status: 'ok',
+        message: 'Loop Down 作为汇合边界，跳过循环并继续顺序出口',
+      };
+    }
 
-    const beginNext = this.nextOf(begin.id, 'out');
-    if (!beginNext) return { nodeId: node.id, status: 'fail', message: 'Loop Begin 没有连接循环体' };
+    const ownsLoop = node.data.role === 'begin';
+    if (ownsLoop) {
+      this.activeLoopIds.add(begin.id);
+      this.activeLoopIds.add(down.id);
+    }
 
-    const countLimit = begin.data.mode === 'count' ? Math.max(0, begin.data.count ?? 1) : 10000;
-    const condition = begin.data.conditionText?.trim() || 'false';
-    let executed = 0;
-    this.emit({ t: 'log', runId, level: 'info', message: begin.data.mode === 'count' ? `开始循环 ${countLimit} 次` : `开始条件循环：${condition}`, nodeId: begin.id });
+    try {
+      const beginNext = this.nextOf(begin.id, 'body');
+      if (!beginNext) return { nodeId: node.id, status: 'fail', message: 'Loop Begin 没有连接循环体' };
 
-    while (!this.stopped && this.runGeneration === generation && executed < countLimit) {
-      if (!(await this.checkpoint(generation))) break;
-      if (begin.data.mode === 'condition') {
-        let shouldContinue = false;
-        try {
-          shouldContinue = this.evalExpression(condition);
-        } catch (err) {
-          return { nodeId: node.id, status: 'fail', message: `循环条件求值失败：${err instanceof Error ? err.message : String(err)}` };
+      const countLimit = untilBreak
+        ? Number.POSITIVE_INFINITY
+        : begin.data.mode === 'count' ? Math.max(0, begin.data.count ?? 1) : 10000;
+      const condition = begin.data.conditionText?.trim() || 'false';
+      let executed = 0;
+      this.emit({
+        t: 'log',
+        runId,
+        level: 'info',
+        message: untilBreak
+          ? '开始循环：回边继续，进入 Loop Down 时 Break'
+          : begin.data.mode === 'count' ? `开始循环 ${countLimit} 次` : `开始条件循环：${condition}`,
+        nodeId: begin.id,
+      });
+
+      while (!this.stopped && this.runGeneration === generation && executed < countLimit) {
+        if (!(await this.checkpoint(generation))) break;
+        if (!untilBreak && begin.data.mode === 'condition') {
+          let shouldContinue = false;
+          try {
+            shouldContinue = this.evalExpression(condition);
+          } catch (err) {
+            return { nodeId: node.id, status: 'fail', message: `循环条件求值失败：${err instanceof Error ? err.message : String(err)}` };
+          }
+          if (!shouldContinue) break;
         }
-        if (!shouldContinue) break;
+
+        this.context.lastResult = {
+          nodeId: begin.id,
+          status: 'ok',
+          message: 'Loop Begin 开始本轮循环体',
+        };
+
+        // 结构化循环体允许任意并行分叉，但每条活跃分支都必须最终到达 Loop Down。
+        if (!untilBreak) {
+          this.emit({
+            t: 'log',
+            runId,
+            level: 'info',
+            message: `Loop Body 第 ${executed + 1} 轮开始：入口=${beginNext} · 汇合=${down.id} (${down.title})`,
+            nodeId: begin.id,
+          });
+          const bodyEnd = await this.runContexts.run(cloneRunContext(this.context), () =>
+            this.executeChain(beginNext, down.id, generation, { resetLastResult: false }),
+          );
+          if (bodyEnd === 'stopped') {
+            return {
+              nodeId: node.id,
+              status: 'ok',
+              loopCount: executed,
+              message: '循环已停止',
+            };
+          }
+          if (bodyEnd !== 'boundary' && bodyEnd !== 'continue') {
+            this.emit({
+              t: 'log',
+              runId,
+              level: 'error',
+              message: `Loop Body 第 ${executed + 1} 轮失败：入口=${beginNext} · 预期汇合=${down.id} (${down.title}) · 实际状态=${bodyEnd}`,
+              nodeId: begin.id,
+            });
+            return {
+              nodeId: node.id,
+              status: 'fail',
+              message: `Loop Begin 到 Loop Down 之间没有形成完整循环体：入口 ${beginNext} 的控制分支既未到达 ${down.id} (${down.title})，也未触发下一轮回边`,
+            };
+          }
+          const completionLabel = bodyEnd === 'continue'
+            ? '控制分支触发回边，转入下一轮'
+            : '控制分支已到达 Loop Down';
+          executed++;
+          this.emit({
+            t: 'log',
+            runId,
+            level: 'debug',
+            message: `循环第 ${executed} 次完成：${completionLabel}；普通并行分支允许自行结束`,
+            nodeId: begin.id,
+          });
+          continue;
+        }
+
+        let current: string | null = beginNext;
+        const visited = new Set<string>();
+        while (current && !this.stopped && this.runGeneration === generation) {
+          const action = classifyLoopBodyTarget({
+            current,
+            beginId: begin.id,
+            downId: down.id,
+            beginNext,
+            visited,
+            untilBreak,
+          });
+          if (action.kind === 'error') return { nodeId: node.id, status: 'fail', message: action.message };
+          if (action.kind === 'break') {
+            executed++;
+            this.emit({ t: 'log', runId, level: 'info', message: '进入 Loop Down：Break，结束循环', nodeId: down.id });
+            return {
+              nodeId: node.id,
+              status: 'ok',
+              loopCount: executed,
+              message: '循环通过 Break 结束，继续 Loop Down 后续步骤',
+            };
+          }
+          if (action.kind === 'end-iteration') {
+            current = down.id;
+            break;
+          }
+          if (action.kind === 'continue') {
+            executed++;
+            visited.clear();
+            this.emit({
+              t: 'log',
+              runId,
+              level: 'info',
+              message: `循环体回边：Continue 到 ${action.target}`,
+              nodeId: node.id,
+            });
+            current = action.target;
+            continue;
+          }
+
+          visited.add(action.target);
+          const currentNode = this.findNode(action.target);
+          if (!currentNode) return { nodeId: node.id, status: 'fail', message: `循环体节点不存在：${current}` };
+          const result = await this.executeNodeWithEvents(currentNode, generation);
+          const next = this.resolveNext(currentNode, result) ?? null;
+          if (result.status === 'fail') {
+            const nextNode = next ? this.findNode(next) : null;
+            if (!canRouteFailureToIf(nextNode)) {
+              return { nodeId: node.id, status: 'fail', message: result.message ?? '循环体执行失败' };
+            }
+            this.handledFailureNodeIds.add(currentNode.id);
+            this.emit({
+              t: 'log',
+              runId,
+              level: 'info',
+              message: `循环体节点失败，结果交给 If 判断：${result.message ?? '无失败详情'}`,
+              nodeId: currentNode.id,
+            });
+          }
+          current = next;
+        }
+
       }
 
-      let current: string | null = beginNext;
-      const visited = new Set<string>();
-      while (current && current !== down.id && !this.stopped && this.runGeneration === generation) {
-        if (visited.has(current)) return { nodeId: node.id, status: 'fail', message: '循环体出现额外回路，请只连接到 Loop Down' };
-        visited.add(current);
-        const currentNode = this.findNode(current);
-        if (!currentNode) return { nodeId: node.id, status: 'fail', message: `循环体节点不存在：${current}` };
-        const result = await this.executeNodeWithEvents(currentNode, generation);
-        if (result.status === 'fail') return { nodeId: node.id, status: 'fail', message: result.message ?? '循环体执行失败' };
-        current = this.resolveNext(currentNode, result) ?? null;
+      if (untilBreak) {
+        if (!this.stopped && this.runGeneration === generation) {
+          return { nodeId: node.id, status: 'fail', message: '循环体没有到达 Loop Down，无法 Break' };
+        }
+        return { nodeId: node.id, status: 'ok', loopCount: executed, message: '循环已停止' };
       }
-      if (current !== down.id) return { nodeId: node.id, status: 'fail', message: 'Loop Begin 到 Loop Down 之间没有形成完整循环体' };
-      executed++;
-      this.emit({ t: 'log', runId, level: 'debug', message: `循环第 ${executed} 次完成`, nodeId: begin.id });
+
+      this.emit({ t: 'log', runId, level: 'info', message: `Loop Down：循环完成，共 ${executed} 次`, nodeId: down.id });
+      return { nodeId: node.id, status: 'ok', loopCount: executed, message: `循环执行 ${executed} 次，继续 Loop Down 后续步骤` };
+    } finally {
+      if (ownsLoop) {
+        this.activeLoopIds.delete(begin.id);
+        this.activeLoopIds.delete(down.id);
+      }
     }
-
-    this.emit({ t: 'log', runId, level: 'info', message: `Loop Down：循环完成，共 ${executed} 次`, nodeId: down.id });
-    return { nodeId: node.id, status: 'ok', loopCount: executed, message: `循环执行 ${executed} 次，继续 Loop Down 后续步骤` };
   }
 
   private async executeNodeWithEvents(node: WorkflowNode, generation: number): Promise<NodeRunResult> {
     const runId = this.runId!;
-    this.currentNodeId = node.id;
+    this.currentNodeIds.add(node.id);
     this.nodeStates[node.id] = 'running';
     this.emit({ t: 'nodeStart', runId, nodeId: node.id });
     const startedAt = Date.now();
-    let result: NodeRunResult;
+    let result: NodeRunResult = node.enabled === false
+      ? { nodeId: node.id, status: 'skipped', message: '节点已停用，跳过' }
+      : { nodeId: node.id, status: 'fail', message: '节点没有执行结果' };
     try {
-      result = await this.executeNode(node, generation);
+      if (node.enabled !== false) {
+        result = await this.executeNode(node, generation) ?? {
+          nodeId: node.id,
+          status: 'fail',
+          message: `节点类型 ${(node as WorkflowNode & { type: string }).type} 未返回执行结果`,
+        };
+      }
     } catch (err) {
       result = { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
     }
     result.elapsedMs = Date.now() - startedAt;
-    this.currentNodeId = null;
+    this.currentNodeIds.delete(node.id);
     this.nodeStates[node.id] = result.status;
     this.nodeResults[node.id] = result;
+    this.context.lastResult = result;
     this.emit({ t: 'nodeEnd', runId, nodeId: node.id, result });
     return result;
   }
@@ -1635,91 +1909,24 @@ export class WorkflowExecutor {
     };
   }
 
-  private async executeGameplayState(node: GameplayStateNode, generation: number): Promise<NodeRunResult> {
-    if (!node.data.modelPath) {
-      return { nodeId: node.id, status: 'fail', message: 'Gameplay State 尚未选择 YOLO 模型' };
-    }
-    if ((node.data.captureMode ?? 'frame') === 'frame') {
-      const frame = this.context.lastFrame;
-      if (!frame) {
-        return { nodeId: node.id, status: 'fail', message: '单帧攻防识别需要先执行 screenshot 节点' };
-      }
-      return this.detectGameplayStateFrame(node, frame);
+  private async executeWorkflowState(node: WorkflowStateNode, generation: number): Promise<NodeRunResult> {
+    if (node.data.mode === 'switch') {
+      const previousValue = this.workflowState.get();
+      const value = node.data.switchTo === 'toggle'
+        ? this.workflowState.toggle()
+        : this.workflowState.set(node.data.switchTo);
+      const label = value === 'stateA' ? node.data.stateALabel : node.data.stateBLabel;
+      const message = `State 切换${node.data.switchTo === 'toggle' ? '到另一边' : ''}：${previousValue} → ${value}（${label}）`;
+      this.emit({ t: 'log', runId: this.runId!, level: 'info', message, nodeId: node.id });
+      return { nodeId: node.id, status: 'ok', stateValue: value, message };
     }
 
-    const fps = await this.resolveProcessingFrameRate(node.data.fps, node.data.source ?? 'stream', node.data.streamSourceId);
-    const timeoutMs = Math.max(250, node.data.timeoutMs ?? 5000);
-    const frameInterval = Math.round(1000 / fps);
-    const deadline = Date.now() + timeoutMs;
-    const captureNode = {
-      id: `${node.id}-capture`,
-      type: 'screenshot',
-      title: `${node.title} Frame`,
-      position: node.position,
-      enabled: true,
-      data: {
-        regionMode: 'full',
-        source: node.data.source ?? 'stream',
-        streamSourceId: node.data.streamSourceId,
-        windowHint: node.data.windowHint,
-        windowId: node.data.windowId,
-        windowApp: node.data.windowApp,
-      },
-    } as ScreenshotNode;
-    let lastResult: NodeRunResult | null = null;
-    while (!this.stopped && this.runGeneration === generation && Date.now() <= deadline) {
-      const iterationStartedAt = Date.now();
-      const cap = await this.captureNodeImage(captureNode, { jpeg: true });
-      if (cap.ok && cap.frame) {
-        lastResult = await this.detectGameplayStateFrame(node, cap.frame);
-        if (lastResult.gameplayState && lastResult.gameplayState !== 'unknown') return lastResult;
-      }
-      const remainingFrameTime = frameInterval - (Date.now() - iterationStartedAt);
-      if (remainingFrameTime > 0) await sleep(remainingFrameTime);
-    }
-    return lastResult ?? { nodeId: node.id, status: 'fail', message: `攻防状态检测超时（${timeoutMs}ms）` };
-  }
-
-  private async detectGameplayStateFrame(node: GameplayStateNode, frame: string): Promise<NodeRunResult> {
-    const modelPath = node.data.modelPath;
-    if (!modelPath) {
-      return { nodeId: node.id, status: 'fail', message: 'Gameplay State 尚未选择 YOLO 模型' };
-    }
-    try {
-      const detections = await this.runSpatialYolo(frame, modelPath, node.data.modelId, node.data.numClasses, node.data.threshold ?? 60);
-      const offense = this.pickDetection(detections, node.data.offenseLabel);
-      const defense = this.pickDetection(detections, node.data.defenseLabel);
-      let raw: GameplayStateValue = 'unknown';
-      if (offense && defense) raw = offense.confidence >= defense.confidence ? 'offense' : 'defense';
-      else if (offense) raw = 'offense';
-      else if (defense) raw = 'defense';
-
-      const current = this.gameplayStateTrackers[node.id] ?? {
-        state: 'unknown',
-        candidate: null,
-        candidateFrames: 0,
-        holdFrames: 0,
-      };
-      const update = updateGameplayStateTracker(
-        current,
-        raw,
-        node.data.confirmFrames ?? 3,
-        node.data.holdFrames ?? 2,
-      );
-      this.gameplayStateTrackers[node.id] = update.tracker;
-      this.context.lastGameplayState = update.tracker.state;
-      this.context.lastGameplayStateChanged = update.changed;
-      return {
-        nodeId: node.id,
-        status: 'ok',
-        gameplayState: update.tracker.state,
-        gameplayStateRaw: raw,
-        gameplayStateChanged: update.changed,
-        message: `攻防状态：${update.tracker.state}（本帧 ${raw}${update.changed ? '，状态切换' : ''}）`,
-      };
-    } catch (err) {
-      return { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
-    }
+    const value = this.workflowState.get();
+    const branch = this.workflowState.route();
+    const label = value === 'stateA' ? node.data.stateALabel : node.data.stateBLabel;
+    const message = `State 判断：${value}（${label}）→ ${branch === 'true' ? '状态 A' : '状态 B'}`;
+    this.emit({ t: 'log', runId: this.runId!, level: 'info', message, nodeId: node.id });
+    return { nodeId: node.id, status: 'ok', stateValue: value, branch, message };
   }
 
   private async executeSpatialDetector(node: SpatialDetectorNode, generation: number): Promise<NodeRunResult> {
@@ -1907,7 +2114,7 @@ export class WorkflowExecutor {
       let playerImage: Point2D;
       let targetImage: Point2D;
       if (node.data.targetAnchor === 'boxDistance') {
-        const boxDistance = closestPointsBetweenBoxes(playerDetection.box, targetDetection.box);
+        const boxDistance = closestPointsBetweenBoxes(playerDetection.box, targetDetection.box, node.data.targetEdge ?? 'nearest');
         playerImage = boxDistance.player;
         targetImage = boxDistance.target;
       } else {
@@ -2047,10 +2254,11 @@ export class WorkflowExecutor {
       return { nodeId: node.id, status: 'fail', message };
     }
     log('info', `Move Player 使用空间检测节点：${detector.title || detector.id}（${detector.data.playerLabel || 'player'} → ${detector.data.targetLabel || 'target'}）`);
+    const stopDistance = resolveContinuousStopDistance(node.data.deadZone, detector.data.arrivalTolerance);
 
     let controller: MoveInputController;
     try {
-      controller = await this.createMoveInputController(node);
+      controller = await this.createMoveInputController(node, stopDistance);
       log('info', `Move Player 输入通道已初始化：${node.data.control} / ${node.data.target}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2060,7 +2268,6 @@ export class WorkflowExecutor {
 
     const fps = CONTINUOUS_MOVE_FPS;
     const frameInterval = Math.max(1, Math.round(1000 / fps));
-    const stopDistance = Math.max(0, node.data.deadZone ?? 0);
     const startedAt = Date.now();
     const captureNode = {
       id: `${node.id}-capture`,
@@ -2097,7 +2304,8 @@ export class WorkflowExecutor {
       moveMagnitude: latestMagnitude,
     });
 
-    log('info', `Move Player 持续闭环：${fps} FPS，停止距离 ${stopDistance}${detector.data.calibration ? detector.data.calibration.unit ?? 'world' : 'px'}；到达只释放输入，闭环持续到手动停止`);
+    const exitOnArrival = node.data.exitOnArrival ?? true;
+    log('info', `Move Player 持续闭环：${fps} FPS，实际停止距离 ${stopDistance}${detector.data.calibration ? detector.data.calibration.unit ?? 'world' : 'px'}（Move Player ${node.data.deadZone ?? 0} / Spatial Detector ${detector.data.arrivalTolerance ?? 0}）；${exitOnArrival ? '到达后释放输入并继续后续节点' : '到达只释放输入，闭环持续到手动停止'}`);
 
     try {
       while (!this.stopped && this.runGeneration === generation) {
@@ -2136,6 +2344,7 @@ export class WorkflowExecutor {
           direction: node.data.direction,
           stopDistance,
           releaseWhenArrived: Boolean(node.data.stopWhenArrived),
+          exitOnArrival,
         });
         const applied = await controller.apply(decision.direction, decision.action === 'hold' ? spatial ?? undefined : undefined);
         latestDirection = decision.direction;
@@ -2149,6 +2358,23 @@ export class WorkflowExecutor {
         }
         previousDirection = decision.direction;
         previousReason = decision.reason;
+
+        if (!decision.shouldContinue) {
+          await controller.release();
+          const message = decision.reason === 'arrived'
+            ? '已稳定到达目标位置，Move Player 结束并继续后续节点'
+            : `已进入停止距离 ${stopDistance}，Move Player 结束并继续后续节点`;
+          log('info', message);
+          return {
+            nodeId: node.id,
+            status: 'ok',
+            ...metrics(),
+            moveDirection: 'stop',
+            moveVector: { x: 0, y: 0 },
+            moveMagnitude: 0,
+            message,
+          };
+        }
 
         const remainingFrameTime = frameInterval - (Date.now() - iterationStartedAt);
         if (remainingFrameTime > 0) await sleep(remainingFrameTime);
@@ -2203,7 +2429,7 @@ export class WorkflowExecutor {
     return priorDetectors[priorDetectors.length - 1] ?? detectors[detectors.length - 1] ?? null;
   }
 
-  private async createMoveInputController(node: MovePlayerNode): Promise<MoveInputController> {
+  private async createMoveInputController(node: MovePlayerNode, stopDistance = Math.max(0, node.data.deadZone ?? 0)): Promise<MoveInputController> {
     let windowHint: string | undefined;
     let windowId: number | undefined;
     let windowApp: string | undefined;
@@ -2291,7 +2517,7 @@ export class WorkflowExecutor {
             ? calculateSpatialMovement(spatial.distance, direction === 'stop' ? { x: 0, y: 0 } : spatial.direction, {
                 minMagnitude: node.data.minStickMagnitude ?? 0.2,
                 maxMagnitude: node.data.maxStickMagnitude ?? 0.7,
-                deadZone: node.data.deadZone ?? 0,
+                deadZone: stopDistance,
                 brakeDistance: node.data.brakeDistance ?? 120,
               })
             : { vector: { x: 0, y: 0 }, magnitude: 0 };
@@ -2359,7 +2585,8 @@ export class WorkflowExecutor {
 
   private async executePulseMovePlayer(node: MovePlayerNode): Promise<NodeRunResult> {
     const spatial = this.context.lastSpatial;
-    const stopDistance = Math.max(0, node.data.deadZone ?? 0);
+    const detector = this.resolveSpatialDetectorForMove(node);
+    const stopDistance = resolveContinuousStopDistance(node.data.deadZone, detector?.data.arrivalTolerance);
     if (spatial && spatial.distance <= stopDistance) {
       return { nodeId: node.id, status: 'ok', moveDirection: 'stop', message: `已进入停止距离 ${stopDistance}，不发送输入` };
     }
@@ -2379,7 +2606,7 @@ export class WorkflowExecutor {
 
     let controller: MoveInputController;
     try {
-      controller = await this.createMoveInputController(node);
+      controller = await this.createMoveInputController(node, stopDistance);
     } catch (err) {
       return { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
     }
@@ -2708,11 +2935,11 @@ export class WorkflowExecutor {
   private evalExpression(expr: string): boolean {
     const ctx: EvalContext = {
       last: this.context.lastRecognize,
-      lastOk: this.context.lastRecognize !== null,
+      previous: this.context.lastResult,
+      lastOk: this.context.lastResult?.status === 'ok',
       frame: this.context.lastFrame !== null,
       spatial: this.context.lastSpatial,
-      gameplayState: this.context.lastGameplayState,
-      gameplayStateChanged: this.context.lastGameplayStateChanged,
+      state: this.workflowState.get(),
       results: this.nodeResults,
     };
     // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
