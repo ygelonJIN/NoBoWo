@@ -2,7 +2,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell } f
 import { ensureTemplatesDir, templateImagesDir, templateIndexFile, templateSourcesDir } from './templateStorage';
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
-import { copyFile, link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { connect as tcpConnect } from 'node:net';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -32,6 +32,7 @@ import type {
   YoloAnnotation,
   YoloClassDefinition,
   YoloDataset,
+  YoloDatasetImportResult,
   OcrResult,
   YoloEnvInfo,
   YoloImage,
@@ -42,7 +43,15 @@ import type {
   YoloTrainingState,
   WorkflowDocument,
 } from '@nobowo/core';
-import { YOLO_CLASS_COLORS, YOLOX_PYTHON_DEPENDENCIES } from '@nobowo/core';
+import {
+  parseCocoClassNames,
+  parseYoloClassNames,
+  parseYoloLabels,
+  readImageDimensions,
+  selectYoloImportFiles,
+  YOLO_CLASS_COLORS,
+  YOLOX_PYTHON_DEPENDENCIES,
+} from '@nobowo/core';
 import { runVisionEngine, writeImageToTemp } from './engine';
 import { WorkflowExecutor, WORKFLOW_EXECUTOR_VERSION } from './workflowExecutor';
 import { disposePs5RuntimeClient, getPs5RuntimeClient, type Ps5ConnectPayload } from './ps5Runtime';
@@ -196,7 +205,15 @@ function dataUrlToBuffer(dataUrl: string): { buffer: Buffer; mime: string } {
 
 function dataUrlToFileData(dataUrl: string): { buffer: Buffer; ext: string } {
   const { buffer, mime } = dataUrlToBuffer(dataUrl);
-  const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
+  const ext = mime === 'image/jpeg'
+    ? 'jpg'
+    : mime === 'image/webp'
+      ? 'webp'
+      : mime === 'image/gif'
+        ? 'gif'
+        : mime === 'image/bmp'
+          ? 'bmp'
+          : 'png';
   return { buffer, ext };
 }
 
@@ -2324,10 +2341,377 @@ async function readDatasetImage(datasetId: string, imageId: string): Promise<str
   try {
     const buffer = await readFile(path.join(datasetImagesDir(datasetId), image.file));
     const ext = image.file.split('.').pop() ?? 'png';
-    const mime = ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png';
+    const mime = importedMime(ext.toLowerCase());
     return `data:${mime};base64,${buffer.toString('base64')}`;
   } catch {
     return null;
+  }
+}
+
+type CollectedImportFile = {
+  absolutePath: string;
+  relativePath: string;
+};
+
+const YOLO_IMPORT_METADATA_FILES = new Set(['dataset.json', 'data.yaml', 'data.yml', 'dataset.yaml', 'dataset.yml']);
+const MAX_YOLO_IMPORT_FILES = 50_000;
+
+function normalizeImportPath(value: string): string {
+  return value.replaceAll('\\', '/').replace(/^\.?\//, '').replace(/\/+/g, '/');
+}
+
+function commonDirectory(inputPaths: string[]): string {
+  if (inputPaths.length === 0) throw new Error('没有可导入的文件');
+  const normalized = inputPaths.map((value) => path.resolve(value));
+  let common = normalized[0];
+  for (const directory of normalized.slice(1)) {
+    while (common !== path.dirname(common)) {
+      const prefix = common.endsWith(path.sep) ? common : common + path.sep;
+      if (directory === common || directory.startsWith(prefix)) break;
+      common = path.dirname(common);
+    }
+  }
+  return common;
+}
+
+async function resolveYoloImportRoot(sourcePaths: string[]): Promise<string> {
+  const unique = [...new Set(sourcePaths.map((value) => String(value ?? '').trim()).filter(Boolean))];
+  if (unique.length === 0) throw new Error('请选择 YOLO 数据集目录或文件');
+
+  const stats = await Promise.all(unique.map((sourcePath) => stat(path.resolve(sourcePath))));
+  if (unique.length === 1 && stats[0].isDirectory()) return path.resolve(unique[0]);
+  if (unique.length === 1 && stats[0].isFile()) {
+    const sourcePath = path.resolve(unique[0]);
+    if (YOLO_IMPORT_METADATA_FILES.has(path.basename(sourcePath).toLowerCase())) return path.dirname(sourcePath);
+  }
+
+  const directories = unique.map((sourcePath, index) => (stats[index].isDirectory() ? path.resolve(sourcePath) : path.dirname(path.resolve(sourcePath))));
+  return commonDirectory(directories);
+}
+
+async function collectYoloImportFiles(root: string): Promise<CollectedImportFile[]> {
+  const result: CollectedImportFile[] = [];
+  const walk = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = normalizeImportPath(prefix ? `${prefix}/${entry.name}` : entry.name);
+      if (entry.isDirectory()) {
+        await walk(absolutePath, relativePath);
+      } else if (entry.isFile()) {
+        result.push({ absolutePath, relativePath });
+        if (result.length > MAX_YOLO_IMPORT_FILES) {
+          throw new Error(`数据集文件数量超过 ${MAX_YOLO_IMPORT_FILES}，请拆分后导入`);
+        }
+      }
+    }
+  };
+  await walk(root, '');
+  return result.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+function clampImportBox(x: number, y: number, width: number, height: number) {
+  const x1 = Math.min(1, Math.max(0, x));
+  const y1 = Math.min(1, Math.max(0, y));
+  const x2 = Math.min(1, Math.max(0, x + width));
+  const y2 = Math.min(1, Math.max(0, y + height));
+  if (x2 <= x1 || y2 <= y1) return null;
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+function upsertImportedClass(data: YoloDatasetFile, requestedName: string): { id: string; created: boolean } {
+  const name = requestedName.trim() || '未命名类别';
+  const key = name.toLocaleLowerCase();
+  const current = data.classes.find((item) => item.name.trim().toLocaleLowerCase() === key);
+  if (current) return { id: current.id, created: false };
+  const created: YoloClassDefinition = {
+    id: randomUUID(),
+    name,
+    color: YOLO_CLASS_COLORS[data.classes.length % YOLO_CLASS_COLORS.length],
+  };
+  data.classes.push(created);
+  return { id: created.id, created: true };
+}
+
+function parseInternalDatasetPayload(raw: string): YoloDatasetFile {
+  const parsed = JSON.parse(raw) as Partial<YoloDatasetFile>;
+  if (!parsed || !Array.isArray(parsed.classes) || !Array.isArray(parsed.images)) {
+    throw new Error('dataset.json 不是有效的 NoBoWo 数据集');
+  }
+  return {
+    classes: parsed.classes,
+    images: parsed.images,
+    annotations: parsed.annotations ?? {},
+  };
+}
+
+function reindexCocoClassNames(
+  names: Record<string, string>,
+  labelClassIndexes: Set<number>,
+): Record<string, string> {
+  const keys = Object.keys(names).map(Number).filter(Number.isInteger).sort((a, b) => a - b);
+  if (keys.length === 0 || keys[0] === 0 || !labelClassIndexes.has(0)) return names;
+  return Object.fromEntries(keys.map((key, index) => [String(index), names[String(key)]]));
+}
+
+function importedExtension(sourcePath: string): string {
+  const ext = path.extname(sourcePath).slice(1).toLowerCase();
+  if (ext === 'jpeg' || ext === 'jpg') return 'jpg';
+  if (ext === 'webp') return 'webp';
+  if (ext === 'gif') return 'gif';
+  if (ext === 'bmp') return 'bmp';
+  return 'png';
+}
+
+function importedMime(extension: string): string {
+  if (extension === 'jpg') return 'image/jpeg';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'bmp') return 'image/bmp';
+  return 'image/png';
+}
+
+function isInternalDatasetFile(files: CollectedImportFile[]): CollectedImportFile | null {
+  return files.find((file) => normalizeImportPath(file.relativePath).toLowerCase() === 'dataset.json') ?? null;
+}
+
+async function importInternalYoloDataset(
+  datasetId: string,
+  root: string,
+  source: CollectedImportFile,
+  data: YoloDatasetFile,
+  writtenFiles: string[],
+  warnings: string[],
+): Promise<{ images: number; annotations: number; classes: number; skipped: number }> {
+  const payload = parseInternalDatasetPayload(await readFile(source.absolutePath, 'utf8'));
+  const filesByPath = new Map(payload.images.map((image) => [image.file, image]));
+  const sourceFiles = await collectYoloImportFiles(root);
+  const classMap = new Map<string, string>();
+  let createdClasses = 0;
+  for (const sourceClass of payload.classes) {
+    const imported = upsertImportedClass(data, sourceClass.name);
+    classMap.set(sourceClass.id, imported.id);
+    if (imported.created) createdClasses += 1;
+  }
+
+  const existingNames = new Set(data.images.map((image) => image.fileName));
+  let importedImages = 0;
+  let importedAnnotations = 0;
+  let skippedImages = 0;
+
+  for (const sourceImage of payload.images) {
+    const candidates = [
+      normalizeImportPath(`images/${sourceImage.file}`),
+      normalizeImportPath(sourceImage.file),
+    ];
+    const sourceFile = candidates
+      .map((candidate) => sourceFiles.find((file) => normalizeImportPath(file.relativePath) === candidate))
+      .find(Boolean);
+    if (!sourceFile) {
+      skippedImages += 1;
+      warnings.push(`图片文件缺失：${sourceImage.file}`);
+      continue;
+    }
+
+    const fileName = sourceImage.fileName?.trim() || path.basename(sourceFile.relativePath);
+    if (existingNames.has(fileName)) {
+      skippedImages += 1;
+      warnings.push(`同名图片已存在，已跳过：${fileName}`);
+      continue;
+    }
+
+    const bytes = await readFile(sourceFile.absolutePath);
+    const dimensions = readImageDimensions(bytes);
+    const width = sourceImage.width || dimensions.width;
+    const height = sourceImage.height || dimensions.height;
+    const extension = importedExtension(sourceFile.absolutePath);
+    const storedName = `${randomUUID()}.${extension}`;
+    const destination = path.join(datasetImagesDir(datasetId), storedName);
+    await writeFile(destination, bytes);
+    writtenFiles.push(destination);
+
+    const imageId = randomUUID();
+    data.images.push({
+      id: imageId,
+      fileName,
+      file: storedName,
+      width,
+      height,
+      createdAt: Date.now() + importedImages,
+    });
+    existingNames.add(fileName);
+    importedImages += 1;
+
+    for (const annotation of payload.annotations[sourceImage.id] ?? []) {
+      const classId = annotation.classId ? classMap.get(annotation.classId) : undefined;
+      const box = annotation.box
+        ? clampImportBox(annotation.box.x, annotation.box.y, annotation.box.width, annotation.box.height)
+        : null;
+      if (!classId || !box) continue;
+      data.annotations[imageId] = data.annotations[imageId] ?? [];
+      data.annotations[imageId].push({ id: randomUUID(), classId, box });
+      importedAnnotations += 1;
+    }
+  }
+
+  if (filesByPath.size !== payload.images.length) {
+    warnings.push('dataset.json 中存在重复图片记录，已按首次出现的文件名去重。');
+  }
+  return { images: importedImages, annotations: importedAnnotations, classes: createdClasses, skipped: skippedImages };
+}
+
+async function importYoloDatasetFromSource(
+  datasetId: string,
+  sourcePaths: string[],
+): Promise<YoloDatasetImportResult> {
+  const root = await resolveYoloImportRoot(sourcePaths);
+  const rootStat = await stat(root);
+  if (!rootStat.isDirectory()) throw new Error('YOLO 导入源必须是数据集目录');
+
+  const files = await collectYoloImportFiles(root);
+  if (files.length === 0) throw new Error('所选目录中没有可导入的文件');
+
+  const data = await loadDatasetFile(datasetId);
+  const writtenFiles: string[] = [];
+  const warnings: string[] = [];
+  let committed = false;
+  try {
+    await mkdir(datasetImagesDir(datasetId), { recursive: true });
+    const internalSource = isInternalDatasetFile(files);
+    if (internalSource) {
+      const result = await importInternalYoloDataset(datasetId, root, internalSource, data, writtenFiles, warnings);
+      await saveDatasetFile(datasetId, data);
+      committed = true;
+      const index = await loadYoloIndex();
+      const dataset = index.datasets.find((item) => item.id === datasetId);
+      if (dataset) dataset.updatedAt = Date.now();
+      await saveYoloIndex(index);
+      return {
+        importedImages: result.images,
+        importedAnnotations: result.annotations,
+        createdClasses: result.classes,
+        skippedImages: result.skipped,
+        warnings: [...new Set(warnings)],
+      };
+    }
+
+    const selection = selectYoloImportFiles(files.map((file) => file.relativePath));
+    if (selection.images.length === 0) throw new Error('未找到 YOLO 图片；请选择包含 images 的数据集目录');
+    warnings.push(...selection.warnings);
+
+    const filesByPath = new Map(files.map((file) => [normalizeImportPath(file.relativePath), file]));
+    const sourceClassNames: Record<string, string> = {};
+    let hasExplicitClassNames = false;
+    if (selection.classFile) {
+      const classFile = filesByPath.get(normalizeImportPath(selection.classFile));
+      if (classFile) {
+        Object.assign(sourceClassNames, parseYoloClassNames(await readFile(classFile.absolutePath, 'utf8')));
+        hasExplicitClassNames = Object.keys(sourceClassNames).length > 0;
+      }
+    }
+    let usedCocoClassNames = false;
+    if (!hasExplicitClassNames) {
+      for (const cocoPath of selection.cocoFiles) {
+        const cocoFile = filesByPath.get(normalizeImportPath(cocoPath));
+        if (!cocoFile) continue;
+        try {
+          Object.assign(sourceClassNames, parseCocoClassNames(JSON.parse(await readFile(cocoFile.absolutePath, 'utf8'))));
+          usedCocoClassNames = Object.keys(sourceClassNames).length > 0;
+        } catch {
+          warnings.push(`无法读取 COCO 类别定义：${cocoPath}`);
+        }
+      }
+    }
+
+    const labelClassIndexes = new Set<number>();
+    const parsedLabels = new Map<string, ReturnType<typeof parseYoloLabels>>();
+    for (const image of selection.images) {
+      if (!image.labelPath) continue;
+      const labelFile = filesByPath.get(normalizeImportPath(image.labelPath));
+      if (!labelFile) continue;
+      const labels = parseYoloLabels(await readFile(labelFile.absolutePath, 'utf8'));
+      parsedLabels.set(normalizeImportPath(image.labelPath), labels);
+      for (const label of labels) labelClassIndexes.add(label.classIndex);
+    }
+    if (!hasExplicitClassNames && usedCocoClassNames) {
+      const reindexed = reindexCocoClassNames(sourceClassNames, labelClassIndexes);
+      for (const key of Object.keys(sourceClassNames)) delete sourceClassNames[key];
+      Object.assign(sourceClassNames, reindexed);
+    }
+
+    const classIdByIndex = new Map<number, string>();
+    let createdClasses = 0;
+    const sourceIndexes = [...new Set([
+      ...Object.keys(sourceClassNames).map(Number).filter(Number.isInteger),
+      ...labelClassIndexes,
+    ])].sort((a, b) => a - b);
+    for (const sourceIndex of sourceIndexes) {
+      const imported = upsertImportedClass(data, sourceClassNames[String(sourceIndex)] ?? `class_${sourceIndex}`);
+      classIdByIndex.set(sourceIndex, imported.id);
+      if (imported.created) createdClasses += 1;
+    }
+
+    const existingNames = new Set(data.images.map((image) => image.fileName));
+    let importedImages = 0;
+    let importedAnnotations = 0;
+    let skippedImages = 0;
+    for (const image of selection.images) {
+      const sourceFile = filesByPath.get(normalizeImportPath(image.path));
+      if (!sourceFile) continue;
+      const fileName = sourceFile.relativePath;
+      if (existingNames.has(fileName)) {
+        skippedImages += 1;
+        warnings.push(`同名图片已存在，已跳过：${fileName}`);
+        continue;
+      }
+
+      const bytes = await readFile(sourceFile.absolutePath);
+      const dimensions = readImageDimensions(bytes);
+      const extension = importedExtension(sourceFile.absolutePath);
+      const storedName = `${randomUUID()}.${extension}`;
+      const destination = path.join(datasetImagesDir(datasetId), storedName);
+      await writeFile(destination, bytes);
+      writtenFiles.push(destination);
+
+      const imageId = randomUUID();
+      data.images.push({
+        id: imageId,
+        fileName,
+        file: storedName,
+        width: dimensions.width,
+        height: dimensions.height,
+        createdAt: Date.now() + importedImages,
+      });
+      existingNames.add(fileName);
+      importedImages += 1;
+
+      const labels = image.labelPath ? parsedLabels.get(normalizeImportPath(image.labelPath)) ?? [] : [];
+      for (const label of labels) {
+        const classId = classIdByIndex.get(label.classIndex);
+        if (!classId) continue;
+        data.annotations[imageId] = data.annotations[imageId] ?? [];
+        data.annotations[imageId].push({ id: randomUUID(), classId, box: label.box });
+        importedAnnotations += 1;
+      }
+    }
+
+    await saveDatasetFile(datasetId, data);
+    committed = true;
+    const index = await loadYoloIndex();
+    const dataset = index.datasets.find((item) => item.id === datasetId);
+    if (dataset) dataset.updatedAt = Date.now();
+    await saveYoloIndex(index);
+    return {
+      importedImages,
+      importedAnnotations,
+      createdClasses,
+      skippedImages,
+      warnings: [...new Set(warnings)],
+    };
+  } catch (error) {
+    if (!committed) await Promise.all(writtenFiles.map((filePath) => unlink(filePath).catch(() => {})));
+    throw error;
   }
 }
 
@@ -2741,6 +3125,25 @@ function registerYoloIpc() {
     await saveYoloIndex(index);
     await rm(path.join(yoloDatasetsDir(), id), { recursive: true, force: true });
   });
+
+  ipcMain.handle('yolo:pickDatasetImportPath', async (): Promise<string | null> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const result = win
+      ? await dialog.showOpenDialog(win, {
+          title: '选择 YOLO 数据集目录',
+          properties: ['openDirectory'],
+          buttonLabel: '导入此目录',
+        })
+      : null;
+    if (!result || result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle(
+    'yolo:importDataset',
+    async (_event, datasetId: string, sourcePaths: string[]): Promise<YoloDatasetImportResult> =>
+      importYoloDatasetFromSource(datasetId, sourcePaths),
+  );
 
   ipcMain.handle(
     'yolo:importImages',
@@ -3708,7 +4111,14 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on('before-quit', () => disposePs5RuntimeClient());
+let acceptingBeforeQuit = true;
+app.on('before-quit', (event) => {
+  if (!acceptingBeforeQuit) return;
+  acceptingBeforeQuit = false;
+  event.preventDefault();
+  disposePs5RuntimeClient();
+  void workflowExecutor.dispose().finally(() => app.quit());
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

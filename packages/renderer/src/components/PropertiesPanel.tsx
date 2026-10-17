@@ -1,4 +1,4 @@
-import type { CloudApiProfile, GamepadAction, MoveDirection, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode } from '@nobowo/core';
+import type { CloudApiProfile, GamepadAction, IfNode, LiveVisionNode, MoveDirection, OcrEngine, RecognizeNode, StreamSourceProfile, StreamWindowInfo, TemplateDefinition, TemplateFolder, WorkflowNode, YoloClassDefinition } from '@nobowo/core';
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { CustomSelect } from './CustomSelect';
 import { FrameRateSelect } from './FrameRateSelect';
@@ -62,6 +62,7 @@ type LooseStrategy = {
   prompt?: string;
   modelId?: string;
   modelPath?: string;
+  reuseShared?: boolean;
   profileId?: string;
   apiIds?: string[];
   apiMode?: 'cascade' | 'parallel';
@@ -247,6 +248,7 @@ export function PropertiesPanel({
   const [apiProfiles, setApiProfiles] = useState<CloudApiProfile[]>([]);
   const [streamSources, setStreamSources] = useState<StreamSourceProfile[]>([]);
   const [streamSourceLoading, setStreamSourceLoading] = useState(false);
+  const [ifYoloClasses, setIfYoloClasses] = useState<YoloClassDefinition[]>([]);
   const isDirectStream = (id?: string) => Boolean(id && streamSources.find((source) => source.id === id)?.transport === 'ps5Direct');
   const [windows, setWindows] = useState<StreamWindowInfo[]>([]);
   const [probingWindows, setProbingWindows] = useState(false);
@@ -374,6 +376,34 @@ export function PropertiesPanel({
       .catch(() => setStreamSources([]))
       .finally(() => setStreamSourceLoading(false));
   }, [node?.type, streamVersion]);
+
+  useEffect(() => {
+    if (node?.type !== 'if' || node.data.conditionMode !== 'yolo' || !window.yoloAPI) {
+      setIfYoloClasses([]);
+      return;
+    }
+    let cancelled = false;
+    window.yoloAPI
+      .listModels()
+      .then(async (models) => {
+        if (cancelled) return;
+        const selected = models.find((model) => model.id === node.data.yolo?.modelId);
+        if (!selected?.datasetId) {
+          setIfYoloClasses([]);
+          return;
+        }
+        const classes = await window.yoloAPI!.listClasses(selected.datasetId);
+        if (!cancelled) setIfYoloClasses(classes);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIfYoloClasses([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [node, yoloVersion]);
 
   useEffect(() => {
     if (!window.cloudApiAPI) {
@@ -854,19 +884,207 @@ export function PropertiesPanel({
         )}
 
         {node.type === 'if' && (
-          <section className="properties-panel__group">
-            <h3>判断配置</h3>
-            <p className="properties-panel__hint">
-              If 只判断直接连接到它的上一个节点：上一节点成功走 True，失败或跳过走 False。
-            </p>
-            <div className="properties-panel__hint">
-              <ul>
-                <li>任何节点都可以接 If。</li>
-                <li>前节点失败时也会继续执行 If。</li>
-                <li>旧的条件表达式配置不再影响 If 分支。</li>
-              </ul>
-            </div>
-          </section>
+          (() => {
+            const yolo = node.data.yolo ?? {
+              source: 'stream' as const,
+              label: '',
+              mode: 'present' as const,
+              threshold: 60,
+              stableFrames: 1,
+              timingMode: 'stableFrames' as const,
+              windowMs: 3000,
+              sampleIntervalMs: 150,
+              timeoutMs: 5000,
+            };
+            const updateYolo = (patch: Partial<IfNode['data']['yolo']>) => {
+              onChangeNode(updateNodeData(node, {
+                conditionMode: 'yolo',
+                yolo: { ...yolo, ...patch },
+              }));
+            };
+            return (
+              <section className="properties-panel__group">
+                <h3>判断配置</h3>
+                <label>
+                  判断方式
+                  <CustomSelect
+                    value={node.data.conditionMode ?? 'previous'}
+                    options={[
+                      { value: 'previous', label: '上一节点成功 / 失败' },
+                      { value: 'yolo', label: '复用 YOLO 检测结果' },
+                    ]}
+                    onChange={(value) => {
+                      if (value === 'previous') {
+                        onChangeNode(updateNodeData(node, { conditionMode: 'previous' }));
+                      } else {
+                        onChangeNode(updateNodeData(node, { conditionMode: 'yolo', yolo }));
+                      }
+                    }}
+                  />
+                </label>
+                {(node.data.conditionMode ?? 'previous') === 'previous' ? (
+                  <p className="properties-panel__hint">
+                    保持旧工作流行为：直接上一节点成功走 True，失败或跳过走 False。
+                  </p>
+                ) : (
+                  <>
+                    <p className="properties-panel__hint">
+                      自动复用同一模型、同一画面来源的共享检测历史；样本不足时才补采画面，并复用正在运行的 YOLO 模型进程。正向条件会等到命中或超过最长等待时间。
+                    </p>
+                    <label>
+                      YOLO 模型
+                      <ModelPicker
+                        value={yolo.modelId}
+                        onChange={(model) => updateYolo({ modelId: model.id, modelPath: model.path })}
+                        refreshKey={yoloVersion ?? 0}
+                      />
+                    </label>
+                    {onOpenYoloManager && (
+                      <button className="properties-panel__ghost-button" onClick={onOpenYoloManager}>
+                        管理模型…
+                      </button>
+                    )}
+                    <label>
+                      目标类别
+                      <CustomSelect
+                        value={yolo.label ?? ''}
+                        options={[
+                          { value: '', label: '任意类别' },
+                          ...ifYoloClasses.map((item) => ({ value: item.name, label: item.name })),
+                        ]}
+                        onChange={(value) => updateYolo({ label: value })}
+                      />
+                    </label>
+                    <label>
+                      条件
+                      <CustomSelect
+                        value={yolo.mode ?? 'present'}
+                        options={[
+                          { value: 'present', label: '类别存在' },
+                          { value: 'absent', label: '类别不存在' },
+                          { value: 'confidenceAtLeast', label: '置信度不低于阈值' },
+                        ]}
+                        onChange={(value) => updateYolo({ mode: value as NonNullable<IfNode['data']['yolo']>['mode'] })}
+                      />
+                    </label>
+                    {yolo.mode === 'confidenceAtLeast' && (
+                      <label>
+                        置信度阈值
+                        <NumberInput
+                          value={yolo.threshold}
+                          fallback={60}
+                          min={0}
+                          max={100}
+                          onChange={(value) => updateYolo({ threshold: value })}
+                        />
+                      </label>
+                    )}
+                    <label>
+                      时间判断
+                      <CustomSelect
+                        value={yolo.timingMode ?? 'stableFrames'}
+                        options={[
+                          { value: 'stableFrames', label: '连续稳定帧' },
+                          { value: 'recentWindow', label: '最近 N 秒内是否识别到' },
+                        ]}
+                        onChange={(value) => updateYolo({
+                          timingMode: value as NonNullable<IfNode['data']['yolo']>['timingMode'],
+                        })}
+                      />
+                    </label>
+                    {(yolo.timingMode ?? 'stableFrames') === 'stableFrames' ? (
+                      <label>
+                        连续帧数
+                        <NumberInput
+                          value={yolo.stableFrames}
+                          fallback={1}
+                          min={1}
+                          max={60}
+                          step={1}
+                          onChange={(value) => updateYolo({ stableFrames: Math.round(value) })}
+                        />
+                      </label>
+                    ) : (
+                      <label>
+                        时间窗（秒）
+                        <NumberInput
+                          value={(yolo.windowMs ?? 3000) / 1000}
+                          fallback={3}
+                          min={0.05}
+                          max={60}
+                          step={0.1}
+                          onChange={(value) => updateYolo({ windowMs: Math.round(value * 1000) })}
+                        />
+                      </label>
+                    )}
+                    <label>
+                      采样间隔（ms）
+                      <NumberInput
+                        value={yolo.sampleIntervalMs}
+                        fallback={150}
+                        min={33}
+                        max={2000}
+                        step={1}
+                        onChange={(value) => updateYolo({ sampleIntervalMs: Math.round(value) })}
+                      />
+                    </label>
+                    <label>
+                      最长等待（ms）
+                      <NumberInput
+                        value={yolo.timeoutMs}
+                        fallback={5000}
+                        min={250}
+                        max={60000}
+                        step={100}
+                        onChange={(value) => updateYolo({ timeoutMs: Math.round(value) })}
+                      />
+                    </label>
+                    <label>
+                      画面来源
+                      <CustomSelect
+                        value={yolo.source}
+                        options={[
+                          { value: 'stream', label: '串流画面' },
+                          { value: 'window', label: '本机窗口' },
+                          { value: 'screen', label: '本机屏幕' },
+                        ]}
+                        onChange={(value) => updateYolo({
+                          source: value as NonNullable<IfNode['data']['yolo']>['source'],
+                          streamSourceId: value === 'stream' ? yolo.streamSourceId : undefined,
+                          windowHint: value === 'window' ? yolo.windowHint : undefined,
+                          windowId: value === 'window' ? yolo.windowId : undefined,
+                          windowApp: value === 'window' ? yolo.windowApp : undefined,
+                        })}
+                      />
+                    </label>
+                    {yolo.source === 'stream' && (
+                      <label>
+                        串流设备
+                        <CustomSelect
+                          value={yolo.streamSourceId ?? ''}
+                          options={[
+                            { value: '', label: streamSourceLoading ? '正在加载串流设备…' : '选择一个串流设备' },
+                            ...streamSources.map((source) => ({ value: source.id, label: source.name })),
+                          ]}
+                          onChange={(value) => updateYolo({ streamSourceId: value || undefined })}
+                        />
+                      </label>
+                    )}
+                    {yolo.source === 'window' && (
+                      <label>
+                        窗口标题关键字
+                        <input
+                          value={yolo.windowHint ?? ''}
+                          onChange={(event) => updateYolo({ windowHint: event.target.value.trim() || undefined })}
+                          placeholder="例如 Chrome"
+                        />
+                      </label>
+                    )}
+                  </>
+                )}
+              </section>
+            );
+          })()
         )}
 
         {node.type === 'loop' && (
@@ -874,7 +1092,20 @@ export function PropertiesPanel({
             <h3>循环配置</h3>
             <p className="properties-panel__hint">Loop 通过角色区分：Begin 负责开始循环，Down 负责循环结束后继续。每个节点只有左侧输入点和右侧输出点。</p>
             {node.data.role === 'down' ? (
-              <p className="properties-panel__hint">循环模式请在配对的 Loop Begin 上设置。untilBreak 模式下进入 Down 表示 Break。</p>
+              <>
+                <label>
+                  配对循环次数
+                  <input
+                    type="number"
+                    value={node.data.count ?? ''}
+                    placeholder="由 Loop Begin 同步"
+                    disabled
+                  />
+                </label>
+                <p className="properties-panel__hint">
+                  次数由对应的 Loop Begin 自动同步。循环模式也在 Loop Begin 设置；untilBreak 模式下进入 Down 表示 Break。
+                </p>
+              </>
             ) : (
               <>
                 <label>
@@ -1159,7 +1390,7 @@ export function PropertiesPanel({
             <label>
               YOLO 模型
               <ModelPicker
-                value={node.data.modelPath}
+                value={node.data.modelId}
                 onChange={(model) => onChangeNode(updateNodeData(node, {
                   modelId: model.id,
                   modelPath: model.path,
@@ -1173,6 +1404,20 @@ export function PropertiesPanel({
                 管理模型…
               </button>
             )}
+            <label>
+              YOLO 检测结果
+              <CustomSelect
+                value={node.data.reuseShared === false ? 'fresh' : 'shared'}
+                options={[
+                  { value: 'shared', label: '实时共享结果（推荐）' },
+                  { value: 'fresh', label: '每次自行截图推理' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { reuseShared: v !== 'fresh' }))}
+              />
+            </label>
+            <p className="properties-panel__hint">
+              始终复用同一 YOLO 模型、同一画面来源的最新实时检测；共享通道没有结果时才对当前画面补推理，不设置结果有效期。
+            </p>
             <div className="grid-two">
               <label>
                 Player 标签
@@ -1380,19 +1625,35 @@ export function PropertiesPanel({
                 每个检测帧都会更新动作：距离仍远时保持当前方向键，不再重复按下；进入停止距离或稳定到达时只释放输入并继续监测，之后距离变远会自动重新按住。闭环不会因到达自动结束。
               </p>
             )}
-            {(node.data.controlMode ?? 'continuous') === 'continuous' && node.data.directionMode === 'auto' && (
-              <label>
-                空间检测节点
-                <CustomSelect
-                  value={node.data.detectorNodeId ?? ''}
-                  options={[
-                    { value: '', label: '自动使用最近的 Spatial Detector' },
-                    ...allNodes.filter((item) => item.type === 'spatialDetector').map((item) => ({ value: item.id, label: item.title || item.id })),
-                  ]}
-                  onChange={(v) => onChangeNode(updateNodeData(node, { detectorNodeId: v || undefined }))}
-                />
-              </label>
-            )}
+            <label>
+              空间检测节点
+              <CustomSelect
+                value={node.data.detectorNodeId ?? ''}
+                options={[
+                  { value: '', label: '自动使用最近的 Spatial Detector' },
+                  ...allNodes.filter((item) => item.type === 'spatialDetector').map((item) => ({ value: item.id, label: item.title || item.id })),
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, { detectorNodeId: v || undefined }))}
+              />
+            </label>
+            <label>
+              空间检测结果
+              <CustomSelect
+                value={node.data.spatialReuseShared === false ? 'fresh' : 'shared'}
+                options={[
+                  { value: 'shared', label: '实时共享结果（推荐）' },
+                  { value: 'fresh', label: (node.data.controlMode ?? 'continuous') === 'continuous' ? '每帧自行截图推理' : '执行新的 Spatial 检测' },
+                ]}
+                onChange={(v) => onChangeNode(updateNodeData(node, {
+                  spatialReuseShared: v !== 'fresh',
+                }))}
+              />
+            </label>
+            <p className="properties-panel__hint">
+              {(node.data.controlMode ?? 'continuous') === 'continuous'
+                ? '始终读取持续 Live Vision 或共享检测通道最新的实时 Player/Target 结果，不重复截图或推理；共享通道没有完整结果时才补当前帧。'
+                : '优先读取共享检测通道的最新实时结果；共享通道没有完整结果时会获取当前画面并执行新的 Spatial 检测。'}
+            </p>
             <label>
               方向来源
               <CustomSelect
@@ -1787,13 +2048,16 @@ export function PropertiesPanel({
                 />
               </label>
               <label>
-                检测超时（ms）
-                <NumberInput
-                  value={node.data.timeoutMs}
-                  fallback={5000}
-                  min={0}
-                  step={100}
-                  onChange={(value) => onChangeNode(updateNodeData(node, { timeoutMs: value }))}
+                运行方式
+                <CustomSelect
+                  value={node.data.runMode ?? 'untilHit'}
+                  options={[
+                    { value: 'continuous', label: '持续共享观察（推荐）' },
+                    { value: 'untilHit', label: '检测到一次后结束' },
+                  ]}
+                  onChange={(value) => onChangeNode(updateNodeData(node, {
+                    runMode: value as 'continuous' | 'untilHit',
+                  }))}
                 />
               </label>
             </div>
@@ -1808,16 +2072,34 @@ export function PropertiesPanel({
                   { value: 'ocr', label: 'OCR 文字定位' },
                   { value: 'all', label: 'YOLO + 模板 + OCR' },
                 ]}
-                onChange={(v) => onChangeNode(updateNodeData(node, { detectMode: v as 'yolo' | 'template' | 'both' }))}
+                onChange={(v) => {
+                  const detectMode = v as LiveVisionNode['data']['detectMode'];
+                  onChangeNode(updateNodeData(node, {
+                    detectMode,
+                    runMode: detectMode === 'yolo' ? (node.data.runMode ?? 'continuous') : 'untilHit',
+                  }));
+                }}
               />
             </label>
+            {(node.data.runMode ?? 'untilHit') === 'untilHit' && (
+              <label>
+                检测超时（ms）
+                <NumberInput
+                  value={node.data.timeoutMs}
+                  fallback={5000}
+                  min={500}
+                  step={100}
+                  onChange={(value) => onChangeNode(updateNodeData(node, { timeoutMs: value }))}
+                />
+              </label>
+            )}
             {(node.data.detectMode === 'yolo' || node.data.detectMode === 'both' || node.data.detectMode === 'all') && (
               <>
                 <label>
                   YOLO 模型
                   <ModelPicker
-                    value={node.data.yoloModelPath}
-                    onChange={(model) => onChangeNode(updateNodeData(node, { yoloModelPath: model.path }))}
+                    value={node.data.yoloModelId}
+                    onChange={(model) => onChangeNode(updateNodeData(node, { yoloModelId: model.id, yoloModelPath: model.path }))}
                     refreshKey={yoloVersion ?? 0}
                   />
                 </label>
@@ -1827,11 +2109,30 @@ export function PropertiesPanel({
                   </button>
                 )}
                 <label>
-                  目标标签（可选）
+                  目标标签（多个用逗号分隔）
                   <input
-                    value={node.data.yoloLabel ?? ''}
-                    onChange={(e) => onChangeNode(updateNodeData(node, { yoloLabel: e.target.value }))}
-                    placeholder="留空表示匹配任意类别"
+                    value={(node.data.yoloLabels ?? (node.data.yoloLabel ? [node.data.yoloLabel] : [])).join(', ')}
+                    onChange={(e) => {
+                      const labels = e.target.value
+                        .split(/[,，;；\n]/)
+                        .map((label) => label.trim())
+                        .filter(Boolean);
+                      onChangeNode(updateNodeData(node, { yoloLabels: labels, yoloLabel: undefined }));
+                    }}
+                    placeholder="留空表示持续发布全部类别"
+                  />
+                </label>
+                <label>
+                  检测结果
+                  <CustomSelect
+                    value={node.data.yoloReuseShared === false ? 'fresh' : 'shared'}
+                    options={[
+                      { value: 'shared', label: '实时共享结果（推荐）' },
+                      { value: 'fresh', label: '每帧独立推理' },
+                    ]}
+                    onChange={(value) => onChangeNode(updateNodeData(node, {
+                      yoloReuseShared: value !== 'fresh',
+                    }))}
                   />
                 </label>
                 <label>
@@ -1926,18 +2227,24 @@ export function PropertiesPanel({
                 )}
               </>
             )}
-            <label>
-              检测到目标后
-              <CustomSelect
-                value={node.data.action ?? 'returnCoords'}
-                options={[
-                  { value: 'returnCoords', label: '返回坐标（交给后续节点处理）' },
-                  { value: 'click', label: '直接点击检测到的目标' },
-                ]}
-                onChange={(v) => onChangeNode(updateNodeData(node, { action: v as 'returnCoords' | 'click' }))}
-              />
-            </label>
-            <p className="properties-panel__hint">实时检测按所选处理帧率持续读取画面；实际 FPS 受模型、画面来源和硬件性能限制。</p>
+            {(node.data.runMode ?? 'untilHit') === 'untilHit' && (
+              <label>
+                检测到目标后
+                <CustomSelect
+                  value={node.data.action ?? 'returnCoords'}
+                  options={[
+                    { value: 'returnCoords', label: '返回坐标（交给后续节点处理）' },
+                    { value: 'click', label: '直接点击检测到的目标' },
+                  ]}
+                  onChange={(v) => onChangeNode(updateNodeData(node, { action: v as 'returnCoords' | 'click' }))}
+                />
+              </label>
+            )}
+            <p className="properties-panel__hint">
+              {(node.data.runMode ?? 'untilHit') === 'continuous'
+                ? '持续观察节点会立即放行后续流程，并在后台按帧率持续发布所有检测标签。多个 If/Recognize 共用这一份结果和同一个 YOLO 模型进程；停止工作流或重新运行时结束。'
+                : '实时检测按所选处理帧率持续读取画面，命中或超时后结束；实际 FPS 受模型、画面来源和硬件性能限制。'}
+            </p>
           </section>
         )}
 
@@ -2089,6 +2396,17 @@ export function PropertiesPanel({
                               min={0}
                               max={100}
                               onChange={(value) => updateStrategy('yolo', { threshold: value })}
+                            />
+                          </label>
+                          <label>
+                            共享检测结果
+                            <CustomSelect
+                              value={strategy.reuseShared === false ? 'fresh' : 'shared'}
+                              options={[
+                      { value: 'shared', label: '实时共享结果（推荐）' },
+                                { value: 'fresh', label: '总是分析当前帧' },
+                              ]}
+                              onChange={(v) => updateStrategy('yolo', { reuseShared: v !== 'fresh' })}
                             />
                           </label>
                         </>

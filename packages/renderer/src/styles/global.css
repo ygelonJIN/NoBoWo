@@ -5273,6 +5273,15 @@ pre::-webkit-scrollbar-thumb:hover {
   color: var(--color-danger);
   font-size: 12.5px;
 }
+.yolo-annotate__notice {
+  margin: 8px 14px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(var(--rgb-success), 0.3);
+  background: rgba(var(--rgb-success), 0.08);
+  color: var(--color-success);
+  font-size: 12.5px;
+}
 .yolo-thumb {
   object-fit: cover;
   border-radius: 8px;
@@ -6035,6 +6044,21 @@ pre::-webkit-scrollbar-thumb:hover {
   border-radius: 3px;
   flex-shrink: 0;
 }
+.yolo-annotate__class-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1px solid rgba(var(--rgb-border), 0.3);
+  border-radius: 5px;
+  background: rgba(var(--rgb-white), 0.06);
+  color: rgba(var(--rgb-text), 0.62);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 .yolo-annotate__class-name {
   flex: 1;
   min-width: 0;
@@ -6329,6 +6353,11 @@ pre::-webkit-scrollbar-thumb:hover {
   cursor: pointer;
   white-space: nowrap;
   transition: background 120ms ease, border-color 120ms ease;
+}
+.yolo-annotate__classchip .yolo-annotate__class-key {
+  width: 16px;
+  height: 16px;
+  border-color: rgba(var(--rgb-border), 0.24);
 }
 .yolo-annotate__classchip:hover {
   background: rgba(var(--rgb-white), 0.09);
@@ -10110,6 +10139,52 @@ pre::-webkit-scrollbar-thumb:hover {
   z-index: 2;
   overflow: hidden;
   pointer-events: none;
+}
+
+.stream-stats-overlay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  display: flex;
+  max-width: calc(100% - 16px);
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  background: rgba(4, 8, 12, 0.72);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(5px);
+  pointer-events: none;
+}
+
+.stream-stats-overlay__item {
+  min-width: 42px;
+  padding: 3px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #eaf7f5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.stream-stats-overlay__latency--ok {
+  color: #7ee2a8;
+}
+
+.stream-stats-overlay__latency--warn {
+  color: #ffd166;
+}
+
+.stream-stats-overlay__latency--bad {
+  color: #ff7b86;
 }
 
 .stream-vision-overlay__box {

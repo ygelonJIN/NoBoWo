@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { YoloAnnotation, YoloBox, YoloClassDefinition, YoloImage } from '@nobowo/core';
+import {
+  classIndexFromShortcut,
+  isTextShortcutTarget,
+  type ShortcutTargetLike,
+  type YoloAnnotation,
+  type YoloBox,
+  type YoloClassDefinition,
+  type YoloImage,
+} from '@nobowo/core';
 import { YoloThumb } from './YoloThumb';
 
 type Props = {
@@ -26,12 +34,13 @@ type StageProps = {
   onSelect: (id: string | null) => void;
   onChange: (annotations: YoloAnnotation[]) => void;
   tool: 'draw' | 'move';
+  defaultClassId?: string | null;
 };
 
 const ZOOM_STEP = 1.15;
 const MAX_ZOOM = 24;
 
-function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, classes, selectedId, onSelect, onChange, tool }: StageProps) {
+function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, classes, selectedId, onSelect, onChange, tool, defaultClassId }: StageProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
@@ -46,6 +55,8 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
   dragRef.current = drag;
   const toolRef = useRef(tool);
   toolRef.current = tool;
+  const defaultClassIdRef = useRef(defaultClassId);
+  defaultClassIdRef.current = defaultClassId;
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -219,7 +230,7 @@ function AnnotationStage({ imageUrl, imageWidth, imageHeight, annotations, class
         if (box.width >= 0.005 && box.height >= 0.005) {
           const ann: YoloAnnotation = {
             id: `ann-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-            classId: null,
+            classId: defaultClassIdRef.current ?? null,
             box,
           };
           onChange([...annotationsRef.current, ann]);
@@ -360,6 +371,7 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
   const [tool, setTool] = useState<'draw' | 'move'>('draw');
   const [saveState, setSaveState] = useState<'saved' | 'saving'>('saved');
   const [newClass, setNewClass] = useState('');
+  const [nextClassId, setNextClassId] = useState<string | null>(null);
   const [confirmClass, setConfirmClass] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -462,10 +474,36 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
     }
   };
 
-  const assignClass = (classId: string | null) => {
+  const assignClass = useCallback((classId: string | null) => {
     if (!selectedId) return;
     commitAnnotations(currentAnnotations.map((a) => (a.id === selectedId ? { ...a, classId } : a)));
-  };
+  }, [commitAnnotations, currentAnnotations, selectedId]);
+
+  const chooseClass = useCallback((classId: string | null) => {
+    if (selectedId) {
+      assignClass(classId);
+      return;
+    }
+    setNextClassId(classId);
+  }, [assignClass, selectedId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTextShortcutTarget(event.target as ShortcutTargetLike)) return;
+      const classIndex = classIndexFromShortcut(event.key, classes.length);
+      if (classIndex === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      chooseClass(classes[classIndex].id);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [chooseClass, classes]);
+
+  useEffect(() => {
+    if (nextClassId && !classes.some((cls) => cls.id === nextClassId)) setNextClassId(null);
+  }, [classes, nextClassId]);
 
   const deleteSelected = () => {
     if (!selectedId) return;
@@ -536,10 +574,11 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
         </div>
         <div className="yolo-annotate__class-list">
           {classes.length === 0 && <div className="yolo-annotate__empty-hint">还没有类别。先添加类别（例如「按钮」「输入框」「图标」），再框选图片并给它命名。</div>}
-          {classes.map((cls) => (
-            <div key={cls.id} className={`yolo-annotate__class delete-hover ${selectedAnnotation?.classId === cls.id ? 'active' : ''}`}>
+          {classes.map((cls, index) => (
+            <div key={cls.id} className={`yolo-annotate__class delete-hover ${selectedAnnotation?.classId === cls.id || (!selectedAnnotation && nextClassId === cls.id) ? 'active' : ''}`}>
               <span className="yolo-annotate__class-dot" style={{ background: cls.color }} />
-              <button className="yolo-annotate__class-name" onClick={() => assignClass(cls.id)} title="点击把当前选框归为该类别">
+              {index < 9 && <span className="yolo-annotate__class-key">{index + 1}</span>}
+              <button className="yolo-annotate__class-name" onClick={() => chooseClass(cls.id)} title={index < 9 ? `按 ${index + 1} 或点击归类` : '点击归类'}>
                 {cls.name}
               </button>
               <span className="yolo-annotate__class-count">{classCounts.get(cls.id) ?? 0}</span>
@@ -608,27 +647,30 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
             onSelect={setSelectedId}
             onChange={commitAnnotations}
             tool={tool}
+            defaultClassId={nextClassId}
           />
         </div>
 
         <div className="yolo-annotate__classbar">
-          <span className="yolo-annotate__classbar-title">这个是什么？</span>
-          {classes.map((cls) => (
+          <span className="yolo-annotate__classbar-title">这个是什么？按 1–9</span>
+          {classes.map((cls, index) => (
             <button
               key={cls.id}
-              className={`yolo-annotate__classchip ${selectedAnnotation?.classId === cls.id ? 'active' : ''}`}
+              className={`yolo-annotate__classchip ${selectedAnnotation?.classId === cls.id || (!selectedAnnotation && nextClassId === cls.id) ? 'active' : ''}`}
               style={
-                selectedAnnotation?.classId === cls.id
+                selectedAnnotation?.classId === cls.id || (!selectedAnnotation && nextClassId === cls.id)
                   ? { borderColor: cls.color, background: `${cls.color}26`, color: cls.color }
                   : undefined
               }
-              onClick={() => assignClass(cls.id)}
+              onClick={() => chooseClass(cls.id)}
+              title={index < 9 ? `快捷键 ${index + 1}` : undefined}
             >
+              {index < 9 && <span className="yolo-annotate__class-key">{index + 1}</span>}
               <span className="yolo-annotate__class-dot" style={{ background: cls.color }} />
               {cls.name}
             </button>
           ))}
-          <button className="yolo-annotate__classchip" onClick={() => assignClass(null)}>
+          <button className="yolo-annotate__classchip" onClick={() => chooseClass(null)}>
             清除分类
           </button>
           <button className="yolo-annotate__classchip danger" onClick={deleteSelected} disabled={!selectedId}>
@@ -639,12 +681,14 @@ export function YoloAnnotationTab({ datasetId, onDatasetChanged }: Props) {
         <div className="yolo-annotate__status">
           {selectedAnnotation ? (
             selectedAnnotation.classId ? (
-              <>已选中框：{classes.find((c) => c.id === selectedAnnotation.classId)?.name ?? ''}</>
+              <>已选中框：{classes.find((c) => c.id === selectedAnnotation.classId)?.name ?? ''} · 按 1–9 可改分类</>
             ) : (
-              <>该选框尚未分类，点击下方类别给它命名</>
+              <>该选框尚未分类，按 1–9 或点击下方类别给它命名</>
             )
+          ) : nextClassId ? (
+            <>下一个框将标为：{classes.find((c) => c.id === nextClassId)?.name ?? ''} · 按 1–9 可切换</>
           ) : (
-            <>当前图片 {boxCount} 个框 · 已标注 {annotatedImages}/{images.length} 张</>
+            <>当前图片 {boxCount} 个框 · 已标注 {annotatedImages}/{images.length} 张 · 按 1–9 预选类别</>
           )}
         </div>
         {error && <div className="yolo-annotate__error">{error}</div>}

@@ -27,8 +27,8 @@ export type Ps5ConnectPayload = {
 
 async function resolvePs5RuntimePath(): Promise<string | null> {
   const candidates = [
-    join(app.getAppPath(), 'packages', 'engine', 'python', 'ps5_runtime.py'),
     join(process.resourcesPath, 'engine', 'python', 'ps5_runtime.py'),
+    join(app.getAppPath(), 'packages', 'engine', 'python', 'ps5_runtime.py'),
     join(app.getAppPath(), 'engine', 'python', 'ps5_runtime.py'),
   ];
   for (const path of candidates) {
@@ -43,6 +43,7 @@ async function resolvePs5RuntimePath(): Promise<string | null> {
 }
 
 export class Ps5RuntimeClient {
+  private static readonly TELEMETRY_VERSION = 2;
   private child: ChildProcessWithoutNullStreams | null = null;
   private starting: Promise<ChildProcessWithoutNullStreams> | null = null;
   private nextId = 1;
@@ -125,8 +126,20 @@ export class Ps5RuntimeClient {
     });
   }
 
-  status(): Promise<Ps5RuntimeStatus> {
-    return this.request<Ps5RuntimeStatus>('status', {}, 10000);
+  private async restartChild(): Promise<void> {
+    const child = this.child;
+    this.child = null;
+    this.buffer = '';
+    if (child && child.exitCode === null && !child.killed) child.kill();
+  }
+
+  async status(): Promise<Ps5RuntimeStatus> {
+    const status = await this.request<Ps5RuntimeStatus>('status', {}, 10000);
+    if (status.telemetryVersion !== Ps5RuntimeClient.TELEMETRY_VERSION && !status.connected) {
+      await this.restartChild();
+      return this.request<Ps5RuntimeStatus>('status', {}, 10000);
+    }
+    return status;
   }
 
   discover(timeout = 2.5): Promise<{ devices: Ps5HostInfo[] }> {
@@ -166,7 +179,12 @@ export class Ps5RuntimeClient {
   }
 
   connect(payload: Ps5ConnectPayload): Promise<Ps5RuntimeStatus> {
-    return this.request('connect', payload as unknown as Record<string, unknown>, 60000);
+    return this.status().then(async (status) => {
+      if (status.telemetryVersion !== Ps5RuntimeClient.TELEMETRY_VERSION) {
+        await this.restartChild();
+      }
+      return this.request<Ps5RuntimeStatus>('connect', payload as unknown as Record<string, unknown>, 60000);
+    });
   }
 
   disconnect(): Promise<{ connected: boolean }> {

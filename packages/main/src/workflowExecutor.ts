@@ -18,6 +18,7 @@ import {
   createPartialSpatialResult,
   decideContinuousMoveFrame,
   directionFromVector,
+  evaluateYoloCondition,
   findWorkflowEdgeBySource,
   findWorkflowEdgesBySource,
   ifBranchForPreviousStatus,
@@ -27,6 +28,8 @@ import {
   resolveLoopPair,
   runParallelWorkflowBranches,
   type WorkflowChainEnd,
+  type YoloConditionEvaluation,
+  type YoloConditionSample,
   WorkflowStateMachine,
   resolveFrameRateSetting,
   solveHomography,
@@ -36,6 +39,8 @@ import {
 } from '@nobowo/core';
 import type {
   CloudApiProfile,
+  IfNode,
+  LiveVisionNode,
   LegacyFrameRateSetting,
   LoopNode,
   MoveDirection,
@@ -81,7 +86,7 @@ const STRATEGY_NAMES: Record<RecognizeStrategyKey, string> = {
   cloudApi: '云端 API',
 };
 
-export const WORKFLOW_EXECUTOR_VERSION = 'state-v9';
+export const WORKFLOW_EXECUTOR_VERSION = 'state-v10';
 
 // ===== 只读存储辅助（与 main.ts 保持一致；执行引擎运行时只读不写这些数据）=====
 
@@ -266,7 +271,22 @@ type YoloStrategyConfig = {
   modelPath?: string;
   label?: string;
   threshold?: number;
+  reuseShared?: boolean;
 };
+
+type LatestYoloObservation = {
+  at: number;
+  detections: YoloDetection[];
+};
+
+type ContinuousYoloVisionService = {
+  key: string;
+  generation: number;
+  stop: () => void;
+  promise: Promise<void>;
+};
+
+type SpatialDetectionReuseMode = 'auto' | 'sharedOnly' | 'fresh';
 
 type OcrStrategyConfig = {
   text: string;
@@ -291,6 +311,14 @@ function parseBounds(raw: string): { x: number; y: number; width: number; height
   const [x, y, width, height] = nums.slice(-4).map(Number);
   if ([x, y, width, height].some((n) => !Number.isFinite(n))) return null;
   return { x, y, width, height };
+}
+
+function liveVisionYoloLabels(node: LiveVisionNode): string[] {
+  const labels = [
+    ...(node.data.yoloLabels ?? []),
+    ...(node.data.yoloLabel ? [node.data.yoloLabel] : []),
+  ];
+  return Array.from(new Set(labels.map((label) => label.trim()).filter(Boolean)));
 }
 
 function getMacWindowOwnerById(windowId?: number): string | null {
@@ -414,6 +442,7 @@ export class WorkflowExecutor {
   private startedAt: number | null = null;
   private paused: 'none' | 'user' | 'fail' = 'none';
   private stopped = false;
+  private executeActive = false;
   private resumeRetry = false;
   private runGeneration = 0;
   private pauseWaiters: Array<() => void> = [];
@@ -427,6 +456,12 @@ export class WorkflowExecutor {
   private activeLoopIds = new Set<string>();
   private yoloSession: YoloInferenceSession | null = null;
   private yoloSessionKey = '';
+  /** 按模型和画面来源共享的最近 YOLO 帧，供 LiveVision/Spatial/If 共同复用。 */
+  private readonly yoloObservationHistory = new Map<string, YoloConditionSample[]>();
+  /** 完整检测框只保留每个共享通道的最新一帧，避免持续观察累积大量坐标数组。 */
+  private readonly latestYoloObservations = new Map<string, LatestYoloObservation>();
+  /** 同一模型/画面来源只启动一个持续 Live Vision 观察源。 */
+  private readonly continuousYoloVision = new Map<string, ContinuousYoloVisionService>();
   private nodeStates: Record<string, NodeRunStatus> = {};
   private nodeResults: Record<string, NodeRunResult> = {};
   private handledFailureNodeIds = new Set<string>();
@@ -459,6 +494,28 @@ export class WorkflowExecutor {
     this.yoloSession = null;
     this.yoloSessionKey = '';
     if (session) void session.close();
+  }
+
+  private resetYoloObservationHistory(): void {
+    this.yoloObservationHistory.clear();
+    this.latestYoloObservations.clear();
+  }
+
+  private stopContinuousYoloVision(): void {
+    const services = Array.from(this.continuousYoloVision.values());
+    this.continuousYoloVision.clear();
+    for (const service of services) service.stop();
+  }
+
+  /** 应用退出时关闭常驻 YOLO；工作流结束后会话继续保留供下一次运行复用。 */
+  async dispose(): Promise<void> {
+    this.stopped = true;
+    this.stopContinuousYoloVision();
+    this.resetYoloObservationHistory();
+    const session = this.yoloSession;
+    this.yoloSession = null;
+    this.yoloSessionKey = '';
+    if (session) await session.close();
   }
 
   private async resolveProcessingFrameRate(
@@ -510,7 +567,8 @@ export class WorkflowExecutor {
     this.nodeStates = {};
     this.nodeResults = {};
     this.handledFailureNodeIds.clear();
-    this.resetYoloSession();
+    this.stopContinuousYoloVision();
+    this.resetYoloObservationHistory();
 
     this.emit({
       t: 'start',
@@ -548,20 +606,37 @@ export class WorkflowExecutor {
   }
 
   stop(): { ok: boolean; message?: string } {
-    if (this.status !== 'running' && this.status !== 'paused') {
+    const hasContinuousVision = this.continuousYoloVision.size > 0;
+    if (this.status !== 'running' && this.status !== 'paused' && !hasContinuousVision) {
       return { ok: false, message: '当前没有运行中的工作流' };
     }
     this.stopped = true;
+    this.stopContinuousYoloVision();
     this.paused = 'none';
-    this.status = 'stopped';
+    const runId = this.runId;
+    if (this.status === 'running' || this.status === 'paused') {
+      this.status = 'stopped';
+    }
     const waiters = this.pauseWaiters.splice(0);
     for (const resolve of waiters) resolve();
+    if (!this.executeActive && runId) {
+      this.emit({ t: 'stopped', runId, message: '工作流已停止' });
+    }
     return { ok: true };
   }
 
   // ===== 主循环 =====
 
   private async execute(generation: number): Promise<void> {
+    this.executeActive = true;
+    try {
+      await this.executeCore(generation);
+    } finally {
+      this.executeActive = false;
+    }
+  }
+
+  private async executeCore(generation: number): Promise<void> {
     const runId = this.runId!;
     const workflow = this.workflow!;
     const startedAt = this.startedAt ?? Date.now();
@@ -597,7 +672,6 @@ export class WorkflowExecutor {
           message,
         },
       });
-      this.resetYoloSession();
       return;
     }
 
@@ -605,7 +679,6 @@ export class WorkflowExecutor {
     if (this.stopped || this.status === 'stopped') {
       this.status = 'stopped';
       this.emit({ t: 'stopped', runId, message: '工作流已停止' });
-      this.resetYoloSession();
       return;
     }
     if (this.status === 'paused') {
@@ -615,8 +688,17 @@ export class WorkflowExecutor {
     const failedIds = Object.values(this.nodeResults)
       .filter((result) => result.status === 'fail' && !this.handledFailureNodeIds.has(result.nodeId))
       .map((result) => result.nodeId);
+    if (this.continuousYoloVision.size > 0) {
+      this.status = 'running';
+      this.emit({
+        t: 'log',
+        runId,
+        level: 'info',
+        message: `流程节点已执行完成；${this.continuousYoloVision.size} 个持续 Live Vision 仍在共享检测结果。点击「停止」结束观察。`,
+      });
+      return;
+    }
     this.status = 'done';
-    this.resetYoloSession();
     this.emit({
       t: 'done',
       runId,
@@ -1101,7 +1183,10 @@ export class WorkflowExecutor {
       }
 
       case 'if': {
-        // If 只捕获直接前一个节点的最终状态；旧 conditionType/expression 字段仅为数据兼容保留。
+        if (node.data.conditionMode === 'yolo') {
+          return this.executeYoloIf(node, generation);
+        }
+        // 兼容旧工作流：缺省仍判断直接前一个节点的最终状态。
         const previous = this.context.lastResult;
         const branch = ifBranchForPreviousStatus(previous?.status);
         const previousLabel = previous ? `${previous.nodeId}${previous.status === 'ok' ? '成功' : '失败'}` : '无上一节点';
@@ -1110,6 +1195,7 @@ export class WorkflowExecutor {
           nodeId: node.id,
           status: 'ok',
           branch,
+          condition: { mode: 'previous' },
           message: `上一节点${branch === 'true' ? '成功' : '失败'} → ${branch === 'true' ? 'True' : 'False'}`,
         };
       }
@@ -1263,6 +1349,17 @@ export class WorkflowExecutor {
         const detectMode = node.data.detectMode ?? 'yolo';
         const action = node.data.action ?? 'returnCoords';
 
+        if ((node.data.runMode ?? 'untilHit') === 'continuous') {
+          if (detectMode !== 'yolo') {
+            return {
+              nodeId: node.id,
+              status: 'fail',
+              message: '持续共享观察目前使用 YOLO；模板/OCR 请选择“检测到一次后结束”',
+            };
+          }
+          return this.startContinuousYoloVision(node, generation);
+        }
+
         log('info', `实时检测：来源 ${source}，${fps} FPS，${timeoutMs}ms 超时，模式 ${detectMode}`);
         const start = Date.now();
         const frameInterval = Math.round(1000 / fps);
@@ -1274,6 +1371,7 @@ export class WorkflowExecutor {
         let frames = 0;
         let hits = 0;
         let latestHit: { x: number; y: number; label?: string; confidence?: number } | null = null;
+        let matchedLabels: string[] = [];
 
         const captureNode = {
           id: `${node.id}-cap`,
@@ -1311,14 +1409,33 @@ export class WorkflowExecutor {
 
           if (detectMode === 'yolo' || detectMode === 'both' || detectMode === 'all') {
             if (node.data.yoloModelPath) {
-              const detections = await this.runSpatialYolo(
-                frame,
-                node.data.yoloModelPath,
-                undefined,
-                undefined,
-                node.data.yoloThreshold ?? 60,
+              const observationKey = this.createYoloObservationKey(node.data.yoloModelPath, {
+                source,
+                streamSourceId: node.data.streamSourceId,
+                windowHint: node.data.windowHint,
+                windowId: node.data.windowId,
+                windowApp: node.data.windowApp,
+              });
+              let detections = node.data.yoloReuseShared === false
+                ? null
+                : this.reusableYoloDetections(observationKey);
+              if (!detections) {
+                detections = await this.runSpatialYolo(
+                  frame,
+                  node.data.yoloModelPath,
+                  node.data.yoloModelId,
+                  undefined,
+                  1,
+                  observationKey,
+                );
+              }
+              const wantedLabels = liveVisionYoloLabels(node);
+              const threshold = node.data.yoloThreshold ?? 60;
+              const matching = detections.filter((detection) =>
+                detection.confidence >= threshold
+                && (wantedLabels.length === 0 || wantedLabels.includes(detection.label)),
               );
-              for (const detection of detections) {
+              for (const detection of matching) {
                 const [x, y, width, height] = detection.box;
                 overlayMarkers.push({
                   kind: 'box',
@@ -1330,11 +1447,25 @@ export class WorkflowExecutor {
                   confidence: detection.confidence,
                 });
               }
-              const det = this.pickDetection(detections, node.data.yoloLabel ?? '');
+              const det = matching
+                .slice()
+                .sort((a, b) => b.confidence - a.confidence)[0] ?? null;
               if (det?.box) {
                 const [bx, by, bw, bh] = det.box;
-                hit = { x: bx + bw / 2, y: by + bh / 2, label: det.label, confidence: det.confidence };
+                hit = {
+                  x: bx + bw / 2,
+                  y: by + bh / 2,
+                  label: det.label,
+                  confidence: det.confidence,
+                };
               }
+              if (hit) {
+                matchedLabels = Array.from(new Set(matching.map((item) => item.label)));
+              }
+              /*
+                这里只筛选展示/命中目标；完整检测仍已进入共享历史，
+                因此另一个标签的 If 或 Recognize 可直接复用同一帧。
+              */
             } else {
               log('warn', '实时检测：尚未选择 YOLO 模型，跳过本帧 YOLO');
             }
@@ -1423,7 +1554,7 @@ export class WorkflowExecutor {
             latestHit = hit;
             const hitLabel = hit.label ? `：${hit.label}` : '';
             const hitConf = typeof hit.confidence === 'number' ? `（${hit.confidence}%）` : '';
-            const metrics = { ...processingMetrics(), liveFps: Math.round(frames / Math.max(0.001, (Date.now() - start) / 1000)), liveFrameCount: frames, liveHitCount: hits, liveHitRate: frames > 0 ? hits / frames : 0, liveLatestHit: hit };
+            const metrics = { ...processingMetrics(), liveFps: Math.round(frames / Math.max(0.001, (Date.now() - start) / 1000)), liveFrameCount: frames, liveHitCount: hits, liveHitRate: frames > 0 ? hits / frames : 0, liveLatestHit: hit, matchedLabels };
             if (action === 'returnCoords') {
               return { nodeId: node.id, status: 'ok', hitCoords: { x: hit.x, y: hit.y }, message: `检测到目标${hitLabel}${hitConf}`, ...metrics };
             }
@@ -2001,7 +2132,14 @@ export class WorkflowExecutor {
           const integratedMove = this.findDirectContinuousMovePlayer(node);
           if (integratedMove) {
             log('info', `空间检测已获得空间关系，进入 ${integratedMove.title || integratedMove.id} 持续闭环`);
-            const moveResult = await this.executeMovePlayer(integratedMove, generation);
+            const moveResult = await this.executeMovePlayer(
+              integratedMove,
+              generation,
+              result.spatial ? {
+                spatial: result.spatial,
+                reusedYolo: result.reusedYolo === true,
+              } : undefined,
+            );
             return {
               ...moveResult,
               nodeId: node.id,
@@ -2039,7 +2177,426 @@ export class WorkflowExecutor {
     };
   }
 
-  private async detectSpatialFrame(node: SpatialDetectorNode, frame: string, logResult = true, requireSameFrame = false, capture?: SpatialCaptureContext): Promise<NodeRunResult> {
+  private createYoloObservationKey(
+    modelPath: string,
+    source: {
+      source: 'screen' | 'window' | 'stream';
+      streamSourceId?: string;
+      windowHint?: string;
+      windowId?: number;
+      windowApp?: string;
+    },
+  ): string {
+    const sourceKey = source.source === 'stream'
+      ? { source: source.source, streamSourceId: source.streamSourceId, windowHint: source.streamSourceId ? undefined : source.windowHint }
+      : source.source === 'window'
+        ? { source: source.source, windowId: source.windowId, windowHint: source.windowId ? undefined : source.windowHint }
+        : { source: source.source };
+    return JSON.stringify({
+      modelPath,
+      ...sourceKey,
+    });
+  }
+
+  private recordYoloObservation(
+    key: string | undefined,
+    detections: YoloDetection[],
+    at = Date.now(),
+  ): void {
+    if (!key) return;
+    const history = this.yoloObservationHistory.get(key) ?? [];
+    history.push({
+      at,
+      detections: detections.map((item) => ({
+        label: item.label,
+        confidence: item.confidence,
+      })),
+    });
+    // 4000 个轻量样本可覆盖 60 FPS 下 60 秒以上，同时限制常驻内存。
+    if (history.length > 4000) history.splice(0, history.length - 4000);
+    this.yoloObservationHistory.set(key, history);
+    this.latestYoloObservations.set(key, {
+      at,
+      detections: detections.map((item) => ({ ...item, box: [...item.box] as YoloDetection['box'] })),
+    });
+  }
+
+  private recentYoloObservations(key: string, maxAgeMs: number, now = Date.now()): YoloConditionSample[] {
+    const history = (this.yoloObservationHistory.get(key) ?? [])
+      .filter((sample) => now - sample.at <= maxAgeMs)
+      .sort((a, b) => a.at - b.at);
+    this.yoloObservationHistory.set(key, history);
+    return history;
+  }
+
+  private reusableYoloObservation(
+    key: string | undefined,
+  ): LatestYoloObservation | null {
+    if (!key) return null;
+    // 只有持续观察源仍在运行时才存在真正的实时共享输出。
+    // 单次推理留下的结果不会在后续步骤中被无限期复用。
+    if (!this.continuousYoloVision.has(key)) return null;
+    const latest = this.latestYoloObservations.get(key);
+    if (!latest) return null;
+    return {
+      at: latest.at,
+      detections: latest.detections.map((item) => ({ ...item, box: [...item.box] as YoloDetection['box'] })),
+    };
+  }
+
+  private reusableYoloDetections(key: string | undefined): YoloDetection[] | null {
+    return this.reusableYoloObservation(key)?.detections ?? null;
+  }
+
+  /**
+   * 启动或复用一个持续 YOLO 观察源。
+   * 节点本身立即返回，后台持续写入按“模型 + 画面来源”共享的检测历史。
+   */
+  private async startContinuousYoloVision(
+    node: LiveVisionNode,
+    generation: number,
+  ): Promise<NodeRunResult> {
+    const modelPath = node.data.yoloModelPath;
+    if (!modelPath) {
+      return { nodeId: node.id, status: 'fail', message: '持续 Live Vision 尚未选择 YOLO 模型' };
+    }
+    const source = node.data.source ?? 'stream';
+    const fps = await this.resolveProcessingFrameRate(node.data.fps, source, node.data.streamSourceId);
+    const frameInterval = Math.max(16, Math.round(1000 / fps));
+    const key = this.createYoloObservationKey(modelPath, {
+      source,
+      streamSourceId: node.data.streamSourceId,
+      windowHint: node.data.windowHint,
+      windowId: node.data.windowId,
+      windowApp: node.data.windowApp,
+    });
+    const existing = this.continuousYoloVision.get(key);
+    if (existing && existing.generation === generation) {
+      return {
+        nodeId: node.id,
+        status: 'ok',
+        message: `已复用持续 YOLO 观察源（${fps} FPS 上限）`,
+        targetFps: fps,
+      };
+    }
+    existing?.stop();
+    this.continuousYoloVision.delete(key);
+
+    const wantedLabels = liveVisionYoloLabels(node);
+    const threshold = node.data.yoloThreshold ?? 60;
+    const captureNode = {
+      id: `${node.id}-continuous-cap`,
+      type: 'screenshot',
+      title: `${node.title} Shared Frame`,
+      position: node.position,
+      enabled: true,
+      data: {
+        regionMode: 'full',
+        source,
+        streamSourceId: node.data.streamSourceId,
+        windowHint: node.data.windowHint,
+        windowId: node.data.windowId,
+        windowApp: node.data.windowApp,
+      },
+    } as ScreenshotNode;
+
+    let stopRequested = false;
+    let service: ContinuousYoloVisionService | null = null;
+    let frames = 0;
+    let hits = 0;
+    let lastErrorMessage = '';
+    let lastErrorLogAt = 0;
+    const startedAt = Date.now();
+    const serviceRunId = this.runId!;
+    const promise = (async () => {
+      try {
+        while (!stopRequested && !this.stopped && this.runGeneration === generation) {
+          if (this.paused !== 'none') {
+            await sleep(100);
+            continue;
+          }
+          const iterationStartedAt = Date.now();
+          const cap = await this.captureNodeImage(captureNode, { jpeg: true });
+          if (!cap.ok || !cap.frame) {
+            lastErrorMessage = cap.message ?? '无法取得画面';
+            if (Date.now() - lastErrorLogAt > 5000) {
+              lastErrorLogAt = Date.now();
+              this.emit({
+                t: 'log',
+                runId: serviceRunId,
+                level: 'warn',
+                message: `持续 Live Vision 暂时无法取得画面：${lastErrorMessage}`,
+                nodeId: node.id,
+              });
+            }
+            await sleep(frameInterval);
+            continue;
+          }
+
+          try {
+            const detections = await this.runSpatialYolo(
+              cap.frame,
+              modelPath,
+              node.data.yoloModelId,
+              undefined,
+              1,
+              key,
+            );
+            frames += 1;
+            const matching = detections.filter((detection) =>
+              detection.confidence >= threshold
+              && (wantedLabels.length === 0 || wantedLabels.includes(detection.label)),
+            );
+            if (matching.length > 0) hits += 1;
+
+            const markers: VisionOverlayMarker[] = matching.map((detection) => {
+              const [x, y, width, height] = detection.box;
+              return {
+                kind: 'box',
+                x,
+                y,
+                width,
+                height,
+                label: detection.label,
+                confidence: detection.confidence,
+              };
+            });
+            this.emit({
+              t: 'visionOverlay',
+              runId: serviceRunId,
+              nodeId: node.id,
+              overlay: {
+                sourceWidth: cap.width ?? 0,
+                sourceHeight: cap.height ?? 0,
+                sourceKind: cap.sourceKind ?? 'other',
+                streamSourceId: cap.streamSourceId,
+                markers,
+              },
+            });
+          } catch (err) {
+            lastErrorMessage = err instanceof Error ? err.message : String(err);
+            if (Date.now() - lastErrorLogAt > 5000) {
+              lastErrorLogAt = Date.now();
+              this.emit({
+                t: 'log',
+                runId: serviceRunId,
+                level: 'warn',
+                message: `持续 Live Vision 本帧 YOLO 失败：${lastErrorMessage}`,
+                nodeId: node.id,
+              });
+            }
+          }
+
+          const remaining = frameInterval - (Date.now() - iterationStartedAt);
+          if (remaining > 0) await sleep(remaining);
+        }
+      } finally {
+        if (service && this.continuousYoloVision.get(key) === service) {
+          this.continuousYoloVision.delete(key);
+        }
+        const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
+        this.emit({
+          t: 'log',
+          runId: serviceRunId,
+          level: 'info',
+          message: `持续 Live Vision 已停止：${frames} 帧 · 命中 ${hits} 帧 · 平均 ${Math.round(frames / elapsedSeconds)} FPS`,
+          nodeId: node.id,
+        });
+      }
+    })();
+    service = { key, generation, stop: () => { stopRequested = true; }, promise };
+    this.continuousYoloVision.set(key, service);
+
+    this.emit({
+      t: 'log',
+      runId: serviceRunId,
+      level: 'info',
+      message: `持续 Live Vision 已启动：${fps} FPS 上限 · ${wantedLabels.length > 0 ? wantedLabels.join('、') : '全部类别'} · If/Recognize 将复用共享检测结果`,
+      nodeId: node.id,
+    });
+    return {
+      nodeId: node.id,
+      status: 'ok',
+      message: `持续 YOLO 观察已启动（${fps} FPS 上限），后续节点可复用检测结果`,
+      targetFps: fps,
+    };
+  }
+
+  private async executeYoloIf(node: IfNode, generation: number): Promise<NodeRunResult> {
+    const cfg = node.data.yolo;
+    if (!cfg) {
+      return { nodeId: node.id, status: 'fail', message: 'If 尚未配置 YOLO 条件' };
+    }
+
+    const index = await loadYoloIndex();
+    const selectedModel = (cfg.modelId
+      ? index.models.find((item) => item.id === cfg.modelId)
+      : index.models.find((item) => item.isActive)) as YoloModel | undefined;
+    const modelPath = cfg.modelPath
+      || (selectedModel ? join(yoloModelsDir(), selectedModel.file) : undefined);
+    if (!modelPath) {
+      return { nodeId: node.id, status: 'fail', message: 'If 的 YOLO 条件尚未选择模型' };
+    }
+
+    const stableFrames = Math.max(1, Math.min(60, Math.round(cfg.stableFrames || 1)));
+    const sampleIntervalMs = Math.max(33, Math.min(2000, Math.round(cfg.sampleIntervalMs || 150)));
+    const timeoutMs = Math.max(sampleIntervalMs, Math.round(cfg.timeoutMs || 5000));
+    const mode = cfg.mode ?? 'present';
+    const threshold = Math.max(0, Math.min(100, cfg.threshold ?? 60));
+    const timingMode = cfg.timingMode ?? 'stableFrames';
+    const windowMs = Math.max(50, Math.round(cfg.windowMs ?? 5000));
+    const maxFrameGapMs = Math.max(250, sampleIntervalMs * 3);
+    const historyMaxAgeMs = timingMode === 'recentWindow'
+      ? windowMs + sampleIntervalMs * 2
+      : maxFrameGapMs * (stableFrames + 1);
+    const rule = {
+      label: cfg.label ?? '',
+      mode,
+      threshold,
+      stableFrames,
+      timingMode,
+      windowMs,
+      maxFrameGapMs,
+    };
+    const historyKey = this.createYoloObservationKey(modelPath, cfg);
+    const requestThreshold = mode === 'confidenceAtLeast' ? threshold : 1;
+    const captureNode = {
+      id: `${node.id}-yolo-condition`,
+      type: 'screenshot',
+      title: `${node.title} YOLO`,
+      position: node.position,
+      enabled: true,
+      data: {
+        regionMode: 'full',
+        source: cfg.source,
+        streamSourceId: cfg.streamSourceId,
+        windowHint: cfg.windowHint,
+        windowId: cfg.windowId,
+        windowApp: cfg.windowApp,
+      },
+    } as ScreenshotNode;
+
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let processedFrames = 0;
+    let lastMessage = '尚未取得 YOLO 检测样本';
+    while (!this.stopped && this.runGeneration === generation) {
+      const now = Date.now();
+      const samples = this.recentYoloObservations(historyKey, historyMaxAgeMs, now);
+      const evaluation = evaluateYoloCondition(samples, rule, now);
+      if (evaluation.matched) {
+        const logLevel = evaluation.matched ? 'info' : 'warn';
+        this.emit({
+          t: 'log',
+          runId: this.runId!,
+          level: logLevel,
+          message: `If YOLO：${evaluation.message} → ${evaluation.branch === 'true' ? 'True' : 'False'}`,
+          nodeId: node.id,
+        });
+        return {
+          nodeId: node.id,
+          status: 'ok',
+          branch: evaluation.branch,
+          condition: { mode: 'yolo', yolo: evaluation },
+          message: evaluation.message,
+          processingFrameCount: processedFrames,
+        };
+      }
+      // “不存在”可以在完整连续帧/完整时间窗已经覆盖时提前确认；
+      // 正向条件则继续等待命中，直到判断超时。
+      if (mode === 'absent' && evaluation.ready) {
+        this.emit({
+          t: 'log',
+          runId: this.runId!,
+          level: 'warn',
+          message: `If YOLO：${evaluation.message} → False`,
+          nodeId: node.id,
+        });
+        return {
+          nodeId: node.id,
+          status: 'ok',
+          branch: 'false',
+          condition: { mode: 'yolo', yolo: evaluation },
+          message: evaluation.message,
+          processingFrameCount: processedFrames,
+        };
+      }
+
+      if (now >= deadline) {
+        if (processedFrames === 0 && evaluation.observedFrames === 0) {
+          return {
+            nodeId: node.id,
+            status: 'fail',
+            message: `If YOLO 条件无法评估：${lastMessage}`,
+            condition: { mode: 'yolo', yolo: evaluation },
+            processingFrameCount: processedFrames,
+          };
+        }
+        return {
+          nodeId: node.id,
+          status: 'ok',
+          branch: 'false',
+          condition: { mode: 'yolo', yolo: evaluation },
+          message: timingMode === 'recentWindow'
+            ? `If YOLO 在 ${timeoutMs}ms 等待期内未命中，按最近 ${windowMs}ms 窗口判定：${evaluation.message}`
+            : `If YOLO 条件在 ${timeoutMs}ms 内未形成 ${stableFrames} 帧连续结果：${evaluation.message}`,
+          processingFrameCount: processedFrames,
+        };
+      }
+
+      const latest = samples[samples.length - 1];
+      if (latest && now - latest.at < sampleIntervalMs / 2) {
+        await sleep(Math.max(1, sampleIntervalMs / 2 - (now - latest.at)));
+        continue;
+      }
+
+      const iterationStartedAt = Date.now();
+      const cap = await this.captureNodeImage(captureNode, { jpeg: true });
+      if (cap.ok && cap.frame) {
+        try {
+          await this.runSpatialYolo(
+            cap.frame,
+            modelPath,
+            cfg.modelId,
+            undefined,
+            requestThreshold,
+            historyKey,
+          );
+          processedFrames += 1;
+          lastMessage = '已取得 YOLO 检测样本';
+        } catch (err) {
+          lastMessage = err instanceof Error ? err.message : String(err);
+          this.emit({
+            t: 'log',
+            runId: this.runId!,
+            level: 'warn',
+            message: `If YOLO 本帧推理失败：${lastMessage}`,
+            nodeId: node.id,
+          });
+        }
+      } else {
+        lastMessage = cap.message ?? '无法取得画面';
+      }
+      const remainingFrameTime = sampleIntervalMs - (Date.now() - iterationStartedAt);
+      if (remainingFrameTime > 0) await sleep(remainingFrameTime);
+    }
+
+    return {
+      nodeId: node.id,
+      status: 'fail',
+      message: 'If YOLO 条件因工作流停止或被替换而中止',
+      processingFrameCount: processedFrames,
+    };
+  }
+
+  private async detectSpatialFrame(
+    node: SpatialDetectorNode,
+    frame: string | null,
+    logResult = true,
+    requireSameFrame = false,
+    capture?: SpatialCaptureContext,
+    reuseMode: SpatialDetectionReuseMode = node.data.reuseShared === false ? 'fresh' : 'auto',
+  ): Promise<NodeRunResult> {
     const log = (level: 'info' | 'warn' | 'error', message: string) =>
       this.emit({ t: 'log', runId: this.runId!, level, message, nodeId: node.id });
     const modelPath = node.data.modelPath;
@@ -2047,14 +2604,49 @@ export class WorkflowExecutor {
       return { nodeId: node.id, status: 'fail', message: 'Spatial Detector 尚未选择 YOLO 模型' };
     }
 
+    const observationKey = this.createYoloObservationKey(modelPath, {
+      source: node.data.source,
+      streamSourceId: node.data.streamSourceId,
+      windowHint: node.data.windowHint,
+      windowId: node.data.windowId,
+      windowApp: node.data.windowApp,
+    });
+
     try {
-      const detections = await this.runSpatialYolo(
-        frame,
-        modelPath,
-        node.data.modelId,
-        node.data.numClasses,
-        node.data.threshold ?? 60,
-      );
+      const threshold = Math.max(0, Math.min(100, node.data.threshold ?? 60));
+      const allowSharedReuse = reuseMode === 'sharedOnly'
+        || (reuseMode === 'auto' && node.data.reuseShared !== false);
+      const sharedObservation = !allowSharedReuse
+        ? null
+        : this.reusableYoloObservation(observationKey);
+      const reused = sharedObservation !== null;
+      let detections: YoloDetection[];
+      let observedAt = Date.now();
+      if (sharedObservation) {
+        detections = sharedObservation.detections.filter((item) => item.confidence >= threshold);
+        observedAt = sharedObservation.at;
+      } else if (frame && reuseMode !== 'sharedOnly') {
+        detections = await this.runSpatialYolo(
+          frame,
+          modelPath,
+          node.data.modelId,
+          node.data.numClasses,
+          threshold,
+          observationKey,
+        );
+      } else {
+        return {
+          nodeId: node.id,
+          status: 'ok',
+          partial: true,
+          spatialReady: false,
+          message: '共享检测结果为空或已过期',
+        };
+      }
+      const withReuse = (result: NodeRunResult): NodeRunResult => ({
+        ...result,
+        reusedYolo: reused || result.reusedYolo,
+      });
       const targetMode = node.data.targetMode ?? 'detection';
       if (targetMode === 'polyline') {
         const polyline = node.data.targetPolyline ?? [];
@@ -2069,25 +2661,25 @@ export class WorkflowExecutor {
             status: 'ok',
             partial: true,
             spatialReady: false,
-            message: '等待 Player 检测结果',
+            message: `等待 Player 检测结果${reused ? ' · 复用共享检测' : ''}`,
           };
         }
         this.spatialObservations[node.id] = {
-          player: { detection: playerDetection, seenAt: Date.now() },
+          player: { detection: playerDetection, seenAt: observedAt },
         };
         const playerImage = this.getDetectionAnchor(playerDetection, node.data.playerAnchor, node.data.playerKeypoint);
         if (!playerImage) {
           return { nodeId: node.id, status: 'fail', message: 'Player 配置为关键点锚点，但模型结果没有可用关键点' };
         }
         const targetImage = closestPointOnPolyline(playerImage, polyline);
-        return this.buildSpatialResult(node, playerDetection, undefined, playerImage, targetImage, targetMode, logResult, capture, detections);
+        return withReuse(this.buildSpatialResult(node, playerDetection, undefined, playerImage, targetImage, targetMode, logResult, capture, detections));
       }
       const update = updateSpatialObservations(
         this.spatialObservations[node.id] ?? {},
         detections,
         node.data.playerLabel,
         node.data.targetLabel,
-        Date.now(),
+        observedAt,
       );
       this.spatialObservations[node.id] = update.store;
       const summary = summarizeSpatialObservations(
@@ -2098,15 +2690,17 @@ export class WorkflowExecutor {
       if (!update.ready || (requireSameFrame && !(update.sawPlayer && update.sawTarget))) {
         this.emitSpatialOverlay(node, capture, detections);
         log('info', `空间检测跨帧缓存：${summary}`);
-        return {
-          ...createPartialSpatialResult(
-            node.id,
-            update.store,
-            node.data.playerLabel,
-            node.data.targetLabel,
-          ),
+        const partialResult = createPartialSpatialResult(
+          node.id,
+          update.store,
+          node.data.playerLabel,
+          node.data.targetLabel,
+        );
+        return withReuse({
+          ...partialResult,
           spatialProgress: update.sawPlayer || update.sawTarget,
-        };
+          message: `${partialResult.message ?? summary}${reused ? ' · 复用共享检测' : ''}`,
+        });
       }
       const playerDetection = update.store.player!.detection;
       const targetDetection = update.store.target!.detection;
@@ -2134,7 +2728,7 @@ export class WorkflowExecutor {
         }
       }
 
-      return this.buildSpatialResult(node, playerDetection, targetDetection, playerImage, targetImage, targetMode, logResult, capture, detections);
+      return withReuse(this.buildSpatialResult(node, playerDetection, targetDetection, playerImage, targetImage, targetMode, logResult, capture, detections));
     } catch (err) {
       this.emitSpatialOverlay(node, capture, []);
       return { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
@@ -2237,7 +2831,11 @@ export class WorkflowExecutor {
     };
   }
 
-  private async executeMovePlayer(node: MovePlayerNode, generation: number): Promise<NodeRunResult> {
+  private async executeMovePlayer(
+    node: MovePlayerNode,
+    generation: number,
+    initialSpatial?: { spatial: SpatialResult; reusedYolo: boolean },
+  ): Promise<NodeRunResult> {
     const log = (level: 'info' | 'warn' | 'error', message: string) =>
       this.emit({ t: 'log', runId: this.runId!, level, message, nodeId: node.id });
 
@@ -2268,6 +2866,7 @@ export class WorkflowExecutor {
 
     const fps = CONTINUOUS_MOVE_FPS;
     const frameInterval = Math.max(1, Math.round(1000 / fps));
+    const spatialReuseShared = node.data.spatialReuseShared !== false;
     const startedAt = Date.now();
     const captureNode = {
       id: `${node.id}-capture`,
@@ -2293,6 +2892,10 @@ export class WorkflowExecutor {
     let previousDirection: MoveDirection = 'stop';
     let previousReason: string | null = null;
     let lastError: string | null = null;
+    let reusedYolo = false;
+    let sharedFrameCount = 0;
+    let freshFrameCount = 0;
+    let initialSpatialAvailable = Boolean(initialSpatial);
 
     const metrics = () => ({
       targetFps: fps,
@@ -2302,10 +2905,11 @@ export class WorkflowExecutor {
       moveDirection: latestDirection,
       moveVector: latestVector,
       moveMagnitude: latestMagnitude,
+      reusedYolo,
     });
 
     const exitOnArrival = node.data.exitOnArrival ?? true;
-    log('info', `Move Player 持续闭环：${fps} FPS，实际停止距离 ${stopDistance}${detector.data.calibration ? detector.data.calibration.unit ?? 'world' : 'px'}（Move Player ${node.data.deadZone ?? 0} / Spatial Detector ${detector.data.arrivalTolerance ?? 0}）；${exitOnArrival ? '到达后释放输入并继续后续节点' : '到达只释放输入，闭环持续到手动停止'}`);
+    log('info', `Move Player 持续闭环：${fps} FPS，${spatialReuseShared ? '始终读取共享通道最新实时 Spatial/YOLO 结果，缺失时补截图推理' : '每帧自行截图推理'}；实际停止距离 ${stopDistance}${detector.data.calibration ? detector.data.calibration.unit ?? 'world' : 'px'}（Move Player ${node.data.deadZone ?? 0} / Spatial Detector ${detector.data.arrivalTolerance ?? 0}）；${exitOnArrival ? '到达后释放输入并继续后续节点' : '到达只释放输入，闭环持续到手动停止'}`);
 
     try {
       while (!this.stopped && this.runGeneration === generation) {
@@ -2318,25 +2922,56 @@ export class WorkflowExecutor {
           continue;
         }
         const iterationStartedAt = Date.now();
-        const cap = await this.captureNodeImage(captureNode, { jpeg: true });
         let spatial: SpatialResult | null = null;
-        if (!cap.ok || !cap.frame) {
-          lastError = cap.message ?? '本帧画面获取失败';
-        } else {
-          const detected = await this.detectSpatialFrame(detector, cap.frame, false, true, {
+        let frameReused = false;
+        if (initialSpatialAvailable && initialSpatial) {
+          spatial = initialSpatial.spatial;
+          frameReused = initialSpatial.reusedYolo;
+          if (frameReused) sharedFrameCount += 1;
+          else freshFrameCount += 1;
+          initialSpatialAvailable = false;
+        } else if (spatialReuseShared) {
+          const shared = await this.detectSpatialFrame(
+            detector,
+            null,
+            false,
+            true,
+            undefined,
+            'sharedOnly',
+          );
+          if (shared.status === 'fail') {
+            lastError = shared.message ?? '共享空间检测失败';
+          } else if (shared.spatialReady && shared.spatial) {
+            spatial = shared.spatial;
+            frameReused = true;
+            sharedFrameCount += 1;
+          } else {
+            lastError = shared.message ?? '共享检测结果不完整';
+          }
+        }
+
+        if (!spatial) {
+          const cap = await this.captureNodeImage(captureNode, { jpeg: true });
+          if (!cap.ok || !cap.frame) {
+            lastError = cap.message ?? '本帧画面获取失败';
+          } else {
+            const detected = await this.detectSpatialFrame(detector, cap.frame, false, true, {
             width: cap.width ?? 0,
             height: cap.height ?? 0,
             sourceKind: cap.sourceKind,
             streamSourceId: cap.streamSourceId,
-          });
-          processedFrames += 1;
-          if (detected.status === 'fail') {
-            lastError = detected.message ?? '本帧空间检测失败';
-          } else {
-            spatial = detected.spatialReady ? detected.spatial ?? null : null;
-            if (!spatial) lastError = detected.message ?? '本帧没有完整的 Player/Target 空间关系';
+            }, 'fresh');
+            if (detected.status === 'fail') {
+              lastError = detected.message ?? '本帧空间检测失败';
+            } else {
+              spatial = detected.spatialReady ? detected.spatial ?? null : null;
+              if (spatial) freshFrameCount += 1;
+              if (!spatial) lastError = detected.message ?? '本帧没有完整的 Player/Target 空间关系';
+            }
           }
         }
+        processedFrames += 1;
+        reusedYolo = frameReused;
 
         if (spatial) latestSpatial = spatial;
         const decision = decideContinuousMoveFrame(spatial, {
@@ -2354,7 +2989,7 @@ export class WorkflowExecutor {
         const changedDecision = decision.direction !== previousDirection || decision.reason !== previousReason;
         if (changedDecision || processedFrames === 1 || processedFrames % Math.max(1, Math.round(fps)) === 0) {
           const distanceLabel = spatial ? `distance=${spatial.distance.toFixed(2)}` : 'distance=不可用';
-          log('info', `移动帧 ${processedFrames}：${distanceLabel}，方向=${decision.direction}，${decision.action === 'hold' ? '按住输入' : '释放输入'}，继续监测`);
+          log('info', `移动帧 ${processedFrames}：${distanceLabel}，方向=${decision.direction}，${decision.action === 'hold' ? '按住输入' : '释放输入'}，${frameReused ? '复用共享检测' : '使用补推理结果'}（共享 ${sharedFrameCount} / 补推理 ${freshFrameCount}），继续监测`);
         }
         previousDirection = decision.direction;
         previousReason = decision.reason;
@@ -2584,8 +3219,54 @@ export class WorkflowExecutor {
   }
 
   private async executePulseMovePlayer(node: MovePlayerNode): Promise<NodeRunResult> {
-    const spatial = this.context.lastSpatial;
     const detector = this.resolveSpatialDetectorForMove(node);
+    const spatialReuseShared = node.data.spatialReuseShared !== false;
+    let spatial: SpatialResult | null = null;
+    let spatialSource: 'shared' | 'fresh' | 'none' = 'none';
+
+    if (spatialReuseShared && detector) {
+      const shared = await this.detectSpatialFrame(
+        detector,
+        null,
+        false,
+        true,
+        undefined,
+        'sharedOnly',
+      );
+      if (shared.spatialReady && shared.spatial) {
+        spatial = shared.spatial;
+        spatialSource = 'shared';
+      }
+    }
+    if (!spatial && detector) {
+      const captureNode = {
+        id: `${node.id}-fresh-spatial-cap`,
+        type: 'screenshot',
+        title: `${node.title} Fresh Spatial Frame`,
+        position: node.position,
+        enabled: true,
+        data: {
+          regionMode: 'full',
+          source: detector.data.source ?? 'stream',
+          streamSourceId: detector.data.streamSourceId,
+          windowHint: detector.data.windowHint,
+          windowId: detector.data.windowId,
+          windowApp: detector.data.windowApp,
+        },
+      } as ScreenshotNode;
+      const cap = await this.captureNodeImage(captureNode, { jpeg: true });
+      if (cap.ok && cap.frame) {
+        const fresh = await this.detectSpatialFrame(detector, cap.frame, false, true, {
+          width: cap.width ?? 0,
+          height: cap.height ?? 0,
+          sourceKind: cap.sourceKind,
+          streamSourceId: cap.streamSourceId,
+        }, 'fresh');
+        spatial = fresh.spatialReady ? fresh.spatial ?? null : null;
+        spatialSource = spatial ? 'fresh' : 'none';
+      }
+    }
+
     const stopDistance = resolveContinuousStopDistance(node.data.deadZone, detector?.data.arrivalTolerance);
     if (spatial && spatial.distance <= stopDistance) {
       return { nodeId: node.id, status: 'ok', moveDirection: 'stop', message: `已进入停止距离 ${stopDistance}，不发送输入` };
@@ -2596,7 +3277,14 @@ export class WorkflowExecutor {
     let direction = node.data.direction;
     if (node.data.directionMode === 'auto') {
       if (!spatial) {
-        return { nodeId: node.id, status: 'fail', message: '自动移动需要先执行 Spatial Detector' };
+        return {
+          nodeId: node.id,
+          status: 'fail',
+          message: spatialReuseShared
+            ? '自动移动需要共享 Spatial 结果或先执行 Spatial Detector'
+            : '自动移动的新 Spatial 检测没有获得完整的 Player/Target 结果',
+        reusedYolo: spatialSource === 'shared',
+        };
       }
       direction = directionFromVector(spatial.direction);
     }
@@ -2621,7 +3309,8 @@ export class WorkflowExecutor {
         moveDirection: direction,
         moveVector: applied.vector,
         moveMagnitude: applied.magnitude,
-        message: `单次移动：${direction}`,
+        reusedYolo: spatialSource === 'shared',
+        message: `单次移动：${direction}（${spatialSource === 'shared' ? '复用实时共享检测' : spatialSource === 'fresh' ? '使用新 Spatial 检测' : '无 Spatial 结果'}）`,
       };
     } catch (err) {
       return { nodeId: node.id, status: 'fail', message: err instanceof Error ? err.message : String(err) };
@@ -2636,6 +3325,7 @@ export class WorkflowExecutor {
     modelId: string | undefined,
     numClasses: number | undefined,
     threshold: number,
+    observationKey?: string,
   ): Promise<YoloDetection[]> {
     try {
       await stat(modelPath);
@@ -2657,7 +3347,9 @@ export class WorkflowExecutor {
       numClasses: Math.max(1, Math.round(model?.numClasses ?? numClasses ?? (classNames.length || 2))),
       imageSize: (model?.imageSize as number) ?? 640,
       classNames,
-      confThre: Math.max(1, Math.min(100, threshold)) / 100,
+      // Threshold is supplied per request so different nodes can share one
+      // already-running model process without replacing its session.
+      confThre: 0.01,
       nmsThre: 0.45,
       yoloxPath: await resolveYoloxPath(),
     };
@@ -2667,9 +3359,12 @@ export class WorkflowExecutor {
       this.yoloSession = await YoloInferenceSession.start(config);
       this.yoloSessionKey = sessionKey;
     }
-    const res = await this.yoloSession.detect(frame, 15000);
+    const res = await this.yoloSession.detect(frame, 15000, 1);
     if (!res.ok) throw new Error(res.message ?? 'YOLO 推理失败');
-    return (res.detections ?? []) as YoloDetection[];
+    const detections = (res.detections ?? []) as YoloDetection[];
+    this.recordYoloObservation(observationKey, detections);
+    const wantedThreshold = Math.max(0, Math.min(100, threshold));
+    return detections.filter((item) => item.confidence >= wantedThreshold);
   }
 
   private pickDetection(detections: YoloDetection[], label: string): YoloDetection | null {
@@ -2713,45 +3408,45 @@ export class WorkflowExecutor {
     } catch {
       return { status: 'error', message: '模型文件不存在，可能已被删除' };
     }
-    let classNames: string[] = [];
-    if (model?.datasetId) {
-      const data = await loadDatasetFile(String(model.datasetId));
-      classNames = data.classes.map((cls) => cls.name);
-    }
-    const imagePath = await writeImageToTemp(frame);
-    if (!imagePath) return { status: 'error', message: '无法保存待检测画面' };
     const threshold = Math.max(1, Math.min(100, strategy.threshold ?? 60));
-    const res = await runVisionEngine(
-      'yolo',
-      {
-        imagePath,
-        modelPath,
-        baseModel: (model?.baseModel as string) ?? 'yolox_s',
-        numClasses: (model?.numClasses as number) ?? classNames.length,
-        classNames,
-        imageSize: (model?.imageSize as number) ?? 640,
-        confThre: threshold / 100,
-        nmsThre: 0.45,
-        yoloxPath: await resolveYoloxPath(),
-      },
-      90000,
-    );
-    if (!res.ok) return { status: 'miss', message: res.message ?? 'YOLO 推理失败' };
-
-    const detections = (res.detections ?? []) as Array<{
-      label: string;
-      confidence: number;
-      box: [number, number, number, number];
-    }>;
+    const capture = this.context.lastCapture;
+    const observationKey = capture
+      ? this.createYoloObservationKey(modelPath, {
+        source: capture.source,
+        streamSourceId: capture.streamSourceId,
+        windowHint: capture.windowHint,
+        windowId: capture.windowId,
+      })
+      : undefined;
+    let rawDetections: YoloDetection[] | null = strategy.reuseShared === false
+      ? null
+      : this.reusableYoloDetections(observationKey);
+    const reused = rawDetections !== null;
+    try {
+      if (!rawDetections) {
+        rawDetections = await this.runSpatialYolo(
+          frame,
+          modelPath,
+          strategy.modelId,
+          undefined,
+          1,
+          observationKey,
+        );
+      }
+    } catch (err) {
+      return { status: 'error', message: err instanceof Error ? err.message : String(err) };
+    }
+    const detections = rawDetections.filter((item) => item.confidence >= threshold);
+    const reuseText = reused ? ' · 复用共享结果' : '';
     const labelFilter = strategy.label?.trim();
     const picked = labelFilter
-      ? (detections.find((det) => det.label === labelFilter) ?? detections[0])
+      ? detections.find((det) => det.label === labelFilter)
       : detections[0];
     if (!picked) {
       return {
         status: 'miss',
         detections,
-        message: labelFilter ? `未检测到目标「${labelFilter}」` : '未检测到任何目标',
+        message: `${labelFilter ? `未检测到目标「${labelFilter}」` : '未检测到任何目标'}${reuseText}`,
       };
     }
     const x = picked.box[0] + picked.box[2] / 2;
@@ -2763,7 +3458,7 @@ export class WorkflowExecutor {
       y,
       matchBox: { x: picked.box[0], y: picked.box[1], width: picked.box[2], height: picked.box[3] },
       detections,
-      message: `检测到「${picked.label}」${picked.confidence}%`,
+      message: `检测到「${picked.label}」${picked.confidence}%${reuseText}`,
     };
   }
 

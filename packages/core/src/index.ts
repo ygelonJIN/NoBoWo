@@ -1,4 +1,5 @@
 import type { LegacyFrameRateSetting, StreamFrameRate } from './frameRate';
+import type { YoloConditionEvaluation, YoloConditionMode, YoloConditionTimingMode } from './yoloCondition';
 import type { WorkflowStateValue } from './workflowState';
 
 export type NodeType =
@@ -18,6 +19,7 @@ export type NodeType =
 
 export * from './frameRate';
 export * from './workflowState';
+export * from './yoloCondition';
 export * from './movementControl';
 export * from './workflowGraph';
 export * from './spatialOverlay';
@@ -81,11 +83,39 @@ export type ConditionType =
   | 'spatialNotArrived' // 最近一次 Spatial Detector 尚未到达目标
   | 'custom';           // 自定义表达式
 
-/** If 只判断直接前一个节点是否成功；旧条件字段仅为历史数据兼容，不再参与分支。 */
+/** If 可判断上一节点状态，也可复用常驻 YOLO 的检测历史进行视觉条件判断。 */
+export type IfYoloCondition = {
+  modelId?: string;
+  modelPath?: string;
+  source: 'screen' | 'window' | 'stream';
+  streamSourceId?: string;
+  windowHint?: string;
+  windowId?: number;
+  windowApp?: string;
+  /** 留空表示任意类别。 */
+  label: string;
+  mode: YoloConditionMode;
+  /** confidenceAtLeast 模式使用的置信度阈值，0-100。 */
+  threshold: number;
+  /** 连续满足条件的帧数。 */
+  stableFrames: number;
+  /** stableFrames=连续稳定帧；recentWindow=最近 N 毫秒内是否出现。 */
+  timingMode?: YoloConditionTimingMode;
+  /** recentWindow 模式的时间窗，单位毫秒。 */
+  windowMs?: number;
+  /** 采样间隔；已有 YOLO 检测历史满足条件时不会重复推理。 */
+  sampleIntervalMs: number;
+  /** 本次 If 等待足够证据的最长时间。 */
+  timeoutMs: number;
+};
+
 export type IfNode = WorkflowNodeBase<'if', {
-  /** @deprecated If 现在固定判断直接前一个节点的成功/失败。 */
+  /** 缺省时保持旧工作流行为：判断直接前一个节点的成功/失败。 */
+  conditionMode?: 'previous' | 'yolo';
+  yolo?: IfYoloCondition;
+  /** @deprecated 旧条件字段仅为历史数据兼容，不再参与分支。 */
   conditionType?: ConditionType;
-  /** @deprecated If 现在固定判断直接前一个节点的成功/失败。 */
+  /** @deprecated 旧条件字段仅为历史数据兼容，不再参与分支。 */
   expression: string;
   /** @deprecated */
   targetNodeId?: string;
@@ -187,6 +217,8 @@ export type SpatialDetectorNode = WorkflowNodeBase<'spatialDetector', {
   modelId?: string;
   modelPath?: string;
   numClasses?: number;
+  /** 优先复用同一模型/画面来源的最新共享 YOLO 检测。 */
+  reuseShared?: boolean;
   /** live：节点内部持续获取新画面；frame：只分析前面 Screenshot 留下的当前帧 */
   captureMode: 'live' | 'frame';
   source: 'screen' | 'window' | 'stream';
@@ -237,6 +269,8 @@ export type MovePlayerNode = WorkflowNodeBase<'movePlayer', {
   controlMode?: MovePlayerControlMode;
   /** continuous 自动方向使用的 Spatial Detector；留空时使用流程中最近的一个。 */
   detectorNodeId?: string;
+  /** 优先复用共享 YOLO 检测并计算 Spatial 结果；缺失时可自行截图推理。 */
+  spatialReuseShared?: boolean;
   directionMode: 'auto' | 'manual';
   direction: MoveDirection;
   control: MoveControl;
@@ -341,6 +375,8 @@ export type Ps5HostTestResult = {
 
 export type Ps5RuntimeStatus = {
   version: string;
+  /** PS5 sidecar 遥测协议版本；旧运行时缺失该字段。 */
+  telemetryVersion?: number;
   fake: boolean;
   connected: boolean;
   host?: string | null;
@@ -348,13 +384,25 @@ export type Ps5RuntimeStatus = {
   state: string;
   ready: boolean;
   frameCount: number;
+  /** 最近 2 秒解码帧的实测帧率；没有样本时回退到会话目标帧率。 */
+  fps?: number;
+  /** 最新解码帧从到达到状态读取时的滞后。 */
+  latencyMs?: number;
 };
 
 export type Ps5Frame = {
   frame: string;
+  /** 2=帧到达时间、真实 FPS 和累计帧号均来自解码遥测。 */
+  telemetryVersion?: number;
   width: number;
   height: number;
   timestamp: number;
+  /** 累计解码视频帧数。 */
+  frameCount?: number;
+  /** 最近 2 秒解码帧的实测帧率。 */
+  fps?: number;
+  /** 最新解码帧从到达到画面读取/编码完成的滞后。 */
+  latencyMs?: number;
 };
 
 export type StreamSourceProfile = {
@@ -444,7 +492,16 @@ export type RecognizeNode = WorkflowNodeBase<'recognize', {
   strategies: {
     coords: { enabled: boolean; x: number; y: number };
     template: { enabled: boolean; templateId?: string; templatePath?: string; threshold: number };
-    yolo: { enabled: boolean; modelId?: string; modelPath?: string; classId?: string; label?: string; threshold: number };
+    yolo: {
+      enabled: boolean;
+      modelId?: string;
+      modelPath?: string;
+      classId?: string;
+      label?: string;
+      threshold: number;
+      /** 优先复用同一模型/画面来源的最新共享检测结果。 */
+      reuseShared?: boolean;
+    };
     ocr: { enabled: boolean; text: string; engine?: OcrEngine; lang?: 'auto' | 'eng' | 'chi_sim'; threshold: number };
     cloudApi: { enabled: boolean; profileId?: string; apiIds?: string[]; apiMode?: 'cascade' | 'parallel'; url?: string; apiKey?: string; prompt: string; threshold: number };
   };
@@ -465,11 +522,21 @@ export type LiveVisionNode = WorkflowNodeBase<'liveVision', {
   timeoutMs: number;
   /** 检测方式 */
   detectMode: 'yolo' | 'template' | 'ocr' | 'both' | 'all';
+  /**
+   * untilHit：保持旧行为，阻塞寻找一次命中；
+   * continuous：立即启动一个持续 YOLO 观察源，供 If/Recognize/其他轻量节点共享。
+   */
+  runMode?: 'untilHit' | 'continuous';
   /** 检测到目标后的动作 */
   action: 'returnCoords' | 'click';
+  yoloModelId?: string;
   yoloModelPath?: string;
   yoloLabel?: string;
+  /** 一个 Live Vision 可持续观察多个标签；留空表示发布全部类别。 */
+  yoloLabels?: string[];
   yoloThreshold?: number;
+  /** 优先复用共享观察源已经产生的最新检测结果。 */
+  yoloReuseShared?: boolean;
   templatePath?: string;
   templateThreshold?: number;
   ocrText?: string;
@@ -741,6 +808,11 @@ export type NodeRunResult = {
   loopCount?: number;
   /** if 节点走的分支 */
   branch?: 'true' | 'false';
+  /** if 节点的判断明细；YOLO 模式包含连续帧统计。 */
+  condition?: {
+    mode: 'previous' | 'yolo';
+    yolo?: YoloConditionEvaluation;
+  };
   /** 命中使用的策略 key */
   strategy?: RecognizeStrategyKey;
   /** 调试图路径（仅用于模板等策略的可视化调试） */
@@ -761,6 +833,8 @@ export type NodeRunResult = {
   liveHitRate?: number;
   /** liveVision 运行态指标：最近一次命中 */
   liveLatestHit?: { x: number; y: number; label?: string; confidence?: number };
+  /** liveVision 本次命中的全部目标标签。 */
+  matchedLabels?: string[];
   /** 通用空间检测结果：图像坐标、可选世界坐标、距离、方向和到点状态。 */
   spatial?: SpatialResult;
   /** Player/Target 已分别缓存，但尚未同时计算空间关系。 */
@@ -778,6 +852,8 @@ export type NodeRunResult = {
   moveMagnitude?: number;
   /** Spatial Detector 已将直连 Move Player 纳入同一持续闭环。 */
   moveIntegrated?: boolean;
+  /** 本次 Spatial/Move 结果来自共享 YOLO 检测而非重新推理。 */
+  reusedYolo?: boolean;
 };
 
 export type SpatialResult = {
@@ -1011,6 +1087,14 @@ export type YoloDataset = {
   updatedAt: number;
 };
 
+export type YoloDatasetImportResult = {
+  importedImages: number;
+  importedAnnotations: number;
+  createdClasses: number;
+  skippedImages: number;
+  warnings: string[];
+};
+
 export type YoloModelMetrics = {
   precision: number;
   recall: number;
@@ -1048,6 +1132,8 @@ export type YoloModel = {
 };
 
 export * from './spatialTracking';
+export * from './annotationShortcuts';
+export * from './yoloDatasetImport';
 
 export type YoloAugmentConfig = {
   hsvH: number;
@@ -1297,7 +1383,21 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         ...base,
         type,
         title: 'If',
-        data: { expression: 'true' },
+        data: {
+          conditionMode: 'previous',
+          expression: 'true',
+          yolo: {
+            source: 'stream',
+            label: '',
+            mode: 'present',
+            threshold: 60,
+            stableFrames: 1,
+            timingMode: 'stableFrames',
+            windowMs: 3000,
+            sampleIntervalMs: 150,
+            timeoutMs: 5000,
+          },
+        },
       };
     case 'loop':
       return {
@@ -1332,7 +1432,18 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         ...base,
         type,
         title: 'Live Vision',
-        data: { source: 'stream', fps: 'source', timeoutMs: 5000, detectMode: 'yolo', action: 'returnCoords', yoloThreshold: 60, templateThreshold: 60 },
+        data: {
+          source: 'stream',
+          fps: 'source',
+          timeoutMs: 5000,
+          detectMode: 'yolo',
+          runMode: 'continuous',
+          action: 'returnCoords',
+          yoloLabels: [],
+          yoloThreshold: 60,
+          yoloReuseShared: true,
+          templateThreshold: 60,
+        },
       };
     case 'recognize':
       return {
@@ -1367,6 +1478,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
           targetMode: 'detection',
           targetPolyline: [],
           targetEdge: 'nearest',
+          reuseShared: true,
           threshold: 60,
           playerAnchor: 'boxCenter',
           targetAnchor: 'boxDistance',
@@ -1393,6 +1505,7 @@ export const createDefaultNode = (type: WorkflowNode['type'], index = 1): Workfl
         title: 'Move Player',
         data: {
           controlMode: 'continuous',
+          spatialReuseShared: true,
           directionMode: 'auto',
           direction: 'stop',
           control: 'gamepadAnalog',

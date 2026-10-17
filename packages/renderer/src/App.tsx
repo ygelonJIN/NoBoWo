@@ -3,6 +3,7 @@ import {
   createDefaultNode,
   defaultWorkflowDocument,
   formatFrameRateSetting,
+  syncLoopBeginCountToDown,
   type LoopNode,
   type OcrEngine,
   type RecognizeNode,
@@ -247,7 +248,10 @@ function getNodeSummary(node: WorkflowNode): string {
         ? '全屏截图'
         : '选区截图';
     case 'if':
-      return '判断上一节点成功/失败';
+      if (node.data.conditionMode !== 'yolo') return '判断上一节点成功/失败';
+      return node.data.yolo
+        ? `YOLO · ${node.data.yolo.mode === 'absent' ? '不存在' : node.data.yolo.mode === 'confidenceAtLeast' ? `置信度 ≥ ${node.data.yolo.threshold}%` : '存在'} · ${node.data.yolo.label || '任意类别'} · ${node.data.yolo.timingMode === 'recentWindow' ? `最近 ${Math.round((node.data.yolo.windowMs ?? 3000) / 1000)} 秒` : `连续 ${node.data.yolo.stableFrames || 1} 帧`}`
+        : 'YOLO 条件';
     case 'loop':
       return node.data.mode === 'count'
         ? `循环 ${node.data.count ?? 3} 次`
@@ -268,16 +272,20 @@ function getNodeSummary(node: WorkflowNode): string {
       const keyHint = node.data.keyboardKey?.trim() ? ` → 键盘 ${node.data.keyboardKey.trim()}` : '';
       return `手柄：${node.data.action}${keyHint}${targetHint}`;
     }
-    case 'liveVision':
-      return `实时检测 · ${node.data.detectMode === 'all' ? 'YOLO+模板+OCR' : node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'ocr' ? 'OCR' : node.data.detectMode === 'template' ? '模板匹配' : 'YOLO'} · ${formatFrameRateSetting(node.data.fps)}`;
+    case 'liveVision': {
+      const labels = node.data.yoloLabels?.length
+        ? node.data.yoloLabels.join('、')
+        : node.data.yoloLabel || '全部类别';
+      return `${node.data.runMode === 'continuous' ? '持续共享观察' : '实时检测'} · ${node.data.detectMode === 'all' ? 'YOLO+模板+OCR' : node.data.detectMode === 'both' ? 'YOLO+模板' : node.data.detectMode === 'ocr' ? 'OCR' : node.data.detectMode === 'template' ? '模板匹配' : `YOLO · ${labels}`} · ${formatFrameRateSetting(node.data.fps)}`;
+    }
     case 'spatialDetector':
-      return `空间检测 · ${(node.data.captureMode ?? 'live') === 'live' ? `实时取景（${formatFrameRateSetting(node.data.fps)}）` : '单帧'} · ${node.data.playerLabel || 'player'} → ${(node.data.targetMode ?? 'detection') === 'polyline' ? '三分线折线' : (node.data.targetLabel || 'target')} · ${node.data.calibration ? '世界坐标' : '图像坐标'}`;
+      return `空间检测 · ${(node.data.captureMode ?? 'live') === 'live' ? `实时取景（${formatFrameRateSetting(node.data.fps)}）` : '单帧'} · ${node.data.reuseShared === false ? '新推理' : '实时共享'} · ${node.data.playerLabel || 'player'} → ${(node.data.targetMode ?? 'detection') === 'polyline' ? '三分线折线' : (node.data.targetLabel || 'target')} · ${node.data.calibration ? '世界坐标' : '图像坐标'}`;
     case 'state':
       return node.data.mode === 'branch'
         ? `State 判断 · ${node.data.stateALabel || '状态 A'} / ${node.data.stateBLabel || '状态 B'}`
         : `State ${node.data.switchTo === 'toggle' ? '切换到另一边' : `切换到 · ${node.data.switchTo === 'stateA' ? node.data.stateALabel || '状态 A' : node.data.stateBLabel || '状态 B'}`}`;
     case 'movePlayer':
-      return `移动 · ${(node.data.controlMode ?? 'continuous') === 'continuous' ? `持续移动（停止距离 ${node.data.deadZone ?? 10}，${(node.data.exitOnArrival ?? true) ? '到达后继续下一步' : '直到手动停止'}）` : '单次脉冲'} · ${node.data.directionMode === 'auto' ? '自动方向' : node.data.direction} · ${node.data.control === 'keyboard' ? '键盘' : node.data.control === 'gamepadAnalog' ? 'PS5 模拟摇杆' : '左摇杆方向'}`;
+      return `移动 · ${(node.data.controlMode ?? 'continuous') === 'continuous' ? `持续移动（停止距离 ${node.data.deadZone ?? 10}，${(node.data.exitOnArrival ?? true) ? '到达后继续下一步' : '直到手动停止'}）` : '单次脉冲'} · ${node.data.spatialReuseShared === false ? '新 Spatial 检测' : '实时共享'} · ${node.data.directionMode === 'auto' ? '自动方向' : node.data.direction} · ${node.data.control === 'keyboard' ? '键盘' : node.data.control === 'gamepadAnalog' ? 'PS5 模拟摇杆' : '左摇杆方向'}`;
     case 'recognize':
       return '';
   }
@@ -619,6 +627,7 @@ export function App() {
         position: { x: position.x - NODE_WIDTH / 2, y: position.y - 30 },
       } as WorkflowNode;
       if (type === 'loop') {
+        const createdLoop = created as LoopNode;
         const loopNodes = nodes.filter((item): item is LoopNode => item.type === 'loop');
         const unpairedBegin = loopNodes.find(
           (item) =>
@@ -634,13 +643,23 @@ export function App() {
           nextNode = {
             ...nextNode,
             title: 'Loop Down',
-            data: { ...created.data, role: 'down', pairId: unpairedBegin.data.pairId },
+            data: {
+              ...created.data,
+              role: 'down',
+              pairId: unpairedBegin.data.pairId,
+              count: unpairedBegin.data.count ?? createdLoop.data.count,
+            },
           } as WorkflowNode;
         } else if (unpairedDown) {
           nextNode = {
             ...nextNode,
             title: 'Loop Begin',
-            data: { ...created.data, role: 'begin', pairId: unpairedDown.data.pairId },
+            data: {
+              ...created.data,
+              role: 'begin',
+              pairId: unpairedDown.data.pairId,
+              count: unpairedDown.data.count ?? createdLoop.data.count,
+            },
           } as WorkflowNode;
         } else {
           nextNode = {
@@ -666,8 +685,13 @@ export function App() {
   }, [workflowRunState, nodes.length]);
 
   const updateNode = useCallback((nextNode: WorkflowNode) => {
-    setNodes((current) => current.map((node) => (node.id === nextNode.id ? nextNode : node)));
-  }, []);
+    setNodes((current) => {
+      if (nextNode.type === 'loop' && nextNode.data.role === 'begin' && nextNode.data.mode === 'count') {
+        return syncLoopBeginCountToDown(current, edges, nextNode);
+      }
+      return current.map((node) => (node.id === nextNode.id ? nextNode : node));
+    });
+  }, [edges]);
 
   /** 测试台命中坐标 → 写回当前 recognize 节点的 coords 策略 */
   const applyRecognizeCoords = useCallback(
@@ -880,7 +904,7 @@ export function App() {
       return;
     }
     const executorVersion = await window.workflowAPI.getExecutorVersion?.();
-    if (executorVersion !== 'state-v9') {
+    if (executorVersion !== 'state-v10') {
       setWorkflowRunNotice({
         main: '当前正在使用旧执行器，已阻止运行',
         hint: `检测到 ${executorVersion ?? '未知版本'}，请按 Cmd+Q 完全退出应用后重新启动`,
@@ -890,7 +914,7 @@ export function App() {
     const result = await window.workflowAPI.run({ version: 1, nodes, edges });
     if (!result.started) {
       setWorkflowRunNotice({ main: result.message ?? '工作流启动失败', hint: '已有工作流在执行中，可在控制面板点击「继续」或「停止」' });
-    } else if (result.executorVersion !== 'state-v9') {
+    } else if (result.executorVersion !== 'state-v10') {
       setWorkflowRunNotice({
         main: '当前正在使用旧执行器',
         hint: '请完全退出应用后重新启动；仅点击运行不会重新加载 Electron 主进程',

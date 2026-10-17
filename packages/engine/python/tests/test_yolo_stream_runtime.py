@@ -17,8 +17,8 @@ class YoloStreamRuntimeTests(unittest.TestCase):
     def test_stream_loads_model_once_and_reuses_it_for_multiple_frames(self):
         requests = io.StringIO(
             "\n".join([
-                json.dumps({"id": 1, "frameDataUrl": "data:image/jpeg;base64,YQ=="}),
-                json.dumps({"id": 2, "frameDataUrl": "data:image/jpeg;base64,Yg=="}),
+                json.dumps({"id": 1, "frameDataUrl": "data:image/jpeg;base64,YQ==", "confThre": 0.7}),
+                json.dumps({"id": 2, "frameDataUrl": "data:image/jpeg;base64,Yg==", "confThre": 0.2}),
                 json.dumps({"command": "stop"}),
             ]) + "\n"
         )
@@ -35,7 +35,9 @@ class YoloStreamRuntimeTests(unittest.TestCase):
                 patch.object(
                     vision_runtime,
                     "_detect_yolo_image",
-                    side_effect=lambda _runtime, frame: [{"label": "指示器", "confidence": 80, "box": [frame, 0, 1, 1]}],
+                    side_effect=lambda _runtime, frame, conf_thre=None: [
+                        {"label": "指示器", "confidence": round(conf_thre * 100, 1), "box": [frame, 0, 1, 1]}
+                    ],
                 ) as detect_image, \
                 patch.object(sys, "stdin", requests), \
                 redirect_stdout(output):
@@ -46,6 +48,8 @@ class YoloStreamRuntimeTests(unittest.TestCase):
         self.assertEqual(load_model.call_count, 1)
         self.assertEqual(read_image.call_count, 2)
         self.assertEqual(detect_image.call_count, 2)
+        self.assertEqual(detect_image.call_args_list[0].args[2], 0.7)
+        self.assertEqual(detect_image.call_args_list[1].args[2], 0.2)
         self.assertEqual(events[0]["t"], "ready")
         self.assertEqual([event.get("id") for event in events[1:3]], [1, 2])
         self.assertTrue(all(event["ok"] for event in events[1:3]))

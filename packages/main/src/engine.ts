@@ -205,6 +205,14 @@ export class YoloInferenceSession {
   private onFatal: ((message: string) => void) | null = null;
 
   private attachChild(): void {
+    this.child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
+      // A queued frame or stop message can race with child shutdown. EPIPE is
+      // handled here so it cannot escape as an uncaught stream error.
+      if (err.code !== 'EPIPE' && !this.closed) {
+        this.onFatal?.(`YOLO 常驻推理 stdin 错误：${err.message}`);
+      }
+      this.failPending(new Error(`YOLO 常驻推理管道已关闭：${err.message}`));
+    });
     this.child.stdout?.on('data', (chunk: Buffer | string) => {
       this.stdoutBuffer += String(chunk);
       let newline = this.stdoutBuffer.indexOf('\n');
@@ -253,7 +261,11 @@ export class YoloInferenceSession {
     pending.resolve(event as EngineRunResult);
   }
 
-  async detect(frameDataUrl: string, timeoutMs = 5000): Promise<EngineRunResult> {
+  async detect(
+    frameDataUrl: string,
+    timeoutMs = 5000,
+    confidenceThreshold?: number,
+  ): Promise<EngineRunResult> {
     if (this.closed || !this.child.stdin?.writable) {
       return { ok: false, message: 'YOLO 常驻推理会话已关闭' };
     }
@@ -265,7 +277,16 @@ export class YoloInferenceSession {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
-        this.child.stdin!.write(`${JSON.stringify({ id, frameDataUrl })}\n`);
+        const request: Record<string, unknown> = { id, frameDataUrl };
+        if (confidenceThreshold !== undefined) {
+          request.confThre = Math.max(0.01, Math.min(1, confidenceThreshold / 100));
+        }
+        this.child.stdin!.write(`${JSON.stringify(request)}\n`, (err) => {
+          if (!err) return;
+          clearTimeout(timer);
+          this.pending.delete(id);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        });
       } catch (err) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -306,7 +327,10 @@ export class YoloInferenceSession {
         finish();
       });
       try {
-        this.child.stdin.end(`${JSON.stringify({ command: 'stop' })}\n`);
+        this.child.stdin.end(`${JSON.stringify({ command: 'stop' })}\n`, () => {
+          // The close event remains authoritative; this callback absorbs a
+          // concurrent shutdown write error without leaving it unhandled.
+        });
       } catch {
         this.child.kill();
       }

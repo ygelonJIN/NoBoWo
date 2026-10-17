@@ -11,6 +11,7 @@ import type {
 import { CustomSelect } from './CustomSelect';
 import { FrameRateSelect } from './FrameRateSelect';
 import { getPs5ViewerMode, setPs5ViewerMode, usePs5ViewerMode } from './ps5ViewerStore';
+import { StreamStatsOverlay } from './StreamStatsOverlay';
 import { StreamVisionOverlay } from './StreamVisionOverlay';
 
 type Props = {
@@ -199,6 +200,9 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
     }
     let stopped = false;
     const token = ++previewToken.current;
+    const targetFps = Math.max(1, Math.min(60, status?.fps || 30));
+    const frameInterval = Math.max(16, Math.round(1000 / targetFps));
+    let timer = 0;
     const tick = async () => {
       if (stopped || token !== previewToken.current || !window.ps5API) return;
       try {
@@ -207,14 +211,16 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
       } catch {
         // keep polling; connection state is refreshed separately
       }
+      if (!stopped && token === previewToken.current) {
+        timer = window.setTimeout(() => void tick(), frameInterval);
+      }
     };
     void tick();
-    const timer = window.setInterval(() => void tick(), 250);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
-  }, [status?.connected]);
+  }, [status?.connected, status?.fps]);
 
   const loginAndLookup = async () => {
     const result = await run('PSN 登录查询', () => window.ps5API!.loginAndLookup());
@@ -363,6 +369,7 @@ export function Ps5DirectPanel({ profile, onChange }: Props) {
       {preview ? (
         <>
           <img src={preview.frame} alt="PS5 串流画面" />
+          <StreamStatsOverlay frame={preview} />
           <StreamVisionOverlay frameWidth={preview.width} frameHeight={preview.height} />
         </>
       ) : <span>{status?.connected ? '正在读取 PS5 协议画面…' : '连接后显示内置视频画面'}</span>}

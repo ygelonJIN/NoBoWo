@@ -55,6 +55,7 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [confirmImageDelete, setConfirmImageDelete] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -89,6 +90,7 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
       if (!selectedId || files.length === 0) return;
       setBusy(true);
       setError(null);
+      setNotice(null);
       try {
         const payload: { name: string; dataUrl: string; width: number; height: number }[] = [];
         for (const file of files) {
@@ -120,6 +122,69 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
     },
     [selectedId, refresh, onChanged],
   );
+
+  const importDatasetPaths = useCallback(
+    async (sourcePaths: string[]) => {
+      if (!selectedId || sourcePaths.length === 0 || !window.yoloAPI) return;
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await window.yoloAPI.importDataset(selectedId, sourcePaths);
+        setNotice(
+          `已导入 ${result.importedImages} 张图片、${result.importedAnnotations} 个标注框、${result.createdClasses} 个新类别`
+          + (result.skippedImages > 0 ? `；跳过 ${result.skippedImages} 张重复或缺失图片` : '')
+          + (result.warnings.length > 0 ? `。${result.warnings.join('；')}` : '。'),
+        );
+        await refresh();
+        onChanged();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [selectedId, refresh, onChanged],
+  );
+
+  const importDroppedFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return;
+      const datasetLike = files.some((file) => {
+        const name = file.name.toLowerCase();
+        return !file.type.startsWith('image/')
+          || name === 'dataset.json'
+          || name === 'data.yaml'
+          || name === 'dataset.yaml'
+          || name.endsWith('.txt');
+      });
+      if (!datasetLike) {
+        await importFiles(files);
+        return;
+      }
+      const sourcePaths = files
+        .map((file) => {
+          try {
+            return window.yoloAPI?.getPathForFile(file) ?? '';
+          } catch {
+            return '';
+          }
+        })
+        .filter(Boolean);
+      if (sourcePaths.length === 0) {
+        setError('无法读取拖入的数据集路径，请使用“导入 YOLO 格式”选择数据集目录。');
+        return;
+      }
+      await importDatasetPaths(sourcePaths);
+    },
+    [importDatasetPaths, importFiles],
+  );
+
+  const pickDatasetImport = async () => {
+    if (!selectedId || !window.yoloAPI || busy) return;
+    const sourcePath = await window.yoloAPI.pickDatasetImportPath();
+    if (sourcePath) await importDatasetPaths([sourcePath]);
+  };
 
   const createDataset = async () => {
     const name = newName.trim();
@@ -177,7 +242,10 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
   const exportDataset = async () => {
     if (!selectedId || !window.yoloAPI) return;
     try {
-      await window.yoloAPI.exportDataset(selectedId);
+      setError(null);
+      setNotice(null);
+      const result = await window.yoloAPI.exportDataset(selectedId);
+      setNotice(`导出完成：${result.path}。下一步请把整个导出文件夹拖回上方数据集区域，或点击“导入 YOLO 格式”恢复图片、类别和标注。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -280,7 +348,7 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
               onDrop={(e) => {
                 e.preventDefault();
                 setDragOver(false);
-                if (!busy) void importFiles(Array.from(e.dataTransfer.files));
+                if (!busy) void importDroppedFiles(Array.from(e.dataTransfer.files));
               }}
               onClick={() => !busy && fileRef.current?.click()}
             >
@@ -297,10 +365,10 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
               />
               <div className="yolo-dataset__drop-icon">⬆</div>
               <div className="yolo-dataset__drop-text">
-                {busy ? '正在导入图片…' : '拖拽图片到这里，或点击选择文件（支持多选）'}
+                {busy ? '正在导入数据集…' : '拖拽 YOLO 数据集文件夹到这里，或点击选择图片'}
               </div>
               <div className="yolo-dataset__drop-sub">
-                {selected.name} · 建议使用真实应用截图，每个目标至少 10~50 张
+                {selected.name} · 支持 YOLO 导出目录、dataset.json，以及包含 images + labels + data.yaml 的数据集
               </div>
             </div>
           </div>
@@ -339,7 +407,7 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
               onDrop={(e) => {
                 e.preventDefault();
                 setDragOver(false);
-                if (!busy) void importFiles(Array.from(e.dataTransfer.files));
+                if (!busy) void importDroppedFiles(Array.from(e.dataTransfer.files));
               }}
               onClick={() => !busy && fileRef.current?.click()}
             >
@@ -356,14 +424,15 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
               />
               <div className="yolo-dataset__drop-icon">⬆</div>
               <div className="yolo-dataset__drop-text">
-                {busy ? '正在导入图片…' : '拖拽图片到这里，或点击选择文件（支持多选）'}
+                {busy ? '正在导入数据集…' : '拖拽 YOLO 数据集文件夹或图片到这里'}
               </div>
               <div className="yolo-dataset__drop-sub">
-                {selected.name} · 建议使用真实应用截图，每个目标至少 10~50 张
+                {selected.name} · 导入文件夹时会同时恢复类别与标注，导入普通图片时按未标注图片处理
               </div>
             </div>
 
             {error && <div className="yolo-annotate__error">{error}</div>}
+            {notice && <div className="yolo-annotate__notice">{notice}</div>}
 
             <div className="yolo-dataset__grid-head">
               <span className="yolo-panel-title">
@@ -371,6 +440,9 @@ function DatasetTab({ datasets, selectedId, onSelect, onChanged, apiAvailable }:
                 <span className="yolo-panel-title__sub">{images.length} 张</span>
               </span>
               <div className="yolo-dataset__grid-actions">
+                <button onClick={() => void pickDatasetImport()} disabled={!apiAvailable || busy} title="选择 YOLO 导出目录，导入图片、类别和标注">
+                  导入 YOLO 格式
+                </button>
                 <button onClick={() => void exportDataset()} disabled={images.length === 0} title="导出 YOLO 格式（images + labels + data.yaml）到本地文件夹">
                   导出 YOLO 格式
                 </button>

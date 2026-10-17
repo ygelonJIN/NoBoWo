@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   OcrEngine,
   Ps5AccountProfile,
@@ -17,6 +17,7 @@ import type {
   WorkflowRunHandle,
   WorkflowRunSnapshot,
   YoloAnnotation,
+  YoloDatasetImportResult,
   YoloTrainConfig,
   YoloTrainingEvent,
   YoloTrainingState,
@@ -166,6 +167,10 @@ contextBridge.exposeInMainWorld('yoloAPI', {
   createDataset: (payload: { name: string; notes?: string }) => ipcRenderer.invoke('yolo:createDataset', payload),
   updateDataset: (id: string, patch: { name?: string; notes?: string }) => ipcRenderer.invoke('yolo:updateDataset', id, patch),
   removeDataset: (id: string) => ipcRenderer.invoke('yolo:removeDataset', id),
+  pickDatasetImportPath: (): Promise<string | null> => ipcRenderer.invoke('yolo:pickDatasetImportPath'),
+  importDataset: (datasetId: string, sourcePaths: string[]): Promise<YoloDatasetImportResult> =>
+    ipcRenderer.invoke('yolo:importDataset', datasetId, sourcePaths),
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   importImages: (
     datasetId: string,
     files: { name: string; dataUrl: string; width: number; height: number }[],

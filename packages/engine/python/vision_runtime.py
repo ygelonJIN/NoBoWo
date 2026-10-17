@@ -571,13 +571,13 @@ def _read_yolo_image(runtime, request):
     return origin
 
 
-def _detect_yolo_image(runtime, origin):
+def _detect_yolo_image(runtime, origin, conf_thre=None):
     cv2 = runtime["cv2"]
     torch = runtime["torch"]
     preproc = runtime["preproc"]
     postprocess = runtime["postprocess"]
     imgsz = runtime["imgsz"]
-    conf_thre = runtime["conf_thre"]
+    conf_thre = runtime["conf_thre"] if conf_thre is None else max(0.01, min(1.0, float(conf_thre)))
     nms_thre = runtime["nms_thre"]
     num_classes = runtime["num_classes"]
     class_names = runtime["class_names"]
@@ -668,7 +668,12 @@ def run_yolo_stream(cfg):
         request_id = request.get("id")
         try:
             origin = _read_yolo_image(runtime, request)
-            detections = _detect_yolo_image(runtime, origin)
+            request_conf_thre = request.get("confThre")
+            detections = _detect_yolo_image(
+                runtime,
+                origin,
+                None if request_conf_thre is None else float(request_conf_thre),
+            )
             emit(
                 t="done",
                 command="yolo-stream",

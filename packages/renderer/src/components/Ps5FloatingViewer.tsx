@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { Ps5Frame, Ps5RuntimeStatus } from '@nobowo/core';
 import { setPs5ViewerMode, usePs5ViewerMode } from './ps5ViewerStore';
+import { StreamStatsOverlay } from './StreamStatsOverlay';
 import { StreamVisionOverlay } from './StreamVisionOverlay';
 
 const BUTTON_ACTIONS = [
@@ -95,6 +96,9 @@ export function Ps5FloatingViewer() {
     }
     let stopped = false;
     const token = ++previewToken.current;
+    const targetFps = Math.max(1, Math.min(60, status?.fps || 30));
+    const frameInterval = Math.max(16, Math.round(1000 / targetFps));
+    let timer = 0;
     const tick = async () => {
       if (stopped || token !== previewToken.current || !window.ps5API) return;
       try {
@@ -103,14 +107,16 @@ export function Ps5FloatingViewer() {
       } catch {
         // keep polling while the session is connected
       }
+      if (!stopped && token === previewToken.current) {
+        timer = window.setTimeout(() => void tick(), frameInterval);
+      }
     };
     void tick();
-    const timer = window.setInterval(() => void tick(), 250);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
-  }, [mode, status?.connected]);
+  }, [mode, status?.connected, status?.fps]);
 
   useEffect(() => {
     if (mode !== 'pip') return;
@@ -192,6 +198,7 @@ export function Ps5FloatingViewer() {
       {preview ? (
         <>
           <img src={preview.frame} alt="PS5 串流画面" />
+          <StreamStatsOverlay frame={preview} />
           <StreamVisionOverlay frameWidth={preview.width} frameHeight={preview.height} />
         </>
       ) : <span>{status?.connected ? '正在读取 PS5 协议画面…' : '连接后显示内置视频画面'}</span>}

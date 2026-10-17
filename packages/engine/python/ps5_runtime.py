@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import hashlib
 import inspect
 import io
@@ -33,6 +34,7 @@ if _VENDOR_DIR.exists():
 
 
 APP_VERSION = "1.0.0"
+TELEMETRY_VERSION = 2
 DEFAULT_RESOLUTION = "720p"
 DEFAULT_FPS = 60
 DEFAULT_QUALITY = "high"
@@ -66,6 +68,59 @@ def _friendly_session_error(error: Any) -> str:
 
 def _now() -> int:
     return int(time.time() * 1000)
+
+
+class VideoTelemetry:
+    """Rolling decoded-frame telemetry for the built-in stream OSD."""
+
+    def __init__(self, window_seconds: float = 2.0):
+        self.window_seconds = max(0.25, float(window_seconds))
+        self._frame_times: deque = deque(maxlen=4096)
+        self._frame_count = 0
+        self._last_at: Optional[float] = None
+        self._last_wall_ms: Optional[int] = None
+        self._width = 0
+        self._height = 0
+
+    def reset(self) -> None:
+        self._frame_times.clear()
+        self._frame_count = 0
+        self._last_at = None
+        self._last_wall_ms = None
+        self._width = 0
+        self._height = 0
+
+    def record(self, at: float, width: int, height: int, wall_ms: Optional[int] = None) -> None:
+        self._frame_times.append(float(at))
+        self._frame_count += 1
+        self._last_at = float(at)
+        self._last_wall_ms = int(wall_ms if wall_ms is not None else _now())
+        self._width = max(0, int(width or 0))
+        self._height = max(0, int(height or 0))
+
+    def snapshot(self, now: Optional[float] = None) -> Dict[str, Any]:
+        current = float(time.monotonic() if now is None else now)
+        cutoff = current - self.window_seconds
+        while self._frame_times and self._frame_times[0] < cutoff:
+            self._frame_times.popleft()
+
+        fps = 0.0
+        if len(self._frame_times) >= 2:
+            elapsed = self._frame_times[-1] - self._frame_times[0]
+            if elapsed > 0:
+                fps = (len(self._frame_times) - 1) / elapsed
+
+        latency_ms = 0
+        if self._last_at is not None:
+            latency_ms = max(0, int(round((current - self._last_at) * 1000)))
+        return {
+            "frameCount": self._frame_count,
+            "fps": round(fps, 1),
+            "latencyMs": latency_ms,
+            "timestamp": self._last_wall_ms if self._last_wall_ms is not None else _now(),
+            "width": self._width,
+            "height": self._height,
+        }
 
 
 def _json_safe(value: Any) -> Any:
@@ -359,6 +414,8 @@ class PyRemotePlayBackend:
         self._thread = None
         self._connected_host = None
         self._connected_account = None
+        self._video_telemetry = VideoTelemetry()
+        self._target_fps = DEFAULT_FPS
 
     def _modules(self):
         try:
@@ -398,6 +455,26 @@ class PyRemotePlayBackend:
             "macAddress": status.get("host-id"),
             "systemVersion": status.get("system-version"),
         }
+
+    def _instrument_receiver(self, receiver: Any) -> Any:
+        original_handle_video = getattr(receiver, "handle_video", None)
+        if not callable(original_handle_video):
+            return receiver
+
+        def tracked_handle_video(frame: Any) -> Any:
+            self._video_telemetry.record(
+                time.monotonic(),
+                getattr(frame, "width", 0),
+                getattr(frame, "height", 0),
+                _now(),
+            )
+            return original_handle_video(frame)
+
+        try:
+            setattr(receiver, "handle_video", tracked_handle_video)
+        except Exception:
+            return receiver
+        return receiver
 
     def discover(self, timeout: float = 2.5) -> List[Dict[str, Any]]:
         modules = self._modules()
@@ -471,7 +548,10 @@ class PyRemotePlayBackend:
                 },
             }
             profile = modules["UserProfile"](account["name"], profile_data)
+            self._video_telemetry.reset()
+            self._target_fps = int(fps or DEFAULT_FPS)
             receiver = modules["QueueReceiver"](max_frames=4, max_video_frames=2, max_audio_frames=0)
+            receiver = self._instrument_receiver(receiver)
             loop = asyncio.new_event_loop()
             session = modules["Session"](
                 host,
@@ -584,13 +664,16 @@ class PyRemotePlayBackend:
     def status(self) -> Dict[str, Any]:
         session = self._session
         connected = bool(session and session.is_running and not session.is_stopped)
+        telemetry = self._video_telemetry.snapshot()
         return {
             "connected": connected,
             "host": self._connected_host,
             "accountId": (self._connected_account or {}).get("accountId"),
             "state": str(getattr(session, "state", "STOP" if not session else "RUNNING")),
             "ready": bool(getattr(session, "is_ready", connected)),
-            "frameCount": len(getattr(self._receiver, "video_frames", []) or []),
+            "frameCount": int(telemetry["frameCount"]),
+            "fps": float(telemetry["fps"] or self._target_fps),
+            "latencyMs": int(telemetry["latencyMs"]),
         }
 
     def get_frame(self) -> Dict[str, Any]:
@@ -616,11 +699,15 @@ class PyRemotePlayBackend:
                 image_bytes = buffer.getvalue()
             except Exception as exc:
                 raise RuntimeError2(f"视频帧编码失败：{exc}") from exc
+        telemetry = self._video_telemetry.snapshot()
         return {
             "frame": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"),
             "width": int(getattr(frame, "width", 0) or 0),
             "height": int(getattr(frame, "height", 0) or 0),
-            "timestamp": _now(),
+            "timestamp": int(telemetry["timestamp"]),
+            "frameCount": int(telemetry["frameCount"]),
+            "fps": float(telemetry["fps"] or self._target_fps),
+            "latencyMs": int(telemetry["latencyMs"]),
         }
 
     def send_key(self, key: str, down: bool) -> Dict[str, Any]:
@@ -745,6 +832,8 @@ class FakeBackend:
         self.host = None
         self.account = None
         self.frame_count = 0
+        self.target_fps = DEFAULT_FPS
+        self.video_telemetry = VideoTelemetry()
         self.controller_buttons: List[Dict[str, Any]] = []
 
     def discover(self, timeout: float = 2.5):
@@ -771,6 +860,8 @@ class FakeBackend:
         self.store.get_registration(host, self.account["accountId"])
         self.connected = True
         self.host = host
+        self.target_fps = int(fps or DEFAULT_FPS)
+        self.video_telemetry.reset()
         return self.status()
 
     def disconnect(self):
@@ -780,13 +871,33 @@ class FakeBackend:
         return {"connected": False}
 
     def status(self):
-        return {"connected": self.connected, "host": self.host, "accountId": (self.account or {}).get("accountId"), "state": "RUNNING" if self.connected else "STOP", "ready": self.connected, "frameCount": self.frame_count}
+        telemetry = self.video_telemetry.snapshot()
+        return {
+            "connected": self.connected,
+            "host": self.host,
+            "accountId": (self.account or {}).get("accountId"),
+            "state": "RUNNING" if self.connected else "STOP",
+            "ready": self.connected,
+            "frameCount": self.frame_count,
+            "fps": float(telemetry["fps"] or self.target_fps),
+            "latencyMs": int(telemetry["latencyMs"]),
+        }
 
     def get_frame(self):
         if not self.connected:
             raise RuntimeError2("PS5 尚未连接")
         self.frame_count += 1
-        return {"frame": "data:image/png;base64," + base64.b64encode(_fake_png()).decode("ascii"), "width": 640, "height": 360, "timestamp": _now()}
+        self.video_telemetry.record(time.monotonic(), 640, 360, _now())
+        telemetry = self.video_telemetry.snapshot()
+        return {
+            "frame": "data:image/png;base64," + base64.b64encode(_fake_png()).decode("ascii"),
+            "width": 640,
+            "height": 360,
+            "timestamp": int(telemetry["timestamp"]),
+            "frameCount": self.frame_count,
+            "fps": float(telemetry["fps"] or self.target_fps),
+            "latencyMs": int(telemetry["latencyMs"]),
+        }
 
     def send_key(self, key: str, down: bool):
         if not self.connected:
@@ -837,7 +948,12 @@ class RuntimeService:
 
     def dispatch(self, method: str, params: Dict[str, Any]) -> Any:
         if method == "status":
-            return {"version": APP_VERSION, "fake": isinstance(self.backend, FakeBackend), **self.backend.status()}
+            return {
+                "version": APP_VERSION,
+                "telemetryVersion": TELEMETRY_VERSION,
+                "fake": isinstance(self.backend, FakeBackend),
+                **self.backend.status(),
+            }
         if method == "discover":
             return {"devices": self.backend.discover(float(params.get("timeout", 2.5)))}
         if method == "getPsnLoginUrl":
@@ -874,7 +990,9 @@ class RuntimeService:
         if method == "disconnect":
             return self.backend.disconnect()
         if method == "getFrame":
-            return self.backend.get_frame()
+            frame = self.backend.get_frame()
+            frame.setdefault("telemetryVersion", TELEMETRY_VERSION)
+            return frame
         if method == "sendKey":
             return self.backend.send_key(str(params.get("key") or ""), bool(params.get("down", True)))
         if method == "sendButton":

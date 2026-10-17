@@ -11,6 +11,7 @@ import {
   isUntilBreakLoop,
   runParallelWorkflowBranches,
   resolveLoopPair,
+  syncLoopBeginCountToDown,
 } from '../dist/workflowGraph.js';
 
 const loop = (id, role, pairId) => ({
@@ -115,6 +116,34 @@ test('feedback ports pair nested loops without crossing loop boundaries', () => 
 test('pairId still pairs legacy loops without explicit feedback ports', () => {
   const nodes = [loop('begin', 'begin', 'legacy-pair'), loop('down', 'down', 'legacy-pair')];
   assert.deepEqual(resolveLoopPair(nodes, [], nodes[0]), { begin: nodes[0], down: nodes[1] });
+});
+
+test('Loop Begin count updates only its corresponding Loop Down', () => {
+  const outerBegin = loop('outer-begin', 'begin', 'outer-pair');
+  const outerDown = loop('outer-down', 'down', 'outer-pair');
+  const innerBegin = loop('inner-begin', 'begin', 'inner-pair');
+  const innerDown = loop('inner-down', 'down', 'inner-pair');
+  const nodes = [outerBegin, outerDown, innerBegin, innerDown];
+  const updatedInnerBegin = {
+    ...innerBegin,
+    data: { ...innerBegin.data, count: 7 },
+  };
+
+  const next = syncLoopBeginCountToDown(nodes, [], updatedInnerBegin);
+  assert.equal(next.find((node) => node.id === 'inner-begin').data.count, 7);
+  assert.equal(next.find((node) => node.id === 'inner-down').data.count, 7);
+  assert.equal(next.find((node) => node.id === 'outer-begin').data.count, 3);
+  assert.equal(next.find((node) => node.id === 'outer-down').data.count, 3);
+});
+
+test('Loop Begin count follows explicit feedback-edge pairing', () => {
+  const begin = { ...loop('begin', 'begin', undefined), data: { ...loop('begin', 'begin', undefined).data, pairId: undefined } };
+  const down = { ...loop('down', 'down', undefined), data: { ...loop('down', 'down', undefined).data, pairId: undefined } };
+  const edges = [{ id: 'again', source: 'down', sourcePort: 'again', target: 'begin', targetPort: 'again' }];
+  const updatedBegin = { ...begin, data: { ...begin.data, count: 12 } };
+
+  const next = syncLoopBeginCountToDown([begin, down], edges, updatedBegin);
+  assert.equal(next.find((node) => node.id === 'down').data.count, 12);
 });
 
 test('If routes by the directly previous node result', () => {

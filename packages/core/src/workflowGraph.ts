@@ -46,7 +46,7 @@ export function findWorkflowEdgeByTarget(
   return edges.find((edge) => edge.target === nodeId && targetPortOf(edge) === port);
 }
 
-/** If 只判断直接前一个节点的最终状态：仅 ok 走 True，其余状态都走 False。 */
+/** If 的兼容模式判断直接前一个节点的最终状态：仅 ok 走 True，其余状态都走 False。 */
 export function ifBranchForPreviousStatus(status: NodeRunStatus | undefined): 'true' | 'false' {
   return status === 'ok' ? 'true' : 'false';
 }
@@ -169,4 +169,37 @@ export function resolveLoopPair(
   }
 
   return null;
+}
+
+/** Loop Begin 的次数修改后，只同步到 resolveLoopPair 确认的对应 Loop Down。 */
+export function syncLoopBeginCountToDown(
+  nodes: WorkflowNode[],
+  edges: WorkflowEdge[],
+  updatedBegin: LoopNode,
+): WorkflowNode[] {
+  const withUpdatedBegin = nodes.map((candidate) =>
+    candidate.id === updatedBegin.id ? updatedBegin : candidate,
+  );
+  if (
+    updatedBegin.type !== 'loop'
+    || updatedBegin.data.role !== 'begin'
+    || updatedBegin.data.mode !== 'count'
+    || !Number.isFinite(updatedBegin.data.count)
+  ) {
+    return withUpdatedBegin;
+  }
+
+  const pair = resolveLoopPair(nodes, edges, updatedBegin);
+  if (!pair) return withUpdatedBegin;
+  return withUpdatedBegin.map((candidate) =>
+    candidate.id === pair.down.id && candidate.type === 'loop'
+      ? {
+        ...candidate,
+        data: {
+          ...candidate.data,
+          count: updatedBegin.data.count,
+        },
+      }
+      : candidate,
+  );
 }

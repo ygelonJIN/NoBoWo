@@ -126,7 +126,10 @@ function getNodeLabel(node: WorkflowNode): string {
     case 'screenshot':
       return node.data.regionMode === 'full' ? '全屏截图' : '选区截图';
     case 'if':
-      return '判断上一节点成功/失败';
+      if (node.data.conditionMode !== 'yolo') return '判断上一节点成功/失败';
+      return node.data.yolo
+        ? `YOLO ${node.data.yolo.mode === 'absent' ? '不存在' : node.data.yolo.mode === 'confidenceAtLeast' ? `置信度 ≥ ${node.data.yolo.threshold}%` : '存在'} · ${node.data.yolo.label || '任意类别'}`
+        : 'YOLO 条件';
     case 'loop':
       return node.data.mode === 'count'
         ? `循环 ${node.data.count ?? 3} 次`

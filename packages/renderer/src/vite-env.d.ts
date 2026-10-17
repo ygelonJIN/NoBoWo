@@ -29,6 +29,7 @@ import type {
   WorkflowRunSnapshot,
   YoloAnnotation,
   YoloDataset,
+  YoloDatasetImportResult,
   YoloEnvInfo,
   YoloImage,
   YoloModel,
@@ -126,6 +127,9 @@ declare global {
       createDataset: (payload: { name: string; notes?: string }) => Promise<YoloDataset>;
       updateDataset: (id: string, patch: { name?: string; notes?: string }) => Promise<YoloDataset>;
       removeDataset: (id: string) => Promise<void>;
+      pickDatasetImportPath: () => Promise<string | null>;
+      importDataset: (datasetId: string, sourcePaths: string[]) => Promise<YoloDatasetImportResult>;
+      getPathForFile: (file: File) => string;
       importImages: (
         datasetId: string,
         files: { name: string; dataUrl: string; width: number; height: number }[],
